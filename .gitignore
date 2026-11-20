@@ -1,0 +1,9 @@
+build/
+dist/
+DerivedData/
+*.xcuserdata
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+.DS_Store
+vendor/
+__pycache__/
