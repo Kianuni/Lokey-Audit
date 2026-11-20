@@ -3,6 +3,145 @@ import SQLite3
 
 private let SQLITE_TRANSIENT_DESTRUCTOR = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+/// Complete offline backup payload bundling SQLite personal lexicon memory (`user_phrases`, `user_bigrams`, `user_unigrams`)
+/// together with adaptive 26-key `LokeyTouchCalibration` covariance state.
+public struct LokeyPersonalBackup: Codable, Equatable, Sendable {
+    public static let currentFormat = "lokey-personal-backup-v1"
+
+    public struct PhraseRecord: Codable, Equatable, Sendable {
+        public let surface: String
+        public let compactPinyin: String
+        public let spacedPinyin: String
+        public let jianpin: String
+        public let useCount: Int
+        public let isCustom: Bool
+        public let lastUsed: Int64
+        public let skipCount: Int
+
+        public init(
+            surface: String,
+            compactPinyin: String,
+            spacedPinyin: String,
+            jianpin: String,
+            useCount: Int,
+            isCustom: Bool,
+            lastUsed: Int64,
+            skipCount: Int
+        ) {
+            self.surface = surface
+            self.compactPinyin = compactPinyin
+            self.spacedPinyin = spacedPinyin
+            self.jianpin = jianpin
+            self.useCount = useCount
+            self.isCustom = isCustom
+            self.lastUsed = lastUsed
+            self.skipCount = skipCount
+        }
+    }
+
+    public struct BigramRecord: Codable, Equatable, Sendable {
+        public let prevSurface: String
+        public let nextSurface: String
+        public let useCount: Int
+        public let lastUsed: Int64
+
+        public init(prevSurface: String, nextSurface: String, useCount: Int, lastUsed: Int64) {
+            self.prevSurface = prevSurface
+            self.nextSurface = nextSurface
+            self.useCount = useCount
+            self.lastUsed = lastUsed
+        }
+    }
+
+    public struct UnigramRecord: Codable, Equatable, Sendable {
+        public let surface: String
+        public let compactPinyin: String
+        public let useCount: Int
+        public let lastUsed: Int64
+
+        public init(surface: String, compactPinyin: String, useCount: Int, lastUsed: Int64) {
+            self.surface = surface
+            self.compactPinyin = compactPinyin
+            self.useCount = useCount
+            self.lastUsed = lastUsed
+        }
+    }
+
+    public let format: String
+    public let exportedAtISO8601: String
+    public let appVersion: String
+    public let touchCalibration: LokeyTouchCalibration?
+    public let phrases: [PhraseRecord]
+    public let bigrams: [BigramRecord]
+    public let unigrams: [UnigramRecord]
+
+    public init(
+        format: String = LokeyPersonalBackup.currentFormat,
+        exportedAtISO8601: String,
+        appVersion: String,
+        touchCalibration: LokeyTouchCalibration?,
+        phrases: [PhraseRecord],
+        bigrams: [BigramRecord],
+        unigrams: [UnigramRecord]
+    ) {
+        self.format = format
+        self.exportedAtISO8601 = exportedAtISO8601
+        self.appVersion = appVersion
+        self.touchCalibration = touchCalibration
+        self.phrases = phrases
+        self.bigrams = bigrams
+        self.unigrams = unigrams
+    }
+
+    /// Decodes either a full `LokeyPersonalBackup` JSON file or a standalone `LokeyTouchCalibration` JSON profile.
+    public static func decodeAutoDetecting(from data: Data) throws -> LokeyPersonalBackup {
+        if let rawObj = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if rawObj["format"] is String || rawObj["phrases"] is [Any] || rawObj["bigrams"] is [Any] || rawObj["unigrams"] is [Any] {
+                return try JSONDecoder().decode(LokeyPersonalBackup.self, from: data)
+            }
+            if rawObj["perKey"] is [String: Any] {
+                let cal = try JSONDecoder().decode(LokeyTouchCalibration.self, from: data)
+                return LokeyPersonalBackup(
+                    format: currentFormat,
+                    exportedAtISO8601: ISO8601DateFormatter().string(from: Date()),
+                    appVersion: "0.8.1",
+                    touchCalibration: cal,
+                    phrases: [],
+                    bigrams: [],
+                    unigrams: []
+                )
+            }
+        }
+        throw NSError(
+            domain: "com.kianuni.lokey.backup",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "无法识别个人备份或触控热区 JSON 格式。"]
+        )
+    }
+}
+
+public struct PersonalBackupRestoreSummary: Sendable, Equatable {
+    public let phrasesApplied: Int
+    public let bigramsApplied: Int
+    public let unigramsApplied: Int
+    public let calibratedKeys: Int
+    public let totalCommittedTaps: Int
+
+    public init(
+        phrasesApplied: Int,
+        bigramsApplied: Int,
+        unigramsApplied: Int,
+        calibratedKeys: Int,
+        totalCommittedTaps: Int
+    ) {
+        self.phrasesApplied = phrasesApplied
+        self.bigramsApplied = bigramsApplied
+        self.unigramsApplied = unigramsApplied
+        self.calibratedKeys = calibratedKeys
+        self.totalCommittedTaps = totalCommittedTaps
+    }
+}
+
 /// Persistent, pure-offline user phrase & dynamic frequency database backed by native SQLite3 (WAL mode),
 /// paired with a write-through in-memory index so Viterbi lattice lookups run in O(1) (~0.001 ms) with zero I/O stalls.
 /// Lives in the shared `App Group` container (`group.com.kianuni.lokey`) so both `Lokey` and `LokeyKeyboard`
@@ -1455,5 +1594,411 @@ public final class UserLexiconStore: @unchecked Sendable {
                 LokeyIPC.postLexiconChanged()
             }
         }
+    }
+
+    // MARK: - Full Personal Backup & Cross-Install Migration
+
+    private static func readBackupRecords(from sqliteDB: OpaquePointer?) -> (
+        phrases: [LokeyPersonalBackup.PhraseRecord],
+        bigrams: [LokeyPersonalBackup.BigramRecord],
+        unigrams: [LokeyPersonalBackup.UnigramRecord]
+    ) {
+        guard let sqliteDB else { return ([], [], []) }
+        let nowSec = Int64(Date().timeIntervalSince1970)
+        var phrases: [LokeyPersonalBackup.PhraseRecord] = []
+        var bigrams: [LokeyPersonalBackup.BigramRecord] = []
+        var unigrams: [LokeyPersonalBackup.UnigramRecord] = []
+
+        var pStmt: OpaquePointer?
+        let phraseSQL = "SELECT surface, compact_pinyin, spaced_pinyin, jianpin, use_count, is_custom, last_used, skip_count FROM user_phrases ORDER BY use_count DESC, surface ASC;"
+        if sqlite3_prepare_v2(sqliteDB, phraseSQL, -1, &pStmt, nil) == SQLITE_OK {
+            while sqlite3_step(pStmt) == SQLITE_ROW {
+                guard let cSurf = sqlite3_column_text(pStmt, 0),
+                      let cComp = sqlite3_column_text(pStmt, 1),
+                      let cSpac = sqlite3_column_text(pStmt, 2),
+                      let cJian = sqlite3_column_text(pStmt, 3) else { continue }
+                let useCount = max(1, Int(sqlite3_column_int(pStmt, 4)))
+                let isCustom = sqlite3_column_int(pStmt, 5) != 0
+                let rawLast = sqlite3_column_int64(pStmt, 6)
+                let skipCount = max(0, Int(sqlite3_column_int(pStmt, 7)))
+                phrases.append(LokeyPersonalBackup.PhraseRecord(
+                    surface: String(cString: cSurf),
+                    compactPinyin: String(cString: cComp),
+                    spacedPinyin: String(cString: cSpac),
+                    jianpin: String(cString: cJian),
+                    useCount: useCount,
+                    isCustom: isCustom,
+                    lastUsed: rawLast > 0 ? rawLast : nowSec,
+                    skipCount: skipCount
+                ))
+            }
+            sqlite3_finalize(pStmt)
+        } else {
+            // Legacy schema fallback (before skip_count column existed)
+            var legacyStmt: OpaquePointer?
+            let legacySQL = "SELECT surface, compact_pinyin, spaced_pinyin, jianpin, use_count, is_custom, last_used FROM user_phrases ORDER BY use_count DESC, surface ASC;"
+            if sqlite3_prepare_v2(sqliteDB, legacySQL, -1, &legacyStmt, nil) == SQLITE_OK {
+                while sqlite3_step(legacyStmt) == SQLITE_ROW {
+                    guard let cSurf = sqlite3_column_text(legacyStmt, 0),
+                          let cComp = sqlite3_column_text(legacyStmt, 1),
+                          let cSpac = sqlite3_column_text(legacyStmt, 2),
+                          let cJian = sqlite3_column_text(legacyStmt, 3) else { continue }
+                    let rawLast = sqlite3_column_int64(legacyStmt, 6)
+                    phrases.append(LokeyPersonalBackup.PhraseRecord(
+                        surface: String(cString: cSurf),
+                        compactPinyin: String(cString: cComp),
+                        spacedPinyin: String(cString: cSpac),
+                        jianpin: String(cString: cJian),
+                        useCount: max(1, Int(sqlite3_column_int(legacyStmt, 4))),
+                        isCustom: sqlite3_column_int(legacyStmt, 5) != 0,
+                        lastUsed: rawLast > 0 ? rawLast : nowSec,
+                        skipCount: 0
+                    ))
+                }
+                sqlite3_finalize(legacyStmt)
+            }
+        }
+
+        var bStmt: OpaquePointer?
+        if sqlite3_prepare_v2(sqliteDB, "SELECT prev_surface, next_surface, use_count, last_used FROM user_bigrams;", -1, &bStmt, nil) == SQLITE_OK {
+            while sqlite3_step(bStmt) == SQLITE_ROW {
+                guard let cPrev = sqlite3_column_text(bStmt, 0),
+                      let cNext = sqlite3_column_text(bStmt, 1) else { continue }
+                let rawLast = sqlite3_column_int64(bStmt, 3)
+                bigrams.append(LokeyPersonalBackup.BigramRecord(
+                    prevSurface: String(cString: cPrev),
+                    nextSurface: String(cString: cNext),
+                    useCount: max(1, Int(sqlite3_column_int(bStmt, 2))),
+                    lastUsed: rawLast > 0 ? rawLast : nowSec
+                ))
+            }
+            sqlite3_finalize(bStmt)
+        }
+
+        var uStmt: OpaquePointer?
+        if sqlite3_prepare_v2(sqliteDB, "SELECT surface, compact_pinyin, use_count, last_used FROM user_unigrams;", -1, &uStmt, nil) == SQLITE_OK {
+            while sqlite3_step(uStmt) == SQLITE_ROW {
+                guard let cSurf = sqlite3_column_text(uStmt, 0),
+                      let cComp = sqlite3_column_text(uStmt, 1) else { continue }
+                let rawLast = sqlite3_column_int64(uStmt, 3)
+                unigrams.append(LokeyPersonalBackup.UnigramRecord(
+                    surface: String(cString: cSurf),
+                    compactPinyin: String(cString: cComp),
+                    useCount: max(1, Int(sqlite3_column_int(uStmt, 2))),
+                    lastUsed: rawLast > 0 ? rawLast : nowSec
+                ))
+            }
+            sqlite3_finalize(uStmt)
+        }
+
+        return (phrases, bigrams, unigrams)
+    }
+
+    public func exportPersonalBackup(
+        touchCalibration: LokeyTouchCalibration? = LokeyTouchCalibration.load(),
+        appVersion: String = "0.8.1"
+    ) -> LokeyPersonalBackup {
+        let records = dbQueue.sync { Self.readBackupRecords(from: db) }
+        return LokeyPersonalBackup(
+            format: LokeyPersonalBackup.currentFormat,
+            exportedAtISO8601: ISO8601DateFormatter().string(from: Date()),
+            appVersion: appVersion,
+            touchCalibration: touchCalibration,
+            phrases: records.phrases,
+            bigrams: records.bigrams,
+            unigrams: records.unigrams
+        )
+    }
+
+    public func exportPersonalBackupJSONData(
+        touchCalibration: LokeyTouchCalibration? = LokeyTouchCalibration.load(),
+        appVersion: String = "0.8.1"
+    ) throws -> Data {
+        let backup = exportPersonalBackup(touchCalibration: touchCalibration, appVersion: appVersion)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(backup)
+    }
+
+    public func exportRimeTabSeparatedText() -> String {
+        let records = dbQueue.sync { Self.readBackupRecords(from: db).phrases }
+        var lines: [String] = [
+            "# Rime user dictionary exported by Lokey",
+            "# format: text<TAB>pinyin<TAB>weight",
+        ]
+        lines.reserveCapacity(records.count + 2)
+        for rec in records {
+            let safeSurface = rec.surface.replacingOccurrences(of: "\t", with: " ")
+            let safePinyin = (rec.spacedPinyin.isEmpty ? rec.compactPinyin : rec.spacedPinyin)
+                .replacingOccurrences(of: "\t", with: " ")
+            guard !safeSurface.isEmpty, !safePinyin.isEmpty else { continue }
+            lines.append("\(safeSurface)\t\(safePinyin)\t\(max(1, rec.useCount))")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func sanitizeCalibration(_ raw: LokeyTouchCalibration) -> LokeyTouchCalibration {
+        var cleaned: [String: LokeyTouchCalibration.KeyStats] = [:]
+        cleaned.reserveCapacity(min(26, raw.perKey.count))
+        for (rawKey, st) in raw.perKey {
+            let key = rawKey.lowercased()
+            guard key.count == 1, let ch = key.first, ch >= "a" && ch <= "z" else { continue }
+            guard st.meanOffsetX.isFinite, st.meanOffsetY.isFinite,
+                  st.varX.isFinite, st.varY.isFinite, st.covXY.isFinite else { continue }
+            let clampedX = min(LokeyTouchCalibration.maxHorizontalShiftRatio, max(-LokeyTouchCalibration.maxHorizontalShiftRatio, st.meanOffsetX))
+            let clampedY = min(LokeyTouchCalibration.maxVerticalShiftRatio, max(-LokeyTouchCalibration.maxVerticalShiftRatio, st.meanOffsetY))
+            cleaned[key] = LokeyTouchCalibration.KeyStats(
+                sampleCount: max(0, st.sampleCount),
+                meanOffsetX: clampedX,
+                meanOffsetY: clampedY,
+                varX: max(0.0, st.varX),
+                varY: max(0.0, st.varY),
+                covXY: st.covXY
+            )
+        }
+        return LokeyTouchCalibration(perKey: cleaned, totalCommittedTaps: max(0, raw.totalCommittedTaps))
+    }
+
+    @discardableResult
+    public func restorePersonalBackup(
+        _ backup: LokeyPersonalBackup,
+        replaceExisting: Bool = false,
+        restoreTouchCalibration: Bool = true,
+        calibrationDefaults: UserDefaults? = nil
+    ) -> PersonalBackupRestoreSummary {
+        let nowSec = Int64(Date().timeIntervalSince1970)
+        let validPhrases = backup.phrases.compactMap { rec -> LokeyPersonalBackup.PhraseRecord? in
+            let s = rec.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let c = rec.compactPinyin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !s.isEmpty, !c.isEmpty else { return nil }
+            let sp = rec.spacedPinyin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let jp = rec.jianpin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return LokeyPersonalBackup.PhraseRecord(
+                surface: s,
+                compactPinyin: c,
+                spacedPinyin: sp.isEmpty ? c : sp,
+                jianpin: jp,
+                useCount: max(1, rec.useCount),
+                isCustom: rec.isCustom,
+                lastUsed: rec.lastUsed > 0 ? rec.lastUsed : nowSec,
+                skipCount: max(0, rec.skipCount)
+            )
+        }
+        let validBigrams = backup.bigrams.compactMap { rec -> LokeyPersonalBackup.BigramRecord? in
+            let p = rec.prevSurface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let n = rec.nextSurface.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !p.isEmpty, !n.isEmpty else { return nil }
+            return LokeyPersonalBackup.BigramRecord(
+                prevSurface: p,
+                nextSurface: n,
+                useCount: max(1, rec.useCount),
+                lastUsed: rec.lastUsed > 0 ? rec.lastUsed : nowSec
+            )
+        }
+        let validUnigrams = backup.unigrams.compactMap { rec -> LokeyPersonalBackup.UnigramRecord? in
+            let s = rec.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let c = rec.compactPinyin.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !s.isEmpty, !c.isEmpty else { return nil }
+            return LokeyPersonalBackup.UnigramRecord(
+                surface: s,
+                compactPinyin: c,
+                useCount: max(1, rec.useCount),
+                lastUsed: rec.lastUsed > 0 ? rec.lastUsed : nowSec
+            )
+        }
+
+        let (pApplied, bApplied, uApplied): (Int, Int, Int) = dbQueue.sync {
+            guard let db else { return (0, 0, 0) }
+            guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else {
+                return (0, 0, 0)
+            }
+
+            if replaceExisting {
+                if sqlite3_exec(db, "DELETE FROM user_phrases; DELETE FROM user_bigrams; DELETE FROM user_unigrams;", nil, nil, nil) != SQLITE_OK {
+                    sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                    return (0, 0, 0)
+                }
+            }
+
+            var pCount = 0
+            var bCount = 0
+            var uCount = 0
+            var ok = true
+
+            if !validPhrases.isEmpty {
+                let pSQL = """
+                INSERT INTO user_phrases (surface, compact_pinyin, spaced_pinyin, jianpin, use_count, is_custom, last_used, skip_count)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(surface, compact_pinyin) DO UPDATE SET
+                    spaced_pinyin = CASE WHEN length(excluded.spaced_pinyin) > length(user_phrases.spaced_pinyin) THEN excluded.spaced_pinyin ELSE user_phrases.spaced_pinyin END,
+                    jianpin = CASE WHEN user_phrases.jianpin = '' THEN excluded.jianpin ELSE user_phrases.jianpin END,
+                    use_count = MAX(user_phrases.use_count, excluded.use_count),
+                    is_custom = MAX(user_phrases.is_custom, excluded.is_custom),
+                    last_used = MAX(user_phrases.last_used, excluded.last_used),
+                    skip_count = MIN(user_phrases.skip_count, excluded.skip_count);
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, pSQL, -1, &stmt, nil) == SQLITE_OK {
+                    for rec in validPhrases {
+                        sqlite3_reset(stmt)
+                        sqlite3_clear_bindings(stmt)
+                        sqlite3_bind_text(stmt, 1, rec.surface, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_text(stmt, 2, rec.compactPinyin, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_text(stmt, 3, rec.spacedPinyin, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_text(stmt, 4, rec.jianpin, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_int(stmt, 5, Int32(rec.useCount))
+                        sqlite3_bind_int(stmt, 6, rec.isCustom ? 1 : 0)
+                        sqlite3_bind_int64(stmt, 7, rec.lastUsed)
+                        sqlite3_bind_int(stmt, 8, Int32(rec.skipCount))
+                        if sqlite3_step(stmt) != SQLITE_DONE { ok = false; break }
+                        pCount += 1
+                    }
+                    sqlite3_finalize(stmt)
+                } else {
+                    ok = false
+                }
+            }
+
+            if ok && !validBigrams.isEmpty {
+                let bSQL = """
+                INSERT INTO user_bigrams (prev_surface, next_surface, use_count, last_used)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(prev_surface, next_surface) DO UPDATE SET
+                    use_count = MAX(user_bigrams.use_count, excluded.use_count),
+                    last_used = MAX(user_bigrams.last_used, excluded.last_used);
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, bSQL, -1, &stmt, nil) == SQLITE_OK {
+                    for rec in validBigrams {
+                        sqlite3_reset(stmt)
+                        sqlite3_clear_bindings(stmt)
+                        sqlite3_bind_text(stmt, 1, rec.prevSurface, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_text(stmt, 2, rec.nextSurface, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_int(stmt, 3, Int32(rec.useCount))
+                        sqlite3_bind_int64(stmt, 4, rec.lastUsed)
+                        if sqlite3_step(stmt) != SQLITE_DONE { ok = false; break }
+                        bCount += 1
+                    }
+                    sqlite3_finalize(stmt)
+                } else {
+                    ok = false
+                }
+            }
+
+            if ok && !validUnigrams.isEmpty {
+                let uSQL = """
+                INSERT INTO user_unigrams (surface, compact_pinyin, use_count, last_used)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(surface, compact_pinyin) DO UPDATE SET
+                    use_count = MAX(user_unigrams.use_count, excluded.use_count),
+                    last_used = MAX(user_unigrams.last_used, excluded.last_used);
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, uSQL, -1, &stmt, nil) == SQLITE_OK {
+                    for rec in validUnigrams {
+                        sqlite3_reset(stmt)
+                        sqlite3_clear_bindings(stmt)
+                        sqlite3_bind_text(stmt, 1, rec.surface, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_text(stmt, 2, rec.compactPinyin, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_int(stmt, 3, Int32(rec.useCount))
+                        sqlite3_bind_int64(stmt, 4, rec.lastUsed)
+                        if sqlite3_step(stmt) != SQLITE_DONE { ok = false; break }
+                        uCount += 1
+                    }
+                    sqlite3_finalize(stmt)
+                } else {
+                    ok = false
+                }
+            }
+
+            if !ok || sqlite3_exec(db, "COMMIT;", nil, nil, nil) != SQLITE_OK {
+                sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                return (0, 0, 0)
+            }
+
+            reloadCacheOnDBQueue()
+            return (pCount, bCount, uCount)
+        }
+
+        if broadcastChanges && (replaceExisting || pApplied > 0 || bApplied > 0 || uApplied > 0) {
+            LokeyIPC.postLexiconChanged()
+        }
+
+        var finalCal = LokeyTouchCalibration.load(from: calibrationDefaults)
+        if restoreTouchCalibration, let incomingRaw = backup.touchCalibration {
+            let incoming = Self.sanitizeCalibration(incomingRaw)
+            if replaceExisting || finalCal.totalCommittedTaps == 0 {
+                finalCal = incoming
+            } else {
+                var mergedKeys = finalCal.perKey
+                for (k, st) in incoming.perKey {
+                    if let cur = mergedKeys[k] {
+                        if st.sampleCount >= cur.sampleCount {
+                            mergedKeys[k] = st
+                        }
+                    } else {
+                        mergedKeys[k] = st
+                    }
+                }
+                finalCal = LokeyTouchCalibration(
+                    perKey: mergedKeys,
+                    totalCommittedTaps: max(finalCal.totalCommittedTaps, incoming.totalCommittedTaps)
+                )
+            }
+            finalCal.save(to: calibrationDefaults)
+            if calibrationDefaults == nil {
+                LokeyIPC.postSettingsChanged()
+            }
+        }
+
+        return PersonalBackupRestoreSummary(
+            phrasesApplied: pApplied,
+            bigramsApplied: bApplied,
+            unigramsApplied: uApplied,
+            calibratedKeys: finalCal.calibratedKeyCount,
+            totalCommittedTaps: finalCal.totalCommittedTaps
+        )
+    }
+
+    /// Reads an external `user_lexicon.sqlite3` database (e.g. from an earlier installation) and restores/merges its tables.
+    public func importExternalSQLiteDatabase(
+        from sqliteURL: URL,
+        replaceExisting: Bool = false
+    ) throws -> PersonalBackupRestoreSummary {
+        let headerHandle = try FileHandle(forReadingFrom: sqliteURL)
+        let magicData = try headerHandle.read(upToCount: 16) ?? Data()
+        try? headerHandle.close()
+        let sqliteMagic = Data("SQLite format 3\0".utf8)
+        guard magicData == sqliteMagic else {
+            throw NSError(
+                domain: "com.kianuni.lokey.backup",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "不是有效的 SQLite3 词库数据库文件。"]
+            )
+        }
+
+        var srcDB: OpaquePointer?
+        let rc = sqlite3_open_v2(sqliteURL.path, &srcDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
+        guard rc == SQLITE_OK, srcDB != nil else {
+            if let srcDB { sqlite3_close_v2(srcDB) }
+            throw NSError(
+                domain: "com.kianuni.lokey.backup",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "无法打开 SQLite 数据库文件（错误码 \(rc)）。"]
+            )
+        }
+        defer { sqlite3_close_v2(srcDB) }
+
+        let records = Self.readBackupRecords(from: srcDB)
+        let backup = LokeyPersonalBackup(
+            format: LokeyPersonalBackup.currentFormat,
+            exportedAtISO8601: ISO8601DateFormatter().string(from: Date()),
+            appVersion: "legacy-sqlite",
+            touchCalibration: nil,
+            phrases: records.phrases,
+            bigrams: records.bigrams,
+            unigrams: records.unigrams
+        )
+        return restorePersonalBackup(backup, replaceExisting: replaceExisting, restoreTouchCalibration: false)
     }
 }

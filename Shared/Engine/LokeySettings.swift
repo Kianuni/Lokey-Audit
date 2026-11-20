@@ -211,7 +211,39 @@ public enum LokeyAppGroup {
     private static let inputUISessionFilename = "lokey_inputui_session.json"
     private static let inputUISessionDefaultsKey = "lokey.inputui.session.v1"
 
-    /// Ordered candidate App Group IDs (`LokeyAppGroupID` Info.plist key and `defaultIdentifier`).
+    /// Parses `com.apple.security.application-groups` from CMS-signed provisioning data via standard Foundation APIs.
+    internal static func extractAppGroupsFromProvisionData(_ data: Data) -> [String] {
+        guard !data.isEmpty,
+              let startRange = data.range(of: Data("<plist".utf8)),
+              let endRange = data.range(of: Data("</plist>".utf8), in: startRange.lowerBound..<data.endIndex) else {
+            return []
+        }
+        let plistData = data[startRange.lowerBound..<endRange.upperBound]
+        guard let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let groups = entitlements["com.apple.security.application-groups"] as? [String] else {
+            return []
+        }
+        return groups.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    private static func readProvisionGroups(at bundleURL: URL) -> [String] {
+        let profileURL = bundleURL.appendingPathComponent("embedded.mobileprovision")
+        guard let data = try? Data(contentsOf: profileURL) else { return [] }
+        return extractAppGroupsFromProvisionData(data)
+    }
+
+    private static func siblingBundleURL(from currentBundleURL: URL) -> URL? {
+        if currentBundleURL.pathExtension == "appex" {
+            return currentBundleURL.deletingLastPathComponent().deletingLastPathComponent()
+        }
+        if currentBundleURL.pathExtension == "app" {
+            return currentBundleURL.appendingPathComponent("PlugIns/LokeyKeyboard.appex", isDirectory: true)
+        }
+        return nil
+    }
+
+    /// Ordered candidate App Group IDs (`LokeyAppGroupID` Info.plist key, `defaultIdentifier`, and provisioning fallbacks for re-signing).
     public static var candidateIdentifiers: [String] {
         cacheLock.lock()
         if let override = _overrideCandidateIdentifiersForTesting, !override.isEmpty {
@@ -234,6 +266,37 @@ public enum LokeyAppGroup {
         }
         appendUnique(Bundle.main.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String)
         appendUnique(defaultIdentifier)
+
+        let currentURL = Bundle.main.bundleURL
+        let currentProvisionGroups = readProvisionGroups(at: currentURL)
+        let siblingProvisionGroups = siblingBundleURL(from: currentURL).map { readProvisionGroups(at: $0) } ?? []
+        if !currentProvisionGroups.isEmpty {
+            let siblingSet = Set(siblingProvisionGroups)
+            for gid in currentProvisionGroups where siblingSet.contains(gid) {
+                appendUnique(gid)
+            }
+            for gid in currentProvisionGroups {
+                appendUnique(gid)
+            }
+        }
+        for gid in siblingProvisionGroups {
+            appendUnique(gid)
+        }
+
+        if let rawBundleID = Bundle.main.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !rawBundleID.isEmpty {
+            let baseID: String
+            if rawBundleID.hasSuffix(".keyboard") {
+                baseID = String(rawBundleID.dropLast(".keyboard".count))
+            } else if rawBundleID.hasSuffix(".tests") {
+                baseID = String(rawBundleID.dropLast(".tests".count))
+            } else {
+                baseID = rawBundleID
+            }
+            if !baseID.isEmpty && baseID != "com.kianuni.lokey" {
+                appendUnique("group.\(baseID)")
+            }
+        }
 
         cacheLock.lock()
         cachedCandidateIdentifiers = ordered

@@ -1721,11 +1721,11 @@ public final class ViterbiDecoder: @unchecked Sendable {
         // 5D. Jianpin acronym lookup (e.g. `zg` -> `中国`, `rgzn` -> `人工智能`, `wsm` -> `为什么`)
         // Note: mid-word synthetic `-r` (`su+r+ge` -> `苏儿个`, `penaltyQ8 == 120`) is NOT clean Chinese unless
         // backed by an actual lexical entry in `fullBufferSpans` (`去哪儿`) or a real Erhua suffix word (`一点儿`).
-        let hasCleanChineseFull = fullBufferSpans.contains(where: { $0.penaltyQ8 < 180 })
-            || (bestSentence != nil && bestSentence!.end == n && (
-                bestSentence!.penaltyQ8 <= 70
-                    || (bestSentence!.penaltyQ8 < 180 && bestSentence!.lastWord.hasSuffix("儿"))
-            ))
+        let hasCleanChineseFull = fullBufferSpans.contains(where: { $0.penaltyQ8 < 180 && !$0.isEnglishSpan })
+            || (bestSentence != nil && bestSentence!.end == n
+                && !bestSentence!.text.contains(where: { $0.isASCII && $0.isLetter })
+                && (bestSentence!.penaltyQ8 <= 70
+                    || (bestSentence!.penaltyQ8 < 180 && bestSentence!.lastWord.hasSuffix("儿"))))
 
         if cleanLower.count >= 2 && cleanLower.count <= 8 && !(currentWholeClean && cleanLower.count >= 5) {
             let allowJpPrefix = cleanLower.count >= 3 && !hasCleanChineseFull && !currentWholeClean
@@ -4267,10 +4267,11 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                             guard let ptr = buf.baseAddress else { return false }
                                             return lexicon.canSegmentCleanlyPointer(ptr, count: buf.count)
                                         }
-                                        if !tailCanCleanChinese,
-                                           let fullCleanKey = String(bytes: lowerASCII[firstNonSep..<n], encoding: .utf8),
+                                        if let fullCleanKey = String(bytes: lowerASCII[firstNonSep..<n], encoding: .utf8),
                                            let enLead = lexicon.lookupEnglish(prefix: fullCleanKey, limit: 1).first,
-                                           enLead.scoreQ8 >= -2450 {
+                                           (enLead.isExactKeyMatch && enLead.scoreQ8 >= -2350)
+                                               || (!tailCanCleanChinese && enLead.scoreQ8 >= -2450)
+                                               || ((n - spanEnd) <= 3 && enLead.scoreQ8 >= -2200) {
                                             suppressForFullPrefix = true
                                             continue
                                         }
