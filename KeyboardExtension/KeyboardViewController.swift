@@ -612,7 +612,7 @@ public final class KeyboardViewController: UIInputViewController {
     private var cachedExternalHostTopPadding: CGFloat?
     private var activeDocumentID: UUID?
     private var activeDocumentGeneration: UInt64 = 0
-    private var pendingDocumentEdits: [(docGen: UInt64, edit: (UITextDocumentProxy) -> Void)] = []
+    private var pendingDocumentEdits: [(docGen: UInt64, isUnmarkCommit: Bool, edit: (UITextDocumentProxy) -> Void)] = []
     private var documentEditDelivery: DispatchWorkItem?
     private var candidateRefreshPending = false
     private var hasDeferredProvisionalRender = false
@@ -757,7 +757,7 @@ public final class KeyboardViewController: UIInputViewController {
         let canQueryHostXPCOnLoad = !isRunningInExtensionProcess || customTextDocumentProxyForTesting != nil
         if canQueryHostXPCOnLoad {
             cachedHasFullAccess = hasFullAccess
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.1"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.2"
             if cachedHasFullAccess {
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -846,7 +846,7 @@ public final class KeyboardViewController: UIInputViewController {
         refreshCachedHostTopPadding()
         updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
         if cachedHasFullAccess {
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.1"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.2"
             publishExtensionVisibility(isVisible: true)
             Self.extensionStateIOQueue.async {
                 LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -1556,7 +1556,7 @@ public final class KeyboardViewController: UIInputViewController {
             let wasFullAccess = cachedHasFullAccess
             cachedHasFullAccess = self.hasFullAccess
             if cachedHasFullAccess && !wasFullAccess {
-                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.1"
+                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.2"
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
                 }
@@ -1810,14 +1810,28 @@ public final class KeyboardViewController: UIInputViewController {
 
         keyGrid.onPeriodTap = { [weak self] in
             guard let self else { return }
-            self.lastUserInteractionUptime = ProcessInfo.processInfo.systemUptime
+            let now = ProcessInfo.processInfo.systemUptime
+            self.lastUserInteractionUptime = now
+            let baseBeforeFlush: String = (!self.lastMarkedTextSent.isEmpty || !self.composingContextAnchor.isEmpty)
+                ? self.composingContextAnchor
+                : self.contextTracker.cachedContext(at: now)
             if let flushed = self.session?.flushTopCandidateIfComposing() {
-                self.commitTextReplacingMarkedRange(flushed)
+                let hadActiveMarked = !self.lastMarkedTextSent.isEmpty
+                let ctxBefore = baseBeforeFlush + flushed
+                let p = self.session?.smartPeriodString(contextBefore: ctxBefore) ?? "。"
+                self.session?.notifyContextBreak()
+                if hadActiveMarked {
+                    self.commitTextReplacingMarkedRange(flushed + p)
+                } else {
+                    self.commitTextReplacingMarkedRange(flushed)
+                    self.insertDocumentTextAndTrackContext(p)
+                }
+            } else {
+                let ctxBefore = self.effectiveContextBeforeInput()
+                let p = self.session?.smartPeriodString(contextBefore: ctxBefore) ?? "。"
+                self.session?.notifyContextBreak()
+                self.insertDocumentTextAndTrackContext(p)
             }
-            let ctxBefore = self.effectiveContextBeforeInput()
-            let p = self.session?.smartPeriodString(contextBefore: ctxBefore) ?? "。"
-            self.session?.notifyContextBreak()
-            self.insertDocumentTextAndTrackContext(p)
             self.syncModeUI()
             self.refreshCandidateUI()
             self.flushPendingBaseLexiconReloadIfNeeded()
@@ -2037,13 +2051,14 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     // Apply session/context changes immediately. Ordered proxy mutations leave the touch
-    // callback together, including commits followed by punctuation or a repeating delete.
-    private func writeDocument(_ edit: @escaping (UITextDocumentProxy) -> Void) {
+    // callback together, while unmark commits split subsequent edits into the next RunLoop turn
+    // so UIKit never reorders `insertionText` ahead of `unmarkIfNecessary`.
+    private func writeDocument(isUnmarkCommit: Bool = false, _ edit: @escaping (UITextDocumentProxy) -> Void) {
         if !keyGrid.isHandlingTouchDown && documentEditDelivery == nil {
             edit(textDocumentProxy)
             return
         }
-        pendingDocumentEdits.append((docGen: activeDocumentGeneration, edit: edit))
+        pendingDocumentEdits.append((docGen: activeDocumentGeneration, isUnmarkCommit: isUnmarkCommit, edit: edit))
         guard documentEditDelivery == nil else { return }
         let delivery = DispatchWorkItem { [weak self] in self?.deliverPendingDocumentEdits() }
         documentEditDelivery = delivery
@@ -2057,18 +2072,32 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func deliverPendingDocumentEdits() {
+        documentEditDelivery = nil
         guard !pendingDocumentEdits.isEmpty else { return }
-        let edits = pendingDocumentEdits
-        cancelPendingDocumentEdits()
         let currentGen = activeDocumentGeneration
         let proxy = textDocumentProxy
-        for item in edits where item.docGen == currentGen {
+        var index = 0
+        while index < pendingDocumentEdits.count {
+            let item = pendingDocumentEdits[index]
+            index += 1
+            guard item.docGen == currentGen else { continue }
             item.edit(proxy)
+            if item.isUnmarkCommit {
+                let hasRemainingForCurrentGen = pendingDocumentEdits[index...].contains { $0.docGen == currentGen }
+                if hasRemainingForCurrentGen {
+                    pendingDocumentEdits.removeFirst(index)
+                    let nextDelivery = DispatchWorkItem { [weak self] in self?.deliverPendingDocumentEdits() }
+                    documentEditDelivery = nextDelivery
+                    DispatchQueue.main.async(execute: nextDelivery)
+                    return
+                }
+            }
         }
+        pendingDocumentEdits.removeAll(keepingCapacity: true)
     }
 
     private func replaceAndUnmark(_ text: String) {
-        writeDocument { [weak self] proxy in
+        writeDocument(isUnmarkCommit: true) { [weak self] proxy in
             self?.noteSelfHostWrite(count: 2)
             let start = DispatchTime.now().uptimeNanoseconds
             proxy.setMarkedText(text, selectedRange: NSRange(location: text.utf16.count, length: 0))
@@ -2103,6 +2132,7 @@ public final class KeyboardViewController: UIInputViewController {
             }
         }
         if session?.isComposing != true {
+            composingContextAnchor = ""
             scheduleContextReconciliation(generation: gen)
         }
     }
@@ -2138,10 +2168,12 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func insertSmartSymbol(_ rawSymbol: String) {
         let wasMomentaryNumericSlide = keyGrid.isCommittingMomentaryNumericSymbol
-        if let flushed = session?.flushTopCandidateIfComposing() {
-            commitTextReplacingMarkedRange(flushed)
-        }
-        let ctxBefore = effectiveContextBeforeInput()
+        let now = ProcessInfo.processInfo.systemUptime
+        let baseBeforeFlush: String = (!lastMarkedTextSent.isEmpty || !composingContextAnchor.isEmpty)
+            ? composingContextAnchor
+            : contextTracker.cachedContext(at: now)
+        let flushed = session?.flushTopCandidateIfComposing()
+        let ctxBefore = flushed.map { baseBeforeFlush + $0 } ?? effectiveContextBeforeInput()
         let action = session?.resolveSmartSymbol(rawSymbol, contextBefore: ctxBefore)
             ?? LokeySessionController.SmartSymbolAction(textToInsert: rawSymbol)
         let shouldAutoReturn = wasMomentaryNumericSlide || (session?.shouldAutoReturnToAlphabeticAfterSymbol(
@@ -2149,18 +2181,41 @@ public final class KeyboardViewController: UIInputViewController {
             resolvedText: action.textToInsert,
             contextBefore: ctxBefore
         ) ?? false)
-        if action.deletePreviousCount > 0 {
-            for _ in 0..<action.deletePreviousCount {
-                deleteDocumentBackwardAndTrackContext()
+
+        if let flushed {
+            let hadActiveMarked = !lastMarkedTextSent.isEmpty
+            let deleteInFlushed = min(flushed.count, max(0, action.deletePreviousCount))
+            let trimmedFlushed = deleteInFlushed > 0 ? String(flushed.dropLast(deleteInFlushed)) : flushed
+            let remainingDeletes = max(0, action.deletePreviousCount - deleteInFlushed)
+            if action.textToInsert == "，" || action.textToInsert == "、" {
+                session?.externalContextBeforeInput = ctxBefore
+                session?.notifyClauseComma()
+            } else {
+                session?.notifyContextBreak()
             }
-        }
-        if action.textToInsert == "，" || action.textToInsert == "、" {
-            session?.externalContextBeforeInput = effectiveContextBeforeInput()
-            session?.notifyClauseComma()
+            if hadActiveMarked && remainingDeletes == 0 {
+                commitTextReplacingMarkedRange(trimmedFlushed + action.textToInsert)
+            } else {
+                commitTextReplacingMarkedRange(trimmedFlushed)
+                for _ in 0..<remainingDeletes {
+                    deleteDocumentBackwardAndTrackContext()
+                }
+                insertDocumentTextAndTrackContext(action.textToInsert)
+            }
         } else {
-            session?.notifyContextBreak()
+            if action.deletePreviousCount > 0 {
+                for _ in 0..<action.deletePreviousCount {
+                    deleteDocumentBackwardAndTrackContext()
+                }
+            }
+            if action.textToInsert == "，" || action.textToInsert == "、" {
+                session?.externalContextBeforeInput = effectiveContextBeforeInput()
+                session?.notifyClauseComma()
+            } else {
+                session?.notifyContextBreak()
+            }
+            insertDocumentTextAndTrackContext(action.textToInsert)
         }
-        insertDocumentTextAndTrackContext(action.textToInsert)
         syncModeUI()
         if shouldAutoReturn && keyGrid.page != .alphabetic {
             keyGrid.scheduleAutoReturnToAlphabetic()

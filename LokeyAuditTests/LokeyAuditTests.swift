@@ -247,8 +247,8 @@ final class LokeyAuditTests: XCTestCase {
         let hostBundle = Bundle.main
         XCTAssertEqual(hostBundle.bundleIdentifier, "com.kianuni.lokey.audit")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.1")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "72")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.2")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "73")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool, false)
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool, false)
         XCTAssertNil(hostBundle.object(forInfoDictionaryKey: "CFBundleDocumentTypes"))
@@ -258,8 +258,8 @@ final class LokeyAuditTests: XCTestCase {
         let extBundle = try XCTUnwrap(Bundle(url: extURL))
         XCTAssertEqual(extBundle.bundleIdentifier, "com.kianuni.lokey.audit.keyboard")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.1")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "72")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.2")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "73")
 
         XCTAssertEqual(Bundle(for: LokeyAuditTests.self).bundleIdentifier, "com.kianuni.lokey.audit.tests")
 

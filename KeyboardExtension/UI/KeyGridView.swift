@@ -80,13 +80,14 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     func scheduleAutoReturnToAlphabetic() {
         guard page != .alphabetic else { return }
-        if !isHandlingTouchDown {
+        if !isHandlingTouchDown && activeTouches.isEmpty {
             page = .alphabetic
             return
         }
         pendingDeferredPage = .alphabetic
         DispatchQueue.main.async { [weak self] in
-            self?.flushDeferredPageIfNeeded()
+            guard let self, !self.isHandlingTouchDown, self.activeTouches.isEmpty else { return }
+            self.flushDeferredPageIfNeeded()
         }
     }
 
@@ -312,6 +313,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private var bottomRowNeedsAppearanceRefresh = false
     private var returnKeyNeedsAppearanceRefresh = false
     private var deferredAppearanceScheduled = false
+    private var needsViewFrameSync = false
     private var needsRelayoutWhenUnhidden = false
     private var alphaRegionTop: CGFloat = 0
     private var alphaRegionHeight: CGFloat = 1
@@ -562,9 +564,15 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             needsRelayoutWhenUnhidden = true
             setNeedsLayout()
         } else if Self.isValidGridSize(width: bounds.width, height: bounds.height) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             layoutKeyFrames(width: bounds.width, height: bounds.height)
+            CATransaction.commit()
         } else if bounds.width > 40 && bounds.height > 40 && bounds.height < Self.minimumValidGridHeight(forWidth: bounds.width) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             layoutKeyFrames(width: bounds.width, height: Self.canonicalFallbackGridHeight(forWidth: bounds.width))
+            CATransaction.commit()
         } else {
             setNeedsLayout()
         }
@@ -670,6 +678,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             return
         }
         defer { flushDeferredAppearancesIfNeeded() }
+        syncKeyViewFramesIfNeeded()
         let w = bounds.width
         let h = bounds.height
         // Ignore transient zero-sized, compressed legacy host compat frames (`gridH = 168..176pt` when `view = 216..224pt`),
@@ -694,6 +703,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private func layoutKeyFrames(width w: CGFloat, height h: CGFloat) {
         let targetGridSize = CGSize(width: w, height: h)
         if hasLaidOutKeyFrames
+            && !needsViewFrameSync
             && lastLaidOutGridSize == targetGridSize
             && lastLaidOutPage == page
             && (page != .alphabetic || onAnchorsUpdated == nil || lastReportedAnchorGeometryKey != nil) {
@@ -722,7 +732,6 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             let x = sideInset + CGFloat(i) * (stdKeyW + hGap)
             let f = CGRect(x: x, y: y0, width: stdKeyW, height: keyH)
             rowItems[0][i].frame = f
-            if !isHandlingTouchDown && rowItems[0][i].view.frame != f { rowItems[0][i].view.frame = f }
         }
 
         // Row 1: 9 keys centered on alphabetic page (`a`..`l`), or 10 keys on numeric/symbolic
@@ -734,7 +743,6 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             let x = startX1 + CGFloat(i) * (stdKeyW + hGap)
             let f = CGRect(x: x, y: y1, width: stdKeyW, height: keyH)
             rowItems[1][i].frame = f
-            if !isHandlingTouchDown && rowItems[1][i].view.frame != f { rowItems[1][i].view.frame = f }
         }
 
         // Row 2: [Left Modifier] + centered middle keys (`z`..`m`) + [Backspace]
@@ -757,18 +765,15 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
             let leftFrame = CGRect(x: sideInset, y: y2, width: sideModW, height: keyH)
             rowItems[2][0].frame = leftFrame
-            if !isHandlingTouchDown && rowItems[2][0].view.frame != leftFrame { rowItems[2][0].view.frame = leftFrame }
 
             for m in 0..<midCount {
                 let x = startMidX + CGFloat(m) * (midKeyW + hGap)
                 let f = CGRect(x: x, y: y2, width: midKeyW, height: keyH)
                 rowItems[2][1 + m].frame = f
-                if !isHandlingTouchDown && rowItems[2][1 + m].view.frame != f { rowItems[2][1 + m].view.frame = f }
             }
 
             let rightFrame = CGRect(x: w - sideInset - sideModW, y: y2, width: sideModW, height: keyH)
             rowItems[2][count2 - 1].frame = rightFrame
-            if !isHandlingTouchDown && rowItems[2][count2 - 1].view.frame != rightFrame { rowItems[2][count2 - 1].view.frame = rightFrame }
         }
 
         // Row 3: Exact Apple `UIKBTree` symmetric geometry!
@@ -824,8 +829,20 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 }
                 let f = CGRect(x: cursorX, y: y3, width: kw, height: keyH)
                 rowItems[3][i].frame = f
-                if !isHandlingTouchDown && rowItems[3][i].view.frame != f { rowItems[3][i].view.frame = f }
                 cursorX += kw + hGap
+            }
+        }
+
+        if isHandlingTouchDown {
+            // Defer UIView.frame writes until touch-down finishes, and guarantee a sync pass immediately after.
+            needsViewFrameSync = true
+            scheduleDeferredAppearanceRefresh()
+        } else {
+            needsViewFrameSync = false
+            for row in rowItems {
+                for item in row where item.view.frame != item.frame {
+                    item.view.frame = item.frame
+                }
             }
         }
 
@@ -895,8 +912,22 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
+    private func syncKeyViewFramesIfNeeded() {
+        guard needsViewFrameSync else { return }
+        needsViewFrameSync = false
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        for row in rowItems {
+            for item in row where item.view.frame != item.frame {
+                item.view.frame = item.frame
+            }
+        }
+    }
+
     private func flushDeferredAppearancesIfNeeded() {
         guard !isHandlingTouchDown else { return }
+        syncKeyViewFramesIfNeeded()
         if pageNeedsAppearanceRefresh {
             refreshKeyAppearances()
         } else {
@@ -907,6 +938,32 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 refreshReturnKeyAppearanceOnly()
             }
         }
+    }
+
+    internal func debugVerifyAllViewFramesSynced() -> String? {
+        for (r, row) in rowItems.enumerated() {
+            for (c, item) in row.enumerated() {
+                let vf = item.view.frame
+                let mf = item.frame
+                let mismatch = abs(vf.origin.x - mf.origin.x) > 0.01
+                    || abs(vf.origin.y - mf.origin.y) > 0.01
+                    || abs(vf.size.width - mf.size.width) > 0.01
+                    || abs(vf.size.height - mf.size.height) > 0.01
+                if mismatch || item.view.superview !== self {
+                    return "row=\(r) col=\(c) role=\(item.role) model=\(mf) view=\(vf) superMatch=\(item.view.superview === self) page=\(page) sync=\(needsViewFrameSync)"
+                }
+            }
+        }
+        return nil
+    }
+
+    internal func debugKeyViewFrame(for role: KeyRole) -> CGRect? {
+        for row in rowItems {
+            for item in row where item.role == role {
+                return item.view.frame
+            }
+        }
+        return nil
     }
 
     func refreshKeyAppearances() {
@@ -1975,6 +2032,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             }
         }
         flushDeferredPageIfNeeded()
+        flushDeferredAppearancesIfNeeded()
     }
 
     private func handleSingleTouchEnded(_ touch: UITouch) {
@@ -2127,6 +2185,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             commitKey(row: r, col: c, point: pt, touchSeq: seq)
         }
         flushDeferredPageIfNeeded()
+        flushDeferredAppearancesIfNeeded()
     }
 
     private func handleSingleTouchCancelled(
