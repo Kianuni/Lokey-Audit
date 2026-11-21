@@ -2,7 +2,7 @@
 
 **Lokey Security Audit Repository · 纯离线零联网安全审计仓库**
 
-[中文说明](#中文说明) | [English](#english)
+[中文说明](#中文说明) | [English](#english) | [隐私政策 / Privacy Policy](./PRIVACY.md)
 
 ---
 
