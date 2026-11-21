@@ -1,7 +1,7 @@
 # 隐私政策 / Privacy Policy — Lokey（落键）
 
 **生效与更新日期 / Effective & Updated Date**：2026-11-21  
-**联系邮箱 / Contact Email**：[Kianuni@icloud.com](mailto:Kianuni@icloud.com)  
+**联系邮箱 / Contact Email**：[Kianuni60@gmail.com](mailto:Kianuni60@gmail.com)  
 **安全审计仓库 / Public Security Audit Repository**：<https://github.com/Kianuni/Lokey-Audit>
 
 [中文版](#中文版) | [English](#english)
@@ -55,7 +55,7 @@ Lokey 是一款**纯离线、物理级零联网**的 iOS 26 键拼音输入法�
 
 ### 7. 隐私政策更新与联系我们
 如因功能演进需要对本隐私政策进行修订，我们将在本页面更新生效日期并保持零收集、零联网的核心原则不变。若您对本政策或 Lokey 的离线安全机制有任何疑问、建议或数据隐私咨询，请联系：
-- **联系邮箱**：[Kianuni@icloud.com](mailto:Kianuni@icloud.com)
+- **联系邮箱**：[Kianuni60@gmail.com](mailto:Kianuni60@gmail.com)
 - **审计源码仓库**：<https://github.com/Kianuni/Lokey-Audit>
 
 ---
@@ -107,5 +107,5 @@ Both Lokey targets declare in their embedded Apple Privacy Manifests:
 
 ### 7. Policy Updates & Contact Us
 If we update this Privacy Policy in future versions, we will revise the updated date above while maintaining our zero-collection, zero-network commitment. For privacy inquiries, security reports, or support, please contact:
-- **Email**: [Kianuni@icloud.com](mailto:Kianuni@icloud.com)
+- **Email**: [Kianuni60@gmail.com](mailto:Kianuni60@gmail.com)
 - **Audit Repository**: <https://github.com/Kianuni/Lokey-Audit>
