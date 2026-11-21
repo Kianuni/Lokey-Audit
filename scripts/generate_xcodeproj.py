@@ -704,7 +704,7 @@ def generate_pbxproj() -> None:
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = AuditDemoApp/AuditDemoApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 77;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AuditDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -724,7 +724,7 @@ def generate_pbxproj() -> None:
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = AuditDemoApp/AuditDemoApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 77;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AuditDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -744,7 +744,7 @@ def generate_pbxproj() -> None:
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = KeyboardExtension/LokeyKeyboard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 77;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = KeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -766,7 +766,7 @@ def generate_pbxproj() -> None:
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = KeyboardExtension/LokeyKeyboard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 77;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = KeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -787,7 +787,7 @@ def generate_pbxproj() -> None:
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 77;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LokeyAuditTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -808,7 +808,7 @@ def generate_pbxproj() -> None:
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 77;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LokeyAuditTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

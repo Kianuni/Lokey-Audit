@@ -108,14 +108,27 @@ final class KeyCalloutBubbleView: UIView {
 
         var headMinX = keyFrame.midX - headWidth * 0.5
         let edgeInset: CGFloat = 3.0
-        if headMinX < edgeInset {
-            headMinX = edgeInset
-        } else if headMinX + headWidth > containerWidth - edgeInset {
-            headMinX = containerWidth - edgeInset - headWidth
+        let minEdgeX = min(edgeInset, keyFrame.minX)
+        let maxEdgeX = max(containerWidth - edgeInset, keyFrame.maxX)
+        if headMinX < minEdgeX {
+            headMinX = minEdgeX
+        } else if headMinX + headWidth > maxEdgeX {
+            headMinX = maxEdgeX - headWidth
         }
         let headMaxY = keyFrame.minY - neckHeight
         let headMinY = max(2.0, headMaxY - headHeight)
         let actualHeadH = headMaxY - headMinY
+
+        let baseRadius: CGFloat
+        if keyFrame.width >= 62.0 {
+            baseRadius = 11.5
+        } else if keyFrame.width >= 48.0 {
+            baseRadius = 10.5
+        } else if keyFrame.width >= 39.2 && keyFrame.height >= 44.5 {
+            baseRadius = 8.5
+        } else {
+            baseRadius = KeyboardTheme.keyCornerRadius
+        }
 
         let relHeadX = headMinX - keyFrame.minX
         let relHeadY = headMinY - keyFrame.minY
@@ -135,7 +148,7 @@ final class KeyCalloutBubbleView: UIView {
                 base: localBase,
                 head: localHead,
                 headRadius: 10.5,
-                baseRadius: KeyboardTheme.keyCornerRadius
+                baseRadius: baseRadius
             ).cgPath
             if pathCache.count >= 64 {
                 pathCache.removeAll(keepingCapacity: true)

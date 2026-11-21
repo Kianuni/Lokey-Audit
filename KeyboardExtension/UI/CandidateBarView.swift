@@ -499,6 +499,14 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     private var lastLaidOutShowsAccessory: Bool?
     private var buttonRenderStates: [ButtonRenderState?] = []
 
+    var hostScreenSize: CGSize = .zero {
+        didSet {
+            if oldValue != hostScreenSize {
+                setNeedsLayout()
+            }
+        }
+    }
+
     static let maxDisplayCandidates = 96
     static let minPillWidth: CGFloat = 44.0
     private static let initialPoolSize = 12
@@ -736,18 +744,22 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         syncVerticalMetricsIfNeeded()
     }
 
-    internal static func computeVerticalMetrics(width: CGFloat, height: CGFloat) -> VerticalMetrics {
+    internal static func computeVerticalMetrics(
+        width: CGFloat,
+        height: CGFloat,
+        screenSize: CGSize = .zero
+    ) -> VerticalMetrics {
         let effW = width > 0 ? width : 393.0
-        let isLandscape = effW > 520.0
-        let defaultH = KeyboardTheme.portraitCandidateBarHeight(forWidth: effW)
+        let defaultH = KeyboardTheme.portraitCandidateBarHeight(forWidth: effW, screenSize: screenSize)
         let h = height > 0 ? height : defaultH
+        let isCompactLandscapeBar = effW > 520.0 && h < 42.0
         // Self-contained vertical geometry with 0.0pt idle-to-composing optical shift and zero top overflow:
         // - Always reserve `3.5pt` bottom clearance so combined with `KeyGridView.topGap == 4.5pt`,
         //   `row0KeyTop - pill.maxY == 8.0pt` on Max/Plus/Pro (`44pt`), Mini/SE (`41pt`), and landscape (`36pt`).
         // - Unifies `idleOpticalCenterY` and `composingOpticalCenterY` at `pillCenterY`.
         let bottomClearance: CGFloat = 3.5
         let pillBottom: CGFloat = max(24.5, h - bottomClearance)
-        let minTopInset: CGFloat = isLandscape
+        let minTopInset: CGFloat = isCompactLandscapeBar
             ? 3.0
             : (h >= 40.0
                 ? min(8.0, max(5.5, (h - 32.0) * 0.5))
@@ -774,14 +786,14 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     }
 
     private func computeVerticalMetrics() -> VerticalMetrics {
-        Self.computeVerticalMetrics(width: bounds.width, height: bounds.height)
+        Self.computeVerticalMetrics(width: bounds.width, height: bounds.height, screenSize: hostScreenSize)
     }
 
     @discardableResult
     private func syncVerticalMetricsIfNeeded() -> VerticalMetrics {
         let m = computeVerticalMetrics()
         let effW = bounds.width > 0 ? bounds.width : 393.0
-        let effH = bounds.height > 0 ? bounds.height : KeyboardTheme.portraitCandidateBarHeight(forWidth: effW)
+        let effH = bounds.height > 0 ? bounds.height : KeyboardTheme.portraitCandidateBarHeight(forWidth: effW, screenSize: hostScreenSize)
         let targetSize = CGSize(width: effW, height: effH)
         let showsAcc = lastAppliedShowsRightAccessory ?? true
         let metricsChanged = (lastAppliedVerticalMetrics != m)

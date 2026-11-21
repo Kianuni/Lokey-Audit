@@ -668,6 +668,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     internal var overrideHostTopPaddingForTesting: CGFloat?
+    internal var overrideScreenSizeForTesting: CGSize?
     internal var overrideShowStarterCandidatesForTesting: Bool = false
     internal var customTextDocumentProxyForTesting: UITextDocumentProxy?
     internal var onHostInputViewLayoutInvalidatedForTesting: (() -> Void)?
@@ -1004,10 +1005,33 @@ public final class KeyboardViewController: UIInputViewController {
         LokeyHapticEngine.shared.suspend()
     }
 
+    public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: { [weak self] _ in
+            guard let self else { return }
+            _ = self.syncChildHostScreenSize()
+            self.updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
+            self.candidateBar.setNeedsLayout()
+            self.keyGrid.setNeedsLayout()
+            self.emojiKeyboard?.setNeedsLayout()
+            self.view.layoutIfNeeded()
+        }, completion: { [weak self] _ in
+            guard let self else { return }
+            _ = self.syncChildHostScreenSize()
+            self.updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
+            self.candidateBar.setNeedsLayout()
+            self.keyGrid.setNeedsLayout()
+            self.emojiKeyboard?.setNeedsLayout()
+            self.view.layoutIfNeeded()
+        })
+    }
+
     public override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         if view.bounds.height <= 420.0 {
             updateKeyboardHeightConstraint(inLayoutPass: true)
+        } else {
+            _ = syncChildHostScreenSize()
         }
         let refWidth = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
         session?.decoder.spatialModel.isLandscapeLayout = (refWidth > 520.0)
@@ -2845,19 +2869,58 @@ public final class KeyboardViewController: UIInputViewController {
         )
     }
 
+    internal func effectiveScreenSize() -> CGSize {
+        if let overrideScreenSizeForTesting {
+            return overrideScreenSizeForTesting
+        }
+        if let winScreen = view.window?.windowScene?.screen.bounds.size,
+           winScreen.width > 0.0,
+           winScreen.height > 0.0 {
+            return winScreen
+        }
+        if isRunningInExtensionProcess || view.window != nil {
+            return UIScreen.main.bounds.size
+        }
+        return .zero
+    }
+
+    @discardableResult
+    private func syncChildHostScreenSize() -> CGSize {
+        let scr = effectiveScreenSize()
+        keyGrid.hostScreenSize = scr
+        candidateBar.hostScreenSize = scr
+        return scr
+    }
+
     private func desiredCandidateBarHeight() -> CGFloat {
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
-        return KeyboardTheme.portraitCandidateBarHeight(forWidth: refWidth, hostTopPadding: effectiveHostTopPadding())
+        let scr = syncChildHostScreenSize()
+        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        return KeyboardTheme.portraitCandidateBarHeight(
+            forWidth: refWidth,
+            hostTopPadding: effectiveHostTopPadding(),
+            screenSize: scr
+        )
     }
 
     private func desiredKeyboardHeight() -> CGFloat {
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
-        let isLandscape = refWidth > 520.0
+        let scr = syncChildHostScreenSize()
+        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let profile = KeyboardTheme.layoutProfile(forWidth: refWidth, screenSize: scr)
+        let isLandscape = (profile == .regularLandscape)
         let topPad = effectiveHostTopPadding()
         if isEmojiKeyboardActive {
-            return KeyboardTheme.emojiKeyboardHeight(forWidth: refWidth, isLandscape: isLandscape, hostTopPadding: topPad)
+            return KeyboardTheme.emojiKeyboardHeight(
+                forWidth: refWidth,
+                isLandscape: isLandscape,
+                hostTopPadding: topPad,
+                screenSize: scr
+            )
         }
-        return KeyboardTheme.portraitKeyboardHeight(forWidth: refWidth, hostTopPadding: topPad)
+        return KeyboardTheme.portraitKeyboardHeight(
+            forWidth: refWidth,
+            hostTopPadding: topPad,
+            screenSize: scr
+        )
     }
 
     private func updateKeyboardHeightConstraint(forceHostLayoutNotify: Bool = false, inLayoutPass: Bool = false) {

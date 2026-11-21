@@ -513,7 +513,7 @@ final class EmojiKeyboardView: UIView, UICollectionViewDataSource, UICollectionV
     }
 
     override func layoutSubviews() {
-        let targetTop: CGFloat = (bounds.width > 520.0) ? 3.5 : 7.0
+        let targetTop: CGFloat = (bounds.width > 520.0 && bounds.height < 240.0) ? 3.5 : 7.0
         if let topConstraint = topSearchTopConstraint, topConstraint.constant != targetTop {
             topConstraint.constant = targetTop
         }
@@ -522,9 +522,9 @@ final class EmojiKeyboardView: UIView, UICollectionViewDataSource, UICollectionV
         let h = collectionView.bounds.height
         guard w > 100 && h > 60 else { return }
 
-        // Exact 4 rows × 8 columns in portrait (3 rows × 11 columns in compact landscape)
+        // Exact 4 rows × 8 columns in portrait (10 columns Duo unfolded portrait, 3-4 rows × 11 columns in landscape/book)
         let rows: CGFloat = (h < 160.0) ? 3.0 : 4.0
-        let cols: CGFloat = (w > 520.0) ? 11.0 : 8.0
+        let cols: CGFloat = (w > 720.0) ? 11.0 : ((w > 520.0) ? 10.0 : 8.0)
         let leftInset: CGFloat = 11.5
         let rightInset: CGFloat = 3.5
         let vInset: CGFloat = 1.0

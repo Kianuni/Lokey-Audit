@@ -191,16 +191,73 @@ enum KeyboardTheme {
 
     // MARK: - Pixel-Calibrated iOS 26 Geometry & Return Key Mapping
 
+    enum LayoutProfile: Equatable {
+        case regularMiniPortrait
+        case regularCompactPortrait
+        case regularMaxPortrait
+        case regularLandscape
+        case duoCover
+        case duoUnfoldedPortrait
+        case duoUnfoldedLandscape
+    }
+
+    static func layoutProfile(forWidth width: CGFloat, screenSize: CGSize = .zero) -> LayoutProfile {
+        let minScreenDim = min(screenSize.width, screenSize.height)
+        let isLargeFoldableDisplay = minScreenDim >= 460.0
+        if width > 520.0 {
+            if isLargeFoldableDisplay {
+                let isLandscapeFoldableScreen = screenSize.width >= 600.0 && screenSize.width > screenSize.height
+                return (width > 725.0 || isLandscapeFoldableScreen) ? .duoUnfoldedLandscape : .duoUnfoldedPortrait
+            }
+            return .regularLandscape
+        }
+        if width >= 446.0 {
+            return .duoCover
+        }
+        if width <= 0.0 || width >= 428.0 {
+            return .regularMaxPortrait
+        }
+        if width >= 390.0 {
+            return .regularCompactPortrait
+        }
+        return .regularMiniPortrait
+    }
+
     /// Continuous squircle corner radius (`7.0pt` matches measured `12px` corner tangent reach on iOS 26).
     static let keyCornerRadius: CGFloat = 7.0
+
+    static func keyCornerRadius(for profile: LayoutProfile) -> CGFloat {
+        switch profile {
+        case .duoUnfoldedLandscape:
+            return 11.5
+        case .duoUnfoldedPortrait:
+            return 10.5
+        case .duoCover:
+            return 8.5
+        case .regularMiniPortrait, .regularCompactPortrait, .regularMaxPortrait, .regularLandscape:
+            return keyCornerRadius
+        }
+    }
+
     /// Top candidate strip height:
     /// - Max/Plus/Pro portrait (`>= 390pt`): `44.0pt` (`8.0pt` top breathing + `32.5pt` pill + `3.5pt` bottom breathing)
     /// - Mini/SE portrait (`< 390pt`): `41.0pt` (`5.5pt` top breathing + `32.0pt` pill + `3.5pt` bottom breathing)
     /// - Landscape (`> 520pt`): `36.0pt`
+    /// - iPhone Duo unfolded portrait (`669x951`): `48.0pt`; unfolded book/landscape (`951x669`): `46.0pt`
     static let candidateBarHeight: CGFloat = 44.0
     static let compactCandidateBarHeight: CGFloat = 41.0
-    static func firstKeyRowTopInset(forWidth width: CGFloat) -> CGFloat {
-        width > 520 ? 3.0 : 4.5
+    static let duoUnfoldedPortraitCandidateBarHeight: CGFloat = 48.0
+    static let duoUnfoldedLandscapeCandidateBarHeight: CGFloat = 46.0
+
+    static func firstKeyRowTopInset(forWidth width: CGFloat, screenSize: CGSize = .zero) -> CGFloat {
+        switch layoutProfile(forWidth: width, screenSize: screenSize) {
+        case .duoUnfoldedPortrait, .duoUnfoldedLandscape:
+            return 5.0
+        case .regularLandscape:
+            return 3.0
+        default:
+            return 4.5
+        }
     }
     static let candidateBarLandscapeHeight: CGFloat = 36.0
     /// Legacy host top padding ceiling (`17.0pt`) kept for explicit unit-test override clamping compatibility.
@@ -212,53 +269,91 @@ enum KeyboardTheme {
     /// Total portrait `UIInputView` height on Mini/SE widths (`< 390pt`: `239.0pt` = `41.0pt` candidate bar + `198.0pt` 4-row `KeyGridView`).
     static let miniPortraitKeyboardHeight: CGFloat = 239.0
     static let standardLandscapeKeyboardHeight: CGFloat = 197.5
-    /// Screen-adaptive Emoji keyboard heights (`290.0pt` Max/Plus, `276.0pt` Pro/Standard, `266.0pt` Mini/SE, `216.0pt` landscape).
+    static let duoUnfoldedPortraitKeyboardHeight: CGFloat = 281.0
+    static let duoUnfoldedLandscapeKeyboardHeight: CGFloat = 249.0
+    /// Screen-adaptive Emoji keyboard heights (`290.0pt` Max/Plus, `276.0pt` Pro/Standard, `266.0pt` Mini/SE, `216.0pt` landscape, Duo unfolded `296.0pt` / `264.0pt`).
     static let emojiPortraitKeyboardHeight: CGFloat = 290.0
     static let emojiCompactPortraitKeyboardHeight: CGFloat = 276.0
     static let emojiMiniPortraitKeyboardHeight: CGFloat = 266.0
     static let emojiLandscapeKeyboardHeight: CGFloat = 216.0
+    static let duoUnfoldedPortraitEmojiKeyboardHeight: CGFloat = 296.0
+    static let duoUnfoldedLandscapeEmojiKeyboardHeight: CGFloat = 264.0
 
-    /// Self-contained 4-tier screen-adaptive keyboard height (`width` determines portrait tier or landscape; optional `hostTopPadding` for test overrides).
-    static func portraitKeyboardHeight(forWidth width: CGFloat, hostTopPadding: CGFloat = 0.0) -> CGFloat {
-        if width > 520.0 {
+    /// Self-contained screen-adaptive keyboard height (`width` and optional `screenSize` determine tier/foldable profile; optional `hostTopPadding` for test overrides).
+    static func portraitKeyboardHeight(
+        forWidth width: CGFloat,
+        hostTopPadding: CGFloat = 0.0,
+        screenSize: CGSize = .zero
+    ) -> CGFloat {
+        let clampedPad = min(max(hostTopPadding, 0.0), iOS26RoundedHostTopPadding)
+        switch layoutProfile(forWidth: width, screenSize: screenSize) {
+        case .duoUnfoldedPortrait:
+            return duoUnfoldedPortraitKeyboardHeight - clampedPad
+        case .duoUnfoldedLandscape:
+            return duoUnfoldedLandscapeKeyboardHeight - clampedPad
+        case .regularLandscape:
             return standardLandscapeKeyboardHeight
+        case .duoCover, .regularMaxPortrait:
+            return standardPortraitKeyboardHeight - clampedPad
+        case .regularCompactPortrait:
+            return compactPortraitKeyboardHeight - clampedPad
+        case .regularMiniPortrait:
+            return miniPortraitKeyboardHeight - clampedPad
         }
-        let base: CGFloat
-        if width <= 0.0 || width >= 428.0 {
-            base = standardPortraitKeyboardHeight
-        } else if width >= 390.0 {
-            base = compactPortraitKeyboardHeight
-        } else {
-            base = miniPortraitKeyboardHeight
-        }
-        let clampedPad = min(max(hostTopPadding, 0.0), iOS26RoundedHostTopPadding)
-        return base - clampedPad
     }
 
-    /// Screen-adaptive `CandidateBarView` height (`44.0pt` >=390pt, `41.0pt` <390pt, `36.0pt` landscape; optional `hostTopPadding` clamped >= 31.0pt).
-    static func portraitCandidateBarHeight(forWidth width: CGFloat = 440.0, hostTopPadding: CGFloat = 0.0) -> CGFloat {
-        if width > 520.0 {
+    /// Screen-adaptive `CandidateBarView` height (`48.0pt` Duo unfolded portrait, `46.0pt` Duo unfolded book, `44.0pt` >=390pt, `41.0pt` <390pt, `36.0pt` landscape; optional `hostTopPadding` clamped >= 31.0pt).
+    static func portraitCandidateBarHeight(
+        forWidth width: CGFloat = 440.0,
+        hostTopPadding: CGFloat = 0.0,
+        screenSize: CGSize = .zero
+    ) -> CGFloat {
+        let clampedPad = min(max(hostTopPadding, 0.0), iOS26RoundedHostTopPadding)
+        switch layoutProfile(forWidth: width, screenSize: screenSize) {
+        case .duoUnfoldedPortrait:
+            return max(31.0, duoUnfoldedPortraitCandidateBarHeight - clampedPad)
+        case .duoUnfoldedLandscape:
+            return max(31.0, duoUnfoldedLandscapeCandidateBarHeight - clampedPad)
+        case .regularLandscape:
             return candidateBarLandscapeHeight
+        case .regularMiniPortrait:
+            return max(31.0, compactCandidateBarHeight - clampedPad)
+        case .duoCover, .regularCompactPortrait, .regularMaxPortrait:
+            return max(31.0, candidateBarHeight - clampedPad)
         }
-        let base = (width > 0.0 && width < 390.0) ? compactCandidateBarHeight : candidateBarHeight
-        let clampedPad = min(max(hostTopPadding, 0.0), iOS26RoundedHostTopPadding)
-        return max(31.0, base - clampedPad)
     }
 
-    static func emojiKeyboardHeight(forWidth width: CGFloat = 440.0, isLandscape: Bool, hostTopPadding: CGFloat = 0.0) -> CGFloat {
-        if isLandscape || width > 520.0 {
-            return emojiLandscapeKeyboardHeight
-        }
-        let base: CGFloat
-        if width <= 0.0 || width >= 428.0 {
-            base = emojiPortraitKeyboardHeight
-        } else if width >= 390.0 {
-            base = emojiCompactPortraitKeyboardHeight
-        } else {
-            base = emojiMiniPortraitKeyboardHeight
-        }
+    static func emojiKeyboardHeight(
+        forWidth width: CGFloat = 440.0,
+        isLandscape: Bool,
+        hostTopPadding: CGFloat = 0.0,
+        screenSize: CGSize = .zero
+    ) -> CGFloat {
         let clampedPad = min(max(hostTopPadding, 0.0), iOS26RoundedHostTopPadding)
-        return base - clampedPad
+        let profile = layoutProfile(forWidth: width, screenSize: screenSize)
+        switch profile {
+        case .duoUnfoldedPortrait:
+            return duoUnfoldedPortraitEmojiKeyboardHeight - clampedPad
+        case .duoUnfoldedLandscape:
+            return duoUnfoldedLandscapeEmojiKeyboardHeight - clampedPad
+        case .regularLandscape:
+            return emojiLandscapeKeyboardHeight
+        case .duoCover, .regularMaxPortrait:
+            if isLandscape {
+                return emojiLandscapeKeyboardHeight
+            }
+            return emojiPortraitKeyboardHeight - clampedPad
+        case .regularCompactPortrait:
+            if isLandscape {
+                return emojiLandscapeKeyboardHeight
+            }
+            return emojiCompactPortraitKeyboardHeight - clampedPad
+        case .regularMiniPortrait:
+            if isLandscape {
+                return emojiLandscapeKeyboardHeight
+            }
+            return emojiMiniPortraitKeyboardHeight - clampedPad
+        }
     }
 
     /// Disables iOS 26+ automatic `UIScrollEdgeEffect` Liquid Glass pocket blurs (`top`/`bottom`/`left`/`right`)

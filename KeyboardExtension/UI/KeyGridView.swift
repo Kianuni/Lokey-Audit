@@ -280,6 +280,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private struct AnchorGeometryKey: Equatable {
         let w2: Int32
         let h2: Int32
+        let profile: KeyboardTheme.LayoutProfile
         let showPeriod: Bool
         let needsGlobe: Bool
     }
@@ -320,7 +321,24 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private var lastReportedAnchorGeometryKey: AnchorGeometryKey?
     private var lastLaidOutGridSize: CGSize = .zero
     private var lastLaidOutPage: Page?
+    private var lastLaidOutProfile: KeyboardTheme.LayoutProfile?
+    private var currentKeyCornerRadius: CGFloat = KeyboardTheme.keyCornerRadius
     private var pendingDeferredPage: Page?
+
+    var hostScreenSize: CGSize = .zero {
+        didSet {
+            if oldValue != hostScreenSize {
+                setNeedsLayout()
+            }
+        }
+    }
+
+    private var resolvedScreenSize: CGSize {
+        if hostScreenSize.width > 0.0 && hostScreenSize.height > 0.0 {
+            return hostScreenSize
+        }
+        return window?.windowScene?.screen.bounds.size ?? .zero
+    }
 
     override var isHidden: Bool {
         didSet {
@@ -563,15 +581,15 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         if isHidden {
             needsRelayoutWhenUnhidden = true
             setNeedsLayout()
-        } else if Self.isValidGridSize(width: bounds.width, height: bounds.height) {
+        } else if Self.isValidGridSize(width: bounds.width, height: bounds.height, screenSize: resolvedScreenSize) {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             layoutKeyFrames(width: bounds.width, height: bounds.height)
             CATransaction.commit()
-        } else if bounds.width > 40 && bounds.height > 40 && bounds.height < Self.minimumValidGridHeight(forWidth: bounds.width) {
+        } else if bounds.width > 40 && bounds.height > 40 && bounds.height < Self.minimumValidGridHeight(forWidth: bounds.width, screenSize: resolvedScreenSize) {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            layoutKeyFrames(width: bounds.width, height: Self.canonicalFallbackGridHeight(forWidth: bounds.width))
+            layoutKeyFrames(width: bounds.width, height: Self.canonicalFallbackGridHeight(forWidth: bounds.width, screenSize: resolvedScreenSize))
             CATransaction.commit()
         } else {
             setNeedsLayout()
@@ -586,22 +604,38 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
-    static func minimumValidGridHeight(forWidth w: CGFloat) -> CGFloat {
-        if w > 520.0 {
+    static func minimumValidGridHeight(forWidth w: CGFloat, screenSize: CGSize = .zero) -> CGFloat {
+        switch KeyboardTheme.layoutProfile(forWidth: w, screenSize: screenSize) {
+        case .duoUnfoldedPortrait:
+            return 215.0
+        case .duoUnfoldedLandscape:
+            return 188.0
+        case .regularLandscape:
             return 140.0
+        case .duoCover, .regularMaxPortrait:
+            return w >= 428.0 ? 210.0 : 196.0
+        case .regularCompactPortrait, .regularMiniPortrait:
+            return 196.0
         }
-        return w >= 428.0 ? 210.0 : 196.0
     }
 
-    static func canonicalFallbackGridHeight(forWidth w: CGFloat) -> CGFloat {
-        if w > 520.0 {
+    static func canonicalFallbackGridHeight(forWidth w: CGFloat, screenSize: CGSize = .zero) -> CGFloat {
+        switch KeyboardTheme.layoutProfile(forWidth: w, screenSize: screenSize) {
+        case .duoUnfoldedPortrait:
+            return KeyboardTheme.duoUnfoldedPortraitKeyboardHeight - KeyboardTheme.duoUnfoldedPortraitCandidateBarHeight
+        case .duoUnfoldedLandscape:
+            return KeyboardTheme.duoUnfoldedLandscapeKeyboardHeight - KeyboardTheme.duoUnfoldedLandscapeCandidateBarHeight
+        case .regularLandscape:
             return KeyboardTheme.standardLandscapeKeyboardHeight - KeyboardTheme.candidateBarLandscapeHeight
+        case .duoCover, .regularMaxPortrait:
+            return w >= 428.0 ? 224.5 : 206.0
+        case .regularCompactPortrait, .regularMiniPortrait:
+            return 206.0
         }
-        return w >= 428.0 ? 224.5 : 206.0
     }
 
-    static func isValidGridSize(width w: CGFloat, height h: CGFloat) -> Bool {
-        w > 40.0 && h >= minimumValidGridHeight(forWidth: w) && h <= 360.0
+    static func isValidGridSize(width w: CGFloat, height h: CGFloat, screenSize: CGSize = .zero) -> Bool {
+        w > 40.0 && h >= minimumValidGridHeight(forWidth: w, screenSize: screenSize) && h <= 360.0
     }
 
     private var hasLaidOutKeyFrames: Bool {
@@ -684,12 +718,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         // Ignore transient zero-sized, compressed legacy host compat frames (`gridH = 168..176pt` when `view = 216..224pt`),
         // or fullscreen host snapshot frames (`gridH = 908pt` during app-switch animations) so physical keycap frames
         // and `SpatialTouchModel` normalized anchors are never distorted!
-        if !Self.isValidGridSize(width: w, height: h) {
-            if !hasLaidOutKeyFrames && w > 40.0 && h > 40.0 && h < Self.minimumValidGridHeight(forWidth: w) {
+        let screenSize = resolvedScreenSize
+        if !Self.isValidGridSize(width: w, height: h, screenSize: screenSize) {
+            if !hasLaidOutKeyFrames && w > 40.0 && h > 40.0 && h < Self.minimumValidGridHeight(forWidth: w, screenSize: screenSize) {
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
                 defer { CATransaction.commit() }
-                layoutKeyFrames(width: w, height: Self.canonicalFallbackGridHeight(forWidth: w))
+                layoutKeyFrames(width: w, height: Self.canonicalFallbackGridHeight(forWidth: w, screenSize: screenSize))
             }
             return
         }
@@ -702,26 +737,55 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     private func layoutKeyFrames(width w: CGFloat, height h: CGFloat) {
         let targetGridSize = CGSize(width: w, height: h)
+        let screenSize = resolvedScreenSize
+        let profile = KeyboardTheme.layoutProfile(forWidth: w, screenSize: screenSize)
         if hasLaidOutKeyFrames
             && !needsViewFrameSync
             && lastLaidOutGridSize == targetGridSize
             && lastLaidOutPage == page
+            && lastLaidOutProfile == profile
             && (page != .alphabetic || onAnchorsUpdated == nil || lastReportedAnchorGeometryKey != nil) {
             return
         }
         lastLaidOutGridSize = targetGridSize
         lastLaidOutPage = page
+        lastLaidOutProfile = profile
 
-        let isLandscape = w > 520
-        let isCompactPortraitGrid = !isLandscape && h < 216.0
-        // Exact iOS 26 Liquid Glass margins & gaps:
-        // - Max/Plus (`h >= 216pt`, e.g. `224.5pt`): `topPad = 4.5pt`, `bottomPad = 7.0pt`, `vGap = 11.0pt` -> `keyH = 45.0pt`
-        // - Pro/Standard (`h < 216pt`, e.g. `206.0pt`): `topPad = 4.5pt`, `bottomPad = 1.5pt`, `vGap = 10.5pt` -> `keyH = 42.125pt`
-        let sideInset: CGFloat = isLandscape ? 6.0 : 6.5
-        let hGap: CGFloat = isLandscape ? 7.0 : 6.25
-        let topPad = KeyboardTheme.firstKeyRowTopInset(forWidth: w)
-        let bottomPad: CGFloat = isLandscape ? 4.0 : (isCompactPortraitGrid ? 1.5 : 7.0)
-        let vGap: CGFloat = isLandscape ? 7.0 : (isCompactPortraitGrid ? 10.5 : 11.0)
+        let sideInset: CGFloat
+        let hGap: CGFloat
+        let topPad = KeyboardTheme.firstKeyRowTopInset(forWidth: w, screenSize: screenSize)
+        let bottomPad: CGFloat
+        let vGap: CGFloat
+        switch profile {
+        case .duoCover:
+            sideInset = 0.0
+            hGap = 6.0
+            bottomPad = 7.0
+            vGap = 11.0
+        case .duoUnfoldedPortrait:
+            sideInset = 11.0
+            hGap = 9.0
+            bottomPad = 3.0
+            vGap = 14.0
+        case .duoUnfoldedLandscape:
+            sideInset = w > 860.0 ? (w - 781.0) * 0.5 : 10.0
+            hGap = 10.0
+            bottomPad = 4.0
+            vGap = 13.0
+        case .regularLandscape:
+            sideInset = 6.0
+            hGap = 7.0
+            bottomPad = 4.0
+            vGap = 7.0
+        case .regularMiniPortrait, .regularCompactPortrait, .regularMaxPortrait:
+            let isCompactPortraitGrid = h < 216.0
+            sideInset = 6.5
+            hGap = 6.25
+            bottomPad = isCompactPortraitGrid ? 1.5 : 7.0
+            vGap = isCompactPortraitGrid ? 10.5 : 11.0
+        }
+        let cornerR = KeyboardTheme.keyCornerRadius(for: profile)
+        currentKeyCornerRadius = cornerR
 
         let keyH = max(30.0, (h - topPad - bottomPad - vGap * 3.0) / 4.0)
         let stdKeyW = (w - sideInset * 2.0 - hGap * 9.0) / 10.0
@@ -783,25 +847,40 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         let y3 = y2 + keyH + vGap
         let r3 = rowItems[3]
         if !r3.isEmpty {
-            let symmetricSideGroupW = 2.5 * stdKeyW + 1.5 * hGap
-            let returnW = symmetricSideGroupW
-
+            let returnW: CGFloat
             let modeSwitchW: CGFloat
             let globeW: CGFloat
             let emojiW: CGFloat
-            if needsGlobeKey {
-                // Home-button device fallback with 3 left buttons (`123`, `🌐`, `😊`)
-                let threeBtnGroupW = 3.0 * stdKeyW + 2.0 * hGap
-                let each = (threeBtnGroupW - 2.0 * hGap) / 3.0
-                modeSwitchW = each
-                globeW = each
-                emojiW = each
+            if profile == .duoUnfoldedPortrait || profile == .duoUnfoldedLandscape {
+                returnW = 1.85 * stdKeyW + 0.5 * hGap
+                if needsGlobeKey {
+                    let each = 0.82 * stdKeyW
+                    modeSwitchW = each
+                    globeW = each
+                    emojiW = each
+                } else {
+                    modeSwitchW = stdKeyW
+                    globeW = 0
+                    emojiW = stdKeyW
+                }
             } else {
-                // Standard Face ID iPhone / iOS 26: `123` and `😊` split `symmetricSideGroupW` equally!
-                let each = (symmetricSideGroupW - hGap) * 0.5
-                modeSwitchW = each
-                globeW = 0
-                emojiW = each
+                let symmetricSideGroupW = 2.5 * stdKeyW + 1.5 * hGap
+                returnW = symmetricSideGroupW
+
+                if needsGlobeKey {
+                    // Home-button device fallback with 3 left buttons (`123`, `🌐`, `😊`)
+                    let threeBtnGroupW = 3.0 * stdKeyW + 2.0 * hGap
+                    let each = (threeBtnGroupW - 2.0 * hGap) / 3.0
+                    modeSwitchW = each
+                    globeW = each
+                    emojiW = each
+                } else {
+                    // Standard Face ID iPhone / iOS 26: `123` and `😊` split `symmetricSideGroupW` equally!
+                    let each = (symmetricSideGroupW - hGap) * 0.5
+                    modeSwitchW = each
+                    globeW = 0
+                    emojiW = each
+                }
             }
 
             let periodW: CGFloat = (showPeriodBesideSpace && page == .alphabetic) ? stdKeyW : 0
@@ -840,8 +919,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         } else {
             needsViewFrameSync = false
             for row in rowItems {
-                for item in row where item.view.frame != item.frame {
-                    item.view.frame = item.frame
+                for item in row {
+                    if item.view.frame != item.frame {
+                        item.view.frame = item.frame
+                    }
+                    if item.view.layer.cornerRadius != cornerR {
+                        item.view.layer.cornerRadius = cornerR
+                    }
                 }
             }
         }
@@ -854,6 +938,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             let geomKey = AnchorGeometryKey(
                 w2: Int32((w * 2).rounded()),
                 h2: Int32((h * 2).rounded()),
+                profile: profile,
                 showPeriod: showPeriodBesideSpace,
                 needsGlobe: needsGlobeKey
             )
@@ -886,8 +971,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
               let bubbleSuper = bubble.superview else { return }
         let row0MinY = convert(r0First.frame.origin, to: bubbleSuper).y
         let row1MinY = convert(r1First.frame.origin, to: bubbleSuper).y
-        let isLandscape = bounds.width > 520.0
-        let sideInset: CGFloat = isLandscape ? 6.0 : 6.5
+        let sideInset: CGFloat = r0First.frame.minX
         let cw = bubbleSuper.bounds.width > 0 ? bubbleSuper.bounds.width : bounds.width
         bubble.prewarm(
             keyWidth: r0First.frame.width,
@@ -918,9 +1002,15 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
+        let cornerR = currentKeyCornerRadius
         for row in rowItems {
-            for item in row where item.view.frame != item.frame {
-                item.view.frame = item.frame
+            for item in row {
+                if item.view.frame != item.frame {
+                    item.view.frame = item.frame
+                }
+                if item.view.layer.cornerRadius != cornerR {
+                    item.view.layer.cornerRadius = cornerR
+                }
             }
         }
     }
