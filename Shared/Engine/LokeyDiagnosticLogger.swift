@@ -1874,3 +1874,937 @@ public extension LokeyTouchCalibration {
         }
     }
 }
+
+// MARK: - Candidate Selection Mismatch / Feedback Logger (选词纠偏样本本)
+
+/// Structured record of a real-world candidate selection mismatch (`top1Predicted` vs `userChosen`)
+/// accumulated locally for future offline neural / lexicon distillation.
+public struct LokeySelectionFeedbackEntry: Codable, Sendable, Equatable, Identifiable {
+    public enum Kind: String, Codable, Sendable, CaseIterable {
+        case nonTopSelect = "non_top"
+        case stepwiseCompose = "stepwise"
+
+        public var title: String {
+            switch self {
+            case .nonTopSelect:
+                return "直接改选"
+            case .stepwiseCompose:
+                return "分步拼词"
+            }
+        }
+    }
+
+    public var id: UInt64
+    public var wallTime: String
+    public var kind: Kind
+    public var pinyinScheme: String
+    public var precedingContext: String
+    public var rawInput: String
+    public var matchedPinyin: String
+    public var top1Predicted: String
+    public var userChosen: String
+    public var selectedIndex: Int
+    public var topCandidatesPreview: [String]
+
+    public init(
+        id: UInt64,
+        wallTime: String,
+        kind: Kind,
+        pinyinScheme: String,
+        precedingContext: String,
+        rawInput: String,
+        matchedPinyin: String,
+        top1Predicted: String,
+        userChosen: String,
+        selectedIndex: Int,
+        topCandidatesPreview: [String]
+    ) {
+        self.id = id
+        self.wallTime = wallTime
+        self.kind = kind
+        self.pinyinScheme = pinyinScheme
+        self.precedingContext = precedingContext
+        self.rawInput = rawInput
+        self.matchedPinyin = matchedPinyin
+        self.top1Predicted = top1Predicted
+        self.userChosen = userChosen
+        self.selectedIndex = selectedIndex
+        self.topCandidatesPreview = topCandidatesPreview
+    }
+}
+
+/// Persistent snapshot of candidate selection accuracy counters and up to `5,000` mismatch entries.
+public struct LokeySelectionFeedbackSnapshot: Codable, Sendable, Equatable {
+    public var clearEpoch: UInt64 = 1
+    public var mutationSeq: UInt64 = 0
+    public var nextEntryID: UInt64 = 1
+    public var totalComposingCommits: UInt64 = 0
+    public var top1HitCount: UInt64 = 0
+    public var mismatchCount: UInt64 = 0
+    public var entries: [LokeySelectionFeedbackEntry] = []
+
+    public init() {}
+
+    public var top1HitRatePercent: Double? {
+        guard totalComposingCommits > 0 else { return nil }
+        return Double(top1HitCount) * 100.0 / Double(totalComposingCommits)
+    }
+}
+
+private enum BufferedSelectionFeedbackEntry {
+    case recorded(
+        id: UInt64,
+        wallMicros: Int64,
+        kind: LokeySelectionFeedbackEntry.Kind,
+        pinyinScheme: String,
+        precedingContext: String,
+        rawInput: String,
+        matchedPinyin: String,
+        top1Predicted: String,
+        userChosen: String,
+        selectedIndex: Int,
+        topCandidatesPreview: [String]
+    )
+    case restored(LokeySelectionFeedbackEntry)
+
+    var entryID: UInt64 {
+        switch self {
+        case let .recorded(id, _, _, _, _, _, _, _, _, _, _):
+            return id
+        case let .restored(entry):
+            return entry.id
+        }
+    }
+
+    func rendered(lastSec: inout time_t, lastTM: inout tm) -> LokeySelectionFeedbackEntry {
+        switch self {
+        case let .restored(entry):
+            return entry
+        case let .recorded(
+            id,
+            wallMicros,
+            kind,
+            pinyinScheme,
+            precedingContext,
+            rawInput,
+            matchedPinyin,
+            top1Predicted,
+            userChosen,
+            selectedIndex,
+            topCandidatesPreview
+        ):
+            var sec = time_t(wallMicros / 1_000_000)
+            if wallMicros < 0 && wallMicros % 1_000_000 != 0 {
+                sec &-= 1
+            }
+            if sec != lastSec {
+                var s = sec
+                localtime_r(&s, &lastTM)
+                lastSec = sec
+            }
+            let mon = max(1, min(12, Int(lastTM.tm_mon) + 1))
+            let day = max(1, min(31, Int(lastTM.tm_mday)))
+            let h = max(0, min(23, Int(lastTM.tm_hour)))
+            let m = max(0, min(59, Int(lastTM.tm_min)))
+            let s = max(0, min(60, Int(lastTM.tm_sec)))
+            var buf: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) = (
+                UInt8(48 + (mon / 10) % 10), UInt8(48 + mon % 10), 45, // MM-
+                UInt8(48 + (day / 10) % 10), UInt8(48 + day % 10), 32, // dd_
+                UInt8(48 + (h / 10) % 10), UInt8(48 + h % 10), 58,     // HH:
+                UInt8(48 + (m / 10) % 10), UInt8(48 + m % 10), 58,     // mm:
+                UInt8(48 + (s / 10) % 10), UInt8(48 + s % 10)          // ss
+            )
+            let wall = withUnsafeBytes(of: &buf) { String(decoding: $0, as: UTF8.self) }
+            return LokeySelectionFeedbackEntry(
+                id: id,
+                wallTime: wall,
+                kind: kind,
+                pinyinScheme: pinyinScheme,
+                precedingContext: precedingContext,
+                rawInput: rawInput,
+                matchedPinyin: matchedPinyin,
+                top1Predicted: top1Predicted,
+                userChosen: userChosen,
+                selectedIndex: selectedIndex,
+                topCandidatesPreview: topCandidatesPreview
+            )
+        }
+    }
+}
+
+private struct SelectionFeedbackRing {
+    private var storage: [BufferedSelectionFeedbackEntry] = []
+    private var next = 0
+    private(set) var count = 0
+
+    var firstEntryID: UInt64? {
+        guard count > 0 else { return nil }
+        let startIndex = count == LokeySelectionFeedbackLogger.maxEntries ? next : 0
+        return storage[startIndex].entryID
+    }
+
+    mutating func append(_ entry: BufferedSelectionFeedbackEntry) {
+        if count < LokeySelectionFeedbackLogger.maxEntries {
+            if storage.isEmpty {
+                storage.reserveCapacity(32)
+            }
+            storage.append(entry)
+            count += 1
+            next = count % LokeySelectionFeedbackLogger.maxEntries
+        } else {
+            storage[next] = entry
+            next = (next + 1) % LokeySelectionFeedbackLogger.maxEntries
+        }
+    }
+
+    func copyOrderedRawEntries() -> [BufferedSelectionFeedbackEntry] {
+        guard count > 0 else { return [] }
+        var copy = [BufferedSelectionFeedbackEntry]()
+        copy.reserveCapacity(count)
+        if count < LokeySelectionFeedbackLogger.maxEntries {
+            copy.append(contentsOf: storage)
+        } else {
+            copy.append(contentsOf: storage[next..<LokeySelectionFeedbackLogger.maxEntries])
+            if next > 0 {
+                copy.append(contentsOf: storage[0..<next])
+            }
+        }
+        return copy
+    }
+
+    func copyNewerRawEntries(after lastID: UInt64) -> [BufferedSelectionFeedbackEntry] {
+        guard count > 0 else { return [] }
+        var copy = [BufferedSelectionFeedbackEntry]()
+        if count < LokeySelectionFeedbackLogger.maxEntries {
+            Self.appendNewerRaw(from: storage[0..<count], after: lastID, into: &copy)
+        } else {
+            Self.appendNewerRaw(from: storage[next..<LokeySelectionFeedbackLogger.maxEntries], after: lastID, into: &copy)
+            if next > 0 {
+                Self.appendNewerRaw(from: storage[0..<next], after: lastID, into: &copy)
+            }
+        }
+        return copy
+    }
+
+    static func renderEntries(_ rawEntries: [BufferedSelectionFeedbackEntry]) -> [LokeySelectionFeedbackEntry] {
+        guard !rawEntries.isEmpty else { return [] }
+        var result = [LokeySelectionFeedbackEntry]()
+        result.reserveCapacity(rawEntries.count)
+        var lastSec = time_t.min
+        var lastTM = tm()
+        for entry in rawEntries {
+            result.append(entry.rendered(lastSec: &lastSec, lastTM: &lastTM))
+        }
+        return result
+    }
+
+    func orderedEntries() -> [LokeySelectionFeedbackEntry] {
+        Self.renderEntries(copyOrderedRawEntries())
+    }
+
+    private static func appendNewerRaw(
+        from slice: ArraySlice<BufferedSelectionFeedbackEntry>,
+        after lastID: UInt64,
+        into copy: inout [BufferedSelectionFeedbackEntry]
+    ) {
+        guard let last = slice.last, last.entryID > lastID else { return }
+        var lo = slice.startIndex
+        if let first = slice.first, first.entryID <= lastID {
+            var hi = slice.endIndex
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2
+                if slice[mid].entryID <= lastID {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+        }
+        copy.append(contentsOf: slice[lo..<slice.endIndex])
+    }
+}
+
+/// Persistent, zero-network, main-thread non-blocking collector of candidate selection mismatches
+/// (up to `5,000` entries) with automatic secure-field redaction and one-tap TSV export.
+public final class LokeySelectionFeedbackLogger: @unchecked Sendable {
+    public static let shared = LokeySelectionFeedbackLogger()
+    public static let maxEntries = 5000
+    private static let defaultsStorageKey = "com.kianuni.lokey.selection_feedback.v1"
+    private static let fileName = "lokey_selection_feedback.json"
+
+    private let lockPtr: UnsafeMutablePointer<os_unfair_lock_s>
+    private let flagStorage: FastFlagStorage
+    private var snapshot = LokeySelectionFeedbackSnapshot()
+    private var entries = SelectionFeedbackRing()
+    private var _isEnabled: Bool = true
+    private var _isSecureContext: Bool = false
+    private var clockBaseWallMicros: Int64
+    private var lastEventUptime: TimeInterval = 0
+    private var pendingFlushWorkItem: DispatchWorkItem?
+    private var didBootstrapFromDisk: Bool = false
+    private var ringRevision: UInt64 = 0
+
+    // `ioQueue`-exclusive incremental materialization & dirty-check state.
+    private var cachedMaterializedEpoch: UInt64 = 0
+    private var cachedMaterializedRevision: UInt64 = 0
+    private var cachedMaterializedEntries: [LokeySelectionFeedbackEntry] = []
+    private var lastFlushedEpoch: UInt64 = 1
+    private var lastFlushedMutationSeq: UInt64 = 0
+    private let ioEncoder = JSONEncoder()
+
+    private let ioQueue = DispatchQueue(label: "com.kianuni.lokey.selectionFeedbackIO", qos: .utility)
+    private let fileURLOverride: URL?
+
+    private static func computeClockBaseWallMicros() -> Int64 {
+        var stamp = timeval()
+        gettimeofday(&stamp, nil)
+        let uptimeMicros = Int64((ProcessInfo.processInfo.systemUptime * 1_000_000.0).rounded())
+        let wallMicros = Int64(stamp.tv_sec) * 1_000_000 &+ Int64(stamp.tv_usec)
+        return wallMicros &- uptimeMicros
+    }
+
+    public init(fileURLOverride: URL? = nil, initialEnabled: Bool = true) {
+        let ptr = UnsafeMutablePointer<os_unfair_lock_s>.allocate(capacity: 1)
+        ptr.initialize(to: os_unfair_lock_s())
+        self.lockPtr = ptr
+        self.flagStorage = FastFlagStorage(isEnabled: initialEnabled)
+        self.fileURLOverride = fileURLOverride
+        self._isEnabled = initialEnabled
+        self.clockBaseWallMicros = Self.computeClockBaseWallMicros()
+    }
+
+    deinit {
+        lockPtr.deinitialize(count: 1)
+        lockPtr.deallocate()
+    }
+
+    private var targetFileURL: URL {
+        fileURLOverride ?? LokeyAppGroup.sharedSelectionFeedbackFileURL()
+    }
+
+    private var localExtensionBackupURL: URL {
+        LokeyAppGroup.localPrivateSupportDirectoryURL().appendingPathComponent(Self.fileName)
+    }
+
+    private var isRunningInExtension: Bool {
+        Bundle.main.bundleURL.pathExtension == "appex"
+    }
+
+    private static func isNewer(_ a: LokeySelectionFeedbackSnapshot, than b: LokeySelectionFeedbackSnapshot) -> Bool {
+        if a.clearEpoch != b.clearEpoch {
+            return a.clearEpoch > b.clearEpoch
+        }
+        if a.mutationSeq != b.mutationSeq {
+            return a.mutationSeq > b.mutationSeq
+        }
+        return a.nextEntryID > b.nextEntryID
+    }
+
+    public var isEnabled: Bool {
+        @inline(__always)
+        get { flagStorage.readIsEnabled() }
+        set {
+            os_unfair_lock_lock(lockPtr)
+            _isEnabled = newValue
+            flagStorage.update(isEnabled: newValue, isSecureContext: _isSecureContext)
+            os_unfair_lock_unlock(lockPtr)
+        }
+    }
+
+    public var isSecureContext: Bool {
+        @inline(__always)
+        get { flagStorage.readIsSecureContext() }
+        set {
+            os_unfair_lock_lock(lockPtr)
+            _isSecureContext = newValue
+            flagStorage.update(isEnabled: _isEnabled, isSecureContext: newValue)
+            os_unfair_lock_unlock(lockPtr)
+        }
+    }
+
+    @inline(__always)
+    public var canRecord: Bool {
+        flagStorage.readCanRecord()
+    }
+
+    // MARK: - Recording API (O(1), lock-protected, zero disk/JSON work on `.main`)
+
+    public func recordTop1Hit() {
+        guard flagStorage.readCanRecord() else { return }
+        let nowUptime = ProcessInfo.processInfo.systemUptime
+        os_unfair_lock_lock(lockPtr)
+        guard _isEnabled, !_isSecureContext else {
+            os_unfair_lock_unlock(lockPtr)
+            return
+        }
+        snapshot.totalComposingCommits &+= 1
+        snapshot.top1HitCount &+= 1
+        snapshot.mutationSeq &+= 1
+        lastEventUptime = nowUptime
+        let needsFlush = (pendingFlushWorkItem == nil)
+        os_unfair_lock_unlock(lockPtr)
+        if needsFlush { scheduleCoalescedFlush() }
+    }
+
+    public func recordMismatch(
+        kind: LokeySelectionFeedbackEntry.Kind,
+        pinyinScheme: String,
+        precedingContext: String,
+        rawInput: String,
+        matchedPinyin: String,
+        top1Predicted: String,
+        userChosen: String,
+        selectedIndex: Int,
+        topCandidatesPreview: [String],
+        alsoCountCommit: Bool = true
+    ) {
+        guard flagStorage.readCanRecord() else { return }
+        let sanitizedRaw = Self.sanitizeField(rawInput)
+        let sanitizedTop1 = Self.sanitizeField(top1Predicted)
+        let sanitizedChosen = Self.sanitizeField(userChosen)
+        guard !sanitizedRaw.isEmpty, !sanitizedTop1.isEmpty, !sanitizedChosen.isEmpty else { return }
+        let sanitizedCtx = String(Self.sanitizeField(precedingContext).suffix(10))
+        let sanitizedMatched = Self.sanitizeField(matchedPinyin)
+        let sanitizedScheme = Self.sanitizeField(pinyinScheme)
+        let sanitizedPreview = Array(topCandidatesPreview.map { Self.sanitizeField($0) }.filter { !$0.isEmpty }.prefix(5))
+
+        let nowUptime = ProcessInfo.processInfo.systemUptime
+        os_unfair_lock_lock(lockPtr)
+        guard _isEnabled, !_isSecureContext else {
+            os_unfair_lock_unlock(lockPtr)
+            return
+        }
+        if alsoCountCommit {
+            snapshot.totalComposingCommits &+= 1
+        }
+        snapshot.mismatchCount &+= 1
+        snapshot.mutationSeq &+= 1
+        let entryID = snapshot.nextEntryID
+        snapshot.nextEntryID &+= 1
+        lastEventUptime = nowUptime
+        let wallMicros = clockBaseWallMicros &+ Int64((nowUptime * 1_000_000.0).rounded())
+        entries.append(
+            .recorded(
+                id: entryID,
+                wallMicros: wallMicros,
+                kind: kind,
+                pinyinScheme: sanitizedScheme,
+                precedingContext: sanitizedCtx,
+                rawInput: sanitizedRaw,
+                matchedPinyin: sanitizedMatched,
+                top1Predicted: sanitizedTop1,
+                userChosen: sanitizedChosen,
+                selectedIndex: max(0, selectedIndex),
+                topCandidatesPreview: sanitizedPreview
+            )
+        )
+        let needsFlush = (pendingFlushWorkItem == nil)
+        os_unfair_lock_unlock(lockPtr)
+        if needsFlush { scheduleCoalescedFlush() }
+    }
+
+    // MARK: - Persistence & Lifecycle
+
+    public func bootstrapFromDiskIfNeeded() {
+        os_unfair_lock_lock(lockPtr)
+        if didBootstrapFromDisk {
+            os_unfair_lock_unlock(lockPtr)
+            return
+        }
+        didBootstrapFromDisk = true
+        os_unfair_lock_unlock(lockPtr)
+        _ = reloadFromDisk()
+    }
+
+    public func bootstrapFromDiskAsync() {
+        os_unfair_lock_lock(lockPtr)
+        if didBootstrapFromDisk {
+            os_unfair_lock_unlock(lockPtr)
+            return
+        }
+        didBootstrapFromDisk = true
+        os_unfair_lock_unlock(lockPtr)
+        ioQueue.async { [weak self] in
+            self?.mergeBootstrapFromDiskOnQueue()
+        }
+    }
+
+    private func mergeBootstrapFromDiskOnQueue() {
+        guard let loaded = readBestSnapshotFromStorage() else { return }
+        let diskSnap = loaded.snapshot
+        var shouldPromote = loaded.needsSharedPromotion
+        var promoteCopy: LokeySelectionFeedbackSnapshot?
+
+        os_unfair_lock_lock(lockPtr)
+        if diskSnap.clearEpoch >= snapshot.clearEpoch && snapshot.mutationSeq == 0 && entries.count == 0 {
+            installSnapshotLocked(diskSnap)
+            lastFlushedEpoch = diskSnap.clearEpoch
+            lastFlushedMutationSeq = diskSnap.mutationSeq
+            if shouldPromote {
+                promoteCopy = Self.materialize(snapshot, entries.copyOrderedRawEntries())
+            }
+        } else if diskSnap.clearEpoch >= snapshot.clearEpoch && (diskSnap.mutationSeq > 0 || diskSnap.nextEntryID > 1) {
+            let earlyEntries = entries.orderedEntries()
+            let earlyHeader = snapshot
+            var merged = diskSnap
+            merged.totalComposingCommits &+= earlyHeader.totalComposingCommits
+            merged.top1HitCount &+= earlyHeader.top1HitCount
+            merged.mismatchCount &+= earlyHeader.mismatchCount
+            merged.mutationSeq = diskSnap.mutationSeq &+ earlyHeader.mutationSeq
+            for var e in earlyEntries {
+                let id = merged.nextEntryID
+                merged.nextEntryID &+= 1
+                e.id = id
+                merged.entries.append(e)
+            }
+            installSnapshotLocked(merged)
+            shouldPromote = true
+            promoteCopy = Self.materialize(snapshot, entries.copyOrderedRawEntries())
+        }
+        os_unfair_lock_unlock(lockPtr)
+
+        if shouldPromote, let promoteCopy {
+            writeSnapshotToDisk(promoteCopy, notifyIPC: true, forceWrite: true)
+        }
+    }
+
+    @discardableResult
+    public func reloadFromDisk() -> LokeySelectionFeedbackSnapshot {
+        guard let loaded = readBestSnapshotFromStorage() else {
+            return currentSnapshot()
+        }
+        let diskSnap = loaded.snapshot
+        var shouldPromote = loaded.needsSharedPromotion
+        os_unfair_lock_lock(lockPtr)
+        if snapshot.clearEpoch > diskSnap.clearEpoch || (Self.isNewer(snapshot, than: diskSnap) && isRunningInExtension) {
+            shouldPromote = true
+        } else {
+            installSnapshotLocked(diskSnap)
+            lastFlushedEpoch = diskSnap.clearEpoch
+            lastFlushedMutationSeq = diskSnap.mutationSeq
+        }
+        let header = snapshot
+        let rawEntries = entries.copyOrderedRawEntries()
+        os_unfair_lock_unlock(lockPtr)
+        let copy = Self.materialize(header, rawEntries)
+        if shouldPromote {
+            ioQueue.async { [weak self] in
+                self?.writeSnapshotToDisk(copy, notifyIPC: true, forceWrite: true)
+            }
+        }
+        return copy
+    }
+
+    public func reloadFromDiskAsync(completion: @escaping @Sendable (LokeySelectionFeedbackSnapshot) -> Void) {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            let loaded = self.reloadFromDisk()
+            completion(loaded)
+        }
+    }
+
+    public func syncExternalClearAsync() {
+        ioQueue.async { [weak self] in
+            self?.syncExternalClearIfNeeded()
+        }
+    }
+
+    public func syncExternalClearIfNeeded() {
+        guard let loaded = readBestSnapshotFromStorage() else { return }
+        let diskSnap = loaded.snapshot
+        var clearedCopy: LokeySelectionFeedbackSnapshot?
+        os_unfair_lock_lock(lockPtr)
+        if diskSnap.clearEpoch > snapshot.clearEpoch {
+            installSnapshotLocked(diskSnap)
+            lastEventUptime = 0
+            lastFlushedEpoch = diskSnap.clearEpoch
+            lastFlushedMutationSeq = diskSnap.mutationSeq
+            clearedCopy = diskSnap
+        }
+        os_unfair_lock_unlock(lockPtr)
+        if let clearedCopy, isRunningInExtension {
+            ioQueue.async { [weak self] in
+                self?.writeSnapshotToDisk(clearedCopy, notifyIPC: false, isClearReset: true, forceWrite: true)
+            }
+        }
+    }
+
+    public func currentSnapshot() -> LokeySelectionFeedbackSnapshot {
+        os_unfair_lock_lock(lockPtr)
+        let header = snapshot
+        let rawEntries = entries.copyOrderedRawEntries()
+        os_unfair_lock_unlock(lockPtr)
+        return Self.materialize(header, rawEntries)
+    }
+
+    public func flushSynchronously() {
+        ioQueue.sync { flushOnIOQueue() }
+    }
+
+    public func flushAsync() {
+        ioQueue.async { [weak self] in self?.flushOnIOQueue() }
+    }
+
+    public func clear() {
+        ioQueue.sync { _ = clearOnIOQueue() }
+    }
+
+    public func clearAsync(completion: (@Sendable (LokeySelectionFeedbackSnapshot) -> Void)? = nil) {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            let cleared = self.clearOnIOQueue()
+            completion?(cleared)
+        }
+    }
+
+    // MARK: - TSV Export Formatter
+
+    public static func formatTSVReport(snapshot: LokeySelectionFeedbackSnapshot, appVersion: String) -> String {
+        let total = snapshot.totalComposingCommits
+        let hits = snapshot.top1HitCount
+        let rateStr: String
+        if let rate = snapshot.top1HitRatePercent {
+            rateStr = String(format: "%.1f%%", rate)
+        } else {
+            rateStr = "待统计"
+        }
+        var lines: [String] = []
+        lines.reserveCapacity(snapshot.entries.count + 4)
+        lines.append("# Lokey 选词纠偏样本本 (v\(appVersion))")
+        lines.append("# 累计上屏: \(total) 次 | 首选一次命中: \(hits) 次 (\(rateStr)) | 累计纠偏: \(snapshot.mismatchCount) 次 | 当前样本: \(snapshot.entries.count)/\(Self.maxEntries) 条")
+        lines.append("id\ttime\tkind\tscheme\tcontext\traw_input\tmatched_pinyin\ttop1_predicted\tuser_chosen\tchosen_rank\tcandidates_top5")
+        for e in snapshot.entries {
+            let preview = e.topCandidatesPreview.map { sanitizeField($0) }.joined(separator: "|")
+            let cols: [String] = [
+                String(e.id),
+                sanitizeField(e.wallTime),
+                e.kind.rawValue,
+                sanitizeField(e.pinyinScheme),
+                sanitizeField(e.precedingContext),
+                sanitizeField(e.rawInput),
+                sanitizeField(e.matchedPinyin),
+                sanitizeField(e.top1Predicted),
+                sanitizeField(e.userChosen),
+                String(e.selectedIndex + 1),
+                preview,
+            ]
+            lines.append(cols.joined(separator: "\t"))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Internals
+
+    private static func sanitizeField(_ value: String) -> String {
+        guard !value.isEmpty else { return "" }
+        var out = ""
+        out.reserveCapacity(value.count)
+        var lastWasSpace = false
+        for scalar in value.unicodeScalars {
+            if scalar == "\t" || scalar == "\r" || scalar == "\n" {
+                if !lastWasSpace {
+                    out.append(" ")
+                    lastWasSpace = true
+                }
+            } else {
+                out.unicodeScalars.append(scalar)
+                lastWasSpace = (scalar == " ")
+            }
+        }
+        return out
+    }
+
+    private func installSnapshotLocked(_ loaded: LokeySelectionFeedbackSnapshot) {
+        ringRevision &+= 1
+        snapshot = loaded
+        snapshot.entries = []
+        entries = SelectionFeedbackRing()
+        for entry in loaded.entries.suffix(Self.maxEntries) {
+            entries.append(.restored(entry))
+        }
+    }
+
+    private static func materialize(
+        _ header: LokeySelectionFeedbackSnapshot,
+        _ rawEntries: [BufferedSelectionFeedbackEntry]
+    ) -> LokeySelectionFeedbackSnapshot {
+        var result = header
+        result.entries = SelectionFeedbackRing.renderEntries(rawEntries)
+        return result
+    }
+
+    private func readBestSnapshotFromStorage() -> (snapshot: LokeySelectionFeedbackSnapshot, needsSharedPromotion: Bool)? {
+        let decoder = JSONDecoder()
+        if let override = fileURLOverride {
+            guard let data = try? Data(contentsOf: override),
+                  let snap = try? decoder.decode(LokeySelectionFeedbackSnapshot.self, from: data) else {
+                return nil
+            }
+            return (snap, false)
+        }
+
+        LokeyAppGroup.invalidateCacheIfUnresolved()
+        var bestShared: LokeySelectionFeedbackSnapshot?
+        let containers = LokeyAppGroup.accessibleContainers()
+        for item in containers {
+            let fURL = item.lokeyDir.appendingPathComponent(Self.fileName)
+            var didReadContainerFile = false
+            if let data = try? Data(contentsOf: fURL),
+               let s = try? decoder.decode(LokeySelectionFeedbackSnapshot.self, from: data) {
+                didReadContainerFile = true
+                if let cur = bestShared {
+                    if Self.isNewer(s, than: cur) { bestShared = s }
+                } else {
+                    bestShared = s
+                }
+            }
+            if !didReadContainerFile,
+               let suite = UserDefaults(suiteName: item.id),
+               let data = suite.data(forKey: Self.defaultsStorageKey),
+               let s = try? decoder.decode(LokeySelectionFeedbackSnapshot.self, from: data) {
+                if let cur = bestShared {
+                    if Self.isNewer(s, than: cur) { bestShared = s }
+                } else {
+                    bestShared = s
+                }
+            }
+        }
+
+        if bestShared == nil {
+            let fallbackURL = targetFileURL
+            if let data = try? Data(contentsOf: fallbackURL),
+               let s = try? decoder.decode(LokeySelectionFeedbackSnapshot.self, from: data) {
+                bestShared = s
+            }
+        }
+
+        if isRunningInExtension,
+           let localData = try? Data(contentsOf: localExtensionBackupURL),
+           let localSnap = try? decoder.decode(LokeySelectionFeedbackSnapshot.self, from: localData) {
+            if let shared = bestShared {
+                if Self.isNewer(localSnap, than: shared) {
+                    return (localSnap, !containers.isEmpty)
+                }
+                return (shared, false)
+            }
+            return (localSnap, !containers.isEmpty)
+        }
+
+        if let shared = bestShared {
+            return (shared, false)
+        }
+        return nil
+    }
+
+    private func scheduleCoalescedFlush(delay: TimeInterval? = nil) {
+        let isTestOverride = (fileURLOverride != nil)
+        let defaultDelay: TimeInterval = isTestOverride ? 0.14 : 0.55
+        let idleGate: TimeInterval = isTestOverride ? 0.12 : 0.45
+        let targetDelay = delay ?? defaultDelay
+
+        os_unfair_lock_lock(lockPtr)
+        if pendingFlushWorkItem != nil {
+            os_unfair_lock_unlock(lockPtr)
+            return
+        }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            os_unfair_lock_lock(self.lockPtr)
+            let idle = now - self.lastEventUptime
+            if self.lastEventUptime > 0 && idle >= 0 && idle < idleGate {
+                self.pendingFlushWorkItem = nil
+                os_unfair_lock_unlock(self.lockPtr)
+                self.scheduleCoalescedFlush(delay: max(0.01, idleGate - idle))
+                return
+            }
+            self.pendingFlushWorkItem = nil
+
+            let headerPreview = self.snapshot
+            if headerPreview.clearEpoch == self.lastFlushedEpoch && headerPreview.mutationSeq == self.lastFlushedMutationSeq {
+                os_unfair_lock_unlock(self.lockPtr)
+                return
+            }
+            let captured = self.captureIOQueueDeltaLocked()
+            os_unfair_lock_unlock(self.lockPtr)
+            let snap = self.materializeForIOQueue(
+                captured.header,
+                revision: captured.revision,
+                ringCount: captured.ringCount,
+                firstRingID: captured.firstRingID,
+                rawDelta: captured.rawDelta
+            )
+            self.writeSnapshotToDisk(snap, notifyIPC: true)
+        }
+        pendingFlushWorkItem = item
+        os_unfair_lock_unlock(lockPtr)
+        ioQueue.asyncAfter(deadline: .now() + targetDelay, execute: item)
+    }
+
+    private func flushOnIOQueue() {
+        os_unfair_lock_lock(lockPtr)
+        pendingFlushWorkItem?.cancel()
+        pendingFlushWorkItem = nil
+
+        let headerPreview = snapshot
+        if headerPreview.clearEpoch == lastFlushedEpoch && headerPreview.mutationSeq == lastFlushedMutationSeq {
+            os_unfair_lock_unlock(lockPtr)
+            return
+        }
+        let captured = captureIOQueueDeltaLocked()
+        os_unfair_lock_unlock(lockPtr)
+        let snap = materializeForIOQueue(
+            captured.header,
+            revision: captured.revision,
+            ringCount: captured.ringCount,
+            firstRingID: captured.firstRingID,
+            rawDelta: captured.rawDelta
+        )
+        writeSnapshotToDisk(snap, notifyIPC: true)
+    }
+
+    @discardableResult
+    private func clearOnIOQueue() -> LokeySelectionFeedbackSnapshot {
+        let snapToWrite: LokeySelectionFeedbackSnapshot
+        os_unfair_lock_lock(lockPtr)
+        let nextEpoch = snapshot.clearEpoch &+ 1
+        var fresh = LokeySelectionFeedbackSnapshot()
+        fresh.clearEpoch = nextEpoch
+        ringRevision &+= 1
+        entries = SelectionFeedbackRing()
+        snapshot = fresh
+        lastEventUptime = 0
+        pendingFlushWorkItem?.cancel()
+        pendingFlushWorkItem = nil
+        snapToWrite = fresh
+        os_unfair_lock_unlock(lockPtr)
+
+        cachedMaterializedEntries.removeAll(keepingCapacity: true)
+        cachedMaterializedEpoch = nextEpoch
+        writeSnapshotToDisk(snapToWrite, notifyIPC: true, isClearReset: true, forceWrite: true)
+        if fileURLOverride == nil {
+            LokeyIPC.postSelectionFeedbackCleared()
+        }
+        return snapToWrite
+    }
+
+    private func captureIOQueueDeltaLocked() -> (
+        header: LokeySelectionFeedbackSnapshot,
+        revision: UInt64,
+        ringCount: Int,
+        firstRingID: UInt64?,
+        rawDelta: [BufferedSelectionFeedbackEntry]
+    ) {
+        let header = snapshot
+        let rev = ringRevision
+        let ringCount = entries.count
+        let firstRingID = entries.firstEntryID
+        let afterID: UInt64
+        if cachedMaterializedEpoch == header.clearEpoch && cachedMaterializedRevision == rev {
+            afterID = cachedMaterializedEntries.last?.id ?? 0
+        } else {
+            afterID = 0
+        }
+        let rawDelta = ringCount > 0 ? entries.copyNewerRawEntries(after: afterID) : []
+        return (header, rev, ringCount, firstRingID, rawDelta)
+    }
+
+    private func materializeForIOQueue(
+        _ header: LokeySelectionFeedbackSnapshot,
+        revision: UInt64,
+        ringCount: Int,
+        firstRingID: UInt64?,
+        rawDelta: [BufferedSelectionFeedbackEntry]
+    ) -> LokeySelectionFeedbackSnapshot {
+        if cachedMaterializedEpoch != header.clearEpoch || cachedMaterializedRevision != revision {
+            cachedMaterializedEntries.removeAll(keepingCapacity: true)
+            cachedMaterializedEpoch = header.clearEpoch
+            cachedMaterializedRevision = revision
+        }
+        if ringCount == 0 {
+            cachedMaterializedEntries.removeAll(keepingCapacity: true)
+        } else {
+            if let firstRingID,
+               let firstCachedID = cachedMaterializedEntries.first?.id,
+               firstRingID > firstCachedID {
+                if let keepIdx = cachedMaterializedEntries.firstIndex(where: { $0.id >= firstRingID }) {
+                    if keepIdx > 0 {
+                        cachedMaterializedEntries.removeFirst(keepIdx)
+                    }
+                } else {
+                    cachedMaterializedEntries.removeAll(keepingCapacity: true)
+                }
+            }
+            if !rawDelta.isEmpty {
+                var lastSec = time_t.min
+                var lastTM = tm()
+                for entry in rawDelta {
+                    cachedMaterializedEntries.append(entry.rendered(lastSec: &lastSec, lastTM: &lastTM))
+                }
+            }
+        }
+        var result = header
+        result.entries = cachedMaterializedEntries
+        return result
+    }
+
+    private func writeSnapshotToDisk(
+        _ snap: LokeySelectionFeedbackSnapshot,
+        notifyIPC: Bool,
+        isClearReset: Bool = false,
+        forceWrite: Bool = false
+    ) {
+        let recalibratedBase = Self.computeClockBaseWallMicros()
+        os_unfair_lock_lock(lockPtr)
+        clockBaseWallMicros = recalibratedBase
+        let currentEpoch = snapshot.clearEpoch
+        let staleEpoch = snap.clearEpoch < lastFlushedEpoch || snap.clearEpoch < currentEpoch
+        let staleMutation = (snap.clearEpoch == lastFlushedEpoch)
+            && (snap.mutationSeq < lastFlushedMutationSeq || (!forceWrite && snap.mutationSeq == lastFlushedMutationSeq))
+        if staleEpoch || staleMutation {
+            os_unfair_lock_unlock(lockPtr)
+            return
+        }
+        lastFlushedEpoch = snap.clearEpoch
+        lastFlushedMutationSeq = snap.mutationSeq
+        os_unfair_lock_unlock(lockPtr)
+
+        guard let data = try? ioEncoder.encode(snap) else { return }
+
+        if let override = fileURLOverride {
+            try? FileManager.default.createDirectory(at: override.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: override, options: .atomic)
+            return
+        }
+
+        if isRunningInExtension {
+            let localURL = localExtensionBackupURL
+            try? FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: localURL, options: .atomic)
+        }
+
+        LokeyAppGroup.invalidateCacheIfUnresolved()
+        let containers = LokeyAppGroup.accessibleContainers()
+        if !containers.isEmpty {
+            for item in containers {
+                let fURL = item.lokeyDir.appendingPathComponent(Self.fileName)
+                let wroteFile = (try? data.write(to: fURL, options: .atomic)) != nil
+                if isClearReset {
+                    if let suite = UserDefaults(suiteName: item.id) {
+                        suite.set(data, forKey: Self.defaultsStorageKey)
+                    }
+                } else if !wroteFile, let suite = UserDefaults(suiteName: item.id) {
+                    suite.set(data, forKey: Self.defaultsStorageKey)
+                }
+            }
+        } else {
+            let url = targetFileURL
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
+
+        if notifyIPC {
+            LokeyIPC.postSelectionFeedbackChanged()
+        }
+    }
+}

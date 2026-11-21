@@ -757,7 +757,7 @@ public final class KeyboardViewController: UIInputViewController {
         let canQueryHostXPCOnLoad = !isRunningInExtensionProcess || customTextDocumentProxyForTesting != nil
         if canQueryHostXPCOnLoad {
             cachedHasFullAccess = hasFullAccess
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.3"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
             if cachedHasFullAccess {
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -766,6 +766,7 @@ public final class KeyboardViewController: UIInputViewController {
         }
         if !isRunningInExtensionProcess {
             LokeyDiagnosticLogger.shared.bootstrapFromDiskAsync()
+            LokeySelectionFeedbackLogger.shared.bootstrapFromDiskAsync()
         }
         refreshCachedHostTopPadding()
         setupHierarchy()
@@ -794,6 +795,7 @@ public final class KeyboardViewController: UIInputViewController {
         if isRunningInExtensionProcess {
             DispatchQueue.main.async { [weak self] in
                 LokeyDiagnosticLogger.shared.bootstrapFromDiskAsync()
+                LokeySelectionFeedbackLogger.shared.bootstrapFromDiskAsync()
                 self?.refreshCalibrationFromDiskAsync()
                 self?.refreshSupplementaryLexiconIfNeeded(force: true)
             }
@@ -846,12 +848,13 @@ public final class KeyboardViewController: UIInputViewController {
         refreshCachedHostTopPadding()
         updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
         if cachedHasFullAccess {
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.3"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
             publishExtensionVisibility(isVisible: true)
             Self.extensionStateIOQueue.async {
                 LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
             }
             LokeyDiagnosticLogger.shared.syncExternalClearAsync()
+            LokeySelectionFeedbackLogger.shared.syncExternalClearAsync()
         }
         cachedNeedsGlobeKey = needsInputModeSwitchKey
         hasSyncedGlobeKey = true
@@ -983,6 +986,7 @@ public final class KeyboardViewController: UIInputViewController {
         session?.notifyContextBreak()
         session?.decoder.spatialModel.flushCalibrationToDiskIfNeeded(force: true)
         LokeyDiagnosticLogger.shared.flushAsync()
+        LokeySelectionFeedbackLogger.shared.flushAsync()
         if let cal = session?.decoder.spatialModel.calibration {
             let disappearAppearGen = appearGeneration
             SharedLexiconHolder.updateCachedCalibration(cal, mtime: -1)
@@ -1306,7 +1310,8 @@ public final class KeyboardViewController: UIInputViewController {
             decoder: decoder,
             settings: loadedSettings,
             persistTouchCalibration: true,
-            decodeCandidatesInBackground: true
+            decodeCandidatesInBackground: true,
+            selectionFeedbackLogger: .shared
         )
         newSession.isSecureContext = prevSecure
         newSession.externalContextBeforeInput = prevExternalContext
@@ -1445,6 +1450,7 @@ public final class KeyboardViewController: UIInputViewController {
             self?.didReceiveHostResignOrBackground = true
             self?.pendingGlobeSwitchDeparture = false
             LokeyDiagnosticLogger.shared.flushAsync()
+            LokeySelectionFeedbackLogger.shared.flushAsync()
         }
         let t5 = NotificationCenter.default.addObserver(
             forName: NSNotification.Name.NSExtensionHostDidEnterBackground,
@@ -1454,6 +1460,7 @@ public final class KeyboardViewController: UIInputViewController {
             self?.didReceiveHostResignOrBackground = true
             self?.pendingGlobeSwitchDeparture = false
             LokeyDiagnosticLogger.shared.flushAsync()
+            LokeySelectionFeedbackLogger.shared.flushAsync()
         }
         let t6 = NotificationCenter.default.addObserver(
             forName: LokeyIPC.baseLexiconDidChangeNotification,
@@ -1462,7 +1469,14 @@ public final class KeyboardViewController: UIInputViewController {
         ) { [weak self] _ in
             self?.reloadBaseLexiconIfNeeded()
         }
-        ipcTokens = [t1, t2, t3, t4, t5, t6]
+        let t7 = NotificationCenter.default.addObserver(
+            forName: LokeyIPC.selectionFeedbackDidClearNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            LokeySelectionFeedbackLogger.shared.syncExternalClearAsync()
+        }
+        ipcTokens = [t1, t2, t3, t4, t5, t6, t7]
     }
 
     internal func reloadBaseLexiconIfNeeded(
@@ -1556,11 +1570,12 @@ public final class KeyboardViewController: UIInputViewController {
             let wasFullAccess = cachedHasFullAccess
             cachedHasFullAccess = self.hasFullAccess
             if cachedHasFullAccess && !wasFullAccess {
-                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.3"
+                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
                 }
                 LokeyDiagnosticLogger.shared.bootstrapFromDiskAsync()
+                LokeySelectionFeedbackLogger.shared.bootstrapFromDiskAsync()
             }
         }
         applyPreferences(preloadedSettings ?? LokeySettings.load())
@@ -1571,6 +1586,7 @@ public final class KeyboardViewController: UIInputViewController {
         let prevScheme = session?.settings.pinyinScheme
         session?.settings = latest
         LokeyDiagnosticLogger.shared.isEnabled = latest.enableDiagnosticLogging
+        LokeySelectionFeedbackLogger.shared.isEnabled = latest.enableSelectionFeedbackLogging
         keyGrid.showPeriodBesideSpace = latest.showPeriodBesideSpace
         keyGrid.spaceWatermarkTitle = latest.pinyinScheme.spaceWatermark
         keyGrid.enableTopRowNumberSwipe = latest.enableTopRowNumberSwipe
@@ -2746,6 +2762,7 @@ public final class KeyboardViewController: UIInputViewController {
             composingContextAnchor = ""
         }
         LokeyDiagnosticLogger.shared.isSecureContext = secure
+        LokeySelectionFeedbackLogger.shared.isSecureContext = secure
         session?.isSecureContext = secure
     }
 

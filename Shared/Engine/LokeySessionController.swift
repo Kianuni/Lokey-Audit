@@ -164,6 +164,28 @@ public final class LokeySessionController {
     private struct ComposedSegment {
         let text: String
         let syllables: [String]
+        let rawInputSlice: String
+    }
+
+    private struct UtteranceFeedbackState {
+        struct DeferredStepMismatch {
+            let context: String
+            let rawSlice: String
+            let matchedPinyin: String
+            let top1: String
+            let chosen: String
+            let index: Int
+            let preview: [String]
+        }
+
+        var precedingContext: String
+        var initialRawInput: String
+        var initialTop1Text: String
+        var initialTop1ConsumedAll: Bool
+        var initialFirstPickIndex: Int
+        var initialTopCandidates: [String]
+        var didAppendLettersAfterPartialCommit: Bool = false
+        var deferredStepMismatches: [DeferredStepMismatch] = []
     }
 
     private struct CompletedPrefixSnapshot {
@@ -209,7 +231,9 @@ public final class LokeySessionController {
     private var displayToCanonicalSurface: [String: String] = [:]
     private var recentCommittedDisplayToCanonical: [(display: String, canonical: String)] = []
     private var pendingSegments: [ComposedSegment] = []
+    private var utteranceFeedbackState: UtteranceFeedbackState?
     private var completedPrefixSnapshots: [CompletedPrefixSnapshot] = []
+    public var selectionFeedbackLogger: LokeySelectionFeedbackLogger?
 
     private var candidateWorker: CandidateDecodeWorker?
     private lazy var commitRefiner = NoisyChannelRefiner(lexicon: decoder.lexicon, userStore: decoder.userStore, lookupCache: decoder.lookupCache)
@@ -283,11 +307,13 @@ public final class LokeySessionController {
         decoder: ViterbiDecoder,
         settings: LokeySettings = LokeySettings.load(),
         persistTouchCalibration: Bool = false,
-        decodeCandidatesInBackground: Bool = false
+        decodeCandidatesInBackground: Bool = false,
+        selectionFeedbackLogger: LokeySelectionFeedbackLogger? = nil
     ) {
         self.decoder = decoder
         self.settings = settings
         self.persistTouchCalibration = persistTouchCalibration
+        self.selectionFeedbackLogger = selectionFeedbackLogger
         if decodeCandidatesInBackground {
             candidateWorker = CandidateDecodeWorker(source: decoder)
             if settings.chineseScriptMode != .simplified {
@@ -324,6 +350,9 @@ public final class LokeySessionController {
                 samples.insert(sample, at: insertAt)
             }
             composingCaretIndex = insertAt + 1
+            if !pendingSegments.isEmpty {
+                utteranceFeedbackState?.didAppendLettersAfterPartialCommit = true
+            }
             if !isSecureContext && LokeyDiagnosticLogger.shared.isEnabled {
                 LokeyDiagnosticLogger.shared.recordLetterDisposition(
                     touchSeq: touchSeq, enteredPinyin: true, detail: "已入串 字母=\(effectiveChar) 位置=\(insertAt + 1)"
@@ -362,6 +391,7 @@ public final class LokeySessionController {
                     matchedSyllables: canonicalPrefix.matchedSyllables
                 )
                 pendingSegments.removeAll(keepingCapacity: true)
+                utteranceFeedbackState = nil
                 samples.removeFirst(prefixCand.consumedInputCount)
                 composingCaretIndex = max(0, min(samples.count, composingCaretIndex - prefixCand.consumedInputCount))
                 appendLetter()
@@ -409,6 +439,9 @@ public final class LokeySessionController {
         if samples.isEmpty {
             resetComposing()
         } else {
+            if !pendingSegments.isEmpty {
+                utteranceFeedbackState?.didAppendLettersAfterPartialCommit = true
+            }
             if !deletedFromEnd {
                 completedPrefixSnapshots.removeAll(keepingCapacity: true)
             }
@@ -809,6 +842,7 @@ public final class LokeySessionController {
         samples.removeAll(keepingCapacity: true)
         composingCaretIndex = 0
         pendingSegments.removeAll(keepingCapacity: true)
+        utteranceFeedbackState = nil
         completedPrefixSnapshots.removeAll(keepingCapacity: true)
         lastRawSimplifiedDecode = nil
         canonicalCurrentCandidates.removeAll(keepingCapacity: true)
@@ -1219,6 +1253,20 @@ public final class LokeySessionController {
             augmented.insert(diagCand, at: 0)
             canonicalCurrentCandidates.insert(diagCand, at: 0)
             currentDecode = DecodeResult(preeditDisplay: "lokeylog", candidates: augmented)
+        } else if !isSecureContext, settings.enableSelectionFeedbackLogging,
+                  samples.count == 8,
+                  String(samples.map(\.primaryChar)) == "lokeytsv" {
+            let tsvCand = LokeyCandidate(
+                text: "📋输出选词样本",
+                consumedInputCount: 8,
+                matchedSyllables: [],
+                scoreQ8: 900_000,
+                kind: .lexiconPhrase
+            )
+            var augmented = currentDecode.candidates
+            augmented.insert(tsvCand, at: 0)
+            canonicalCurrentCandidates.insert(tsvCand, at: 0)
+            currentDecode = DecodeResult(preeditDisplay: "lokeytsv", candidates: augmented)
         }
         if !samples.isEmpty && samples.count <= 36 {
             let ctx = currentContextSeed()
@@ -1247,11 +1295,18 @@ public final class LokeySessionController {
         let cand = currentDecode.candidates[index]
         let canonical = canonicalCandidate(at: index) ?? cand
         if !isSecureContext, cand.text == "📋输出诊断日志" && cand.consumedInputCount == 8 {
-            let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.8.0"
+            let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
             let report = LokeyDiagnosticLogger.formatPlainTextReport(
                 snapshot: LokeyDiagnosticLogger.shared.currentSnapshot(),
                 appVersion: ver
             )
+            resetComposing()
+            return .commitText(report, remaining: currentDecode)
+        }
+        if !isSecureContext, cand.text == "📋输出选词样本" && cand.consumedInputCount == 8 {
+            let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
+            let snap = (selectionFeedbackLogger ?? LokeySelectionFeedbackLogger.shared).currentSnapshot()
+            let report = LokeySelectionFeedbackLogger.formatTSVReport(snapshot: snap, appVersion: ver)
             resetComposing()
             return .commitText(report, remaining: currentDecode)
         }
@@ -1283,17 +1338,62 @@ public final class LokeySessionController {
         }
         let consume = max(1, min(samples.count, cand.consumedInputCount))
         let committedSamples = Array(samples.prefix(consume))
+        let rawSlice = String(committedSamples.map(\.primaryChar))
         recordTouchCalibrationIfEligible(
             consumedSamples: committedSamples,
             matchedSyllables: canonical.matchedSyllables
         )
 
+        let top0Canonical = canonicalCandidate(at: 0)
+        let shouldTrackFeedback: Bool = {
+            guard let logger = selectionFeedbackLogger,
+                  !isSecureContext,
+                  settings.enableSelectionFeedbackLogging,
+                  logger.canRecord else { return false }
+            if canonical.kind == .emoji { return false }
+            if canonical.kind == .rawInput && (top0Canonical?.kind == .rawInput || canonicalCurrentCandidates.isEmpty) {
+                return false
+            }
+            return true
+        }()
+
         if consume < samples.count {
             // Partial commit: user picked a prefix word/char; keep remaining Pinyin active!
+            if shouldTrackFeedback, !canonical.matchedSyllables.isEmpty {
+                let preview = topCanonicalPreview(from: canonicalCurrentCandidates)
+                if pendingSegments.isEmpty {
+                    utteranceFeedbackState = UtteranceFeedbackState(
+                        precedingContext: sanitizedFeedbackContext(currentContextSeed()),
+                        initialRawInput: String(samples.map(\.primaryChar)),
+                        initialTop1Text: top0Canonical?.text ?? "",
+                        initialTop1ConsumedAll: top0Canonical?.consumedInputCount == samples.count,
+                        initialFirstPickIndex: index,
+                        initialTopCandidates: preview
+                    )
+                }
+                if index >= 1,
+                   let skippedSameSpan = (0..<index).lazy.compactMap({ self.canonicalCandidate(at: $0) }).first(where: {
+                       $0.consumedInputCount == consume && $0.text != canonical.text
+                   }) {
+                    utteranceFeedbackState?.deferredStepMismatches.append(
+                        UtteranceFeedbackState.DeferredStepMismatch(
+                            context: sanitizedFeedbackContext(currentContextSeed()),
+                            rawSlice: rawSlice,
+                            matchedPinyin: canonical.matchedSyllables.joined(separator: " "),
+                            top1: skippedSameSpan.text,
+                            chosen: canonical.text,
+                            index: index,
+                            preview: preview
+                        )
+                    )
+                }
+            }
+
             if !isSecureContext, !canonical.matchedSyllables.isEmpty {
-                pendingSegments.append(ComposedSegment(text: canonical.text, syllables: canonical.matchedSyllables))
+                pendingSegments.append(ComposedSegment(text: canonical.text, syllables: canonical.matchedSyllables, rawInputSlice: rawSlice))
             } else {
                 pendingSegments.removeAll()
+                utteranceFeedbackState = nil
             }
             samples.removeFirst(consume)
             composingCaretIndex = max(0, min(samples.count, composingCaretIndex - consume))
@@ -1305,8 +1405,86 @@ public final class LokeySessionController {
             return .commitText(cand.text, remaining: currentDecode)
         } else {
             // Final commit consuming the rest of the buffer!
+            if shouldTrackFeedback, let logger = selectionFeedbackLogger {
+                if pendingSegments.isEmpty {
+                    let top0 = top0Canonical ?? canonical
+                    if index == 0 || canonical.text == top0.text {
+                        logger.recordTop1Hit()
+                    } else {
+                        logger.recordMismatch(
+                            kind: .nonTopSelect,
+                            pinyinScheme: settings.pinyinScheme.rawValue,
+                            precedingContext: sanitizedFeedbackContext(currentContextSeed()),
+                            rawInput: rawSlice,
+                            matchedPinyin: canonical.matchedSyllables.joined(separator: " "),
+                            top1Predicted: top0.text,
+                            userChosen: canonical.text,
+                            selectedIndex: index,
+                            topCandidatesPreview: topCanonicalPreview(from: canonicalCurrentCandidates),
+                            alsoCountCommit: true
+                        )
+                    }
+                } else if let uState = utteranceFeedbackState, !canonical.matchedSyllables.isEmpty {
+                    if !uState.didAppendLettersAfterPartialCommit {
+                        let assembledText = (pendingSegments.map(\.text) + [canonical.text]).joined()
+                        let assembledPinyin = (pendingSegments.flatMap(\.syllables) + canonical.matchedSyllables).joined(separator: " ")
+                        if uState.initialTop1ConsumedAll && assembledText == uState.initialTop1Text {
+                            logger.recordTop1Hit()
+                        } else if !uState.initialTop1Text.isEmpty && assembledText != uState.initialTop1Text {
+                            logger.recordMismatch(
+                                kind: .stepwiseCompose,
+                                pinyinScheme: settings.pinyinScheme.rawValue,
+                                precedingContext: uState.precedingContext,
+                                rawInput: uState.initialRawInput,
+                                matchedPinyin: assembledPinyin,
+                                top1Predicted: uState.initialTop1Text,
+                                userChosen: assembledText,
+                                selectedIndex: uState.initialFirstPickIndex,
+                                topCandidatesPreview: uState.initialTopCandidates,
+                                alsoCountCommit: true
+                            )
+                        } else {
+                            logger.recordTop1Hit()
+                        }
+                    } else {
+                        var stepMismatches = uState.deferredStepMismatches
+                        if index >= 1, let top0 = top0Canonical, top0.text != canonical.text {
+                            stepMismatches.append(
+                                UtteranceFeedbackState.DeferredStepMismatch(
+                                    context: sanitizedFeedbackContext(currentContextSeed()),
+                                    rawSlice: rawSlice,
+                                    matchedPinyin: canonical.matchedSyllables.joined(separator: " "),
+                                    top1: top0.text,
+                                    chosen: canonical.text,
+                                    index: index,
+                                    preview: topCanonicalPreview(from: canonicalCurrentCandidates)
+                                )
+                            )
+                        }
+                        if stepMismatches.isEmpty {
+                            logger.recordTop1Hit()
+                        } else {
+                            for (offset, step) in stepMismatches.enumerated() {
+                                logger.recordMismatch(
+                                    kind: .nonTopSelect,
+                                    pinyinScheme: settings.pinyinScheme.rawValue,
+                                    precedingContext: step.context,
+                                    rawInput: step.rawSlice,
+                                    matchedPinyin: step.matchedPinyin,
+                                    top1Predicted: step.top1,
+                                    userChosen: step.chosen,
+                                    selectedIndex: step.index,
+                                    topCandidatesPreview: step.preview,
+                                    alsoCountCommit: offset == 0
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             if !isSecureContext, !pendingSegments.isEmpty && !canonical.matchedSyllables.isEmpty {
-                let allSegments = pendingSegments + [ComposedSegment(text: canonical.text, syllables: canonical.matchedSyllables)]
+                let allSegments = pendingSegments + [ComposedSegment(text: canonical.text, syllables: canonical.matchedSyllables, rawInputSlice: rawSlice)]
                 let fullSurface = allSegments.map(\.text).joined()
                 let fullSyllables = allSegments.flatMap(\.syllables)
                 if shouldLearnComposedCustomPhrase(
@@ -1363,9 +1541,32 @@ public final class LokeySessionController {
         case .english:
             return !cand.text.utf8.allSatisfy { $0 < 0x80 }
         case .sentence, .lexiconPhrase, .userPhrase, .jianpin:
-            if cand.text == "📋输出诊断日志" { return false }
+            if cand.text == "📋输出诊断日志" || cand.text == "📋输出选词样本" { return false }
             return !cand.text.utf8.allSatisfy { $0 < 0x80 }
         }
+    }
+
+    private func sanitizedFeedbackContext(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else { return "" }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return String(trimmed.suffix(10))
+    }
+
+    private func topCanonicalPreview(from candidates: [LokeyCandidate], limit: Int = 5) -> [String] {
+        var out: [String] = []
+        out.reserveCapacity(limit)
+        var seen = Set<String>()
+        for c in candidates {
+            guard c.kind != .emoji,
+                  c.text != "📋输出诊断日志",
+                  c.text != "📋输出选词样本",
+                  !c.text.isEmpty,
+                  seen.insert(c.text).inserted else { continue }
+            out.append(c.text)
+            if out.count >= limit { break }
+        }
+        return out
     }
 
     private func convertedCandidate(_ cand: LokeyCandidate, converter: OpenCCConverter? = nil) -> LokeyCandidate {

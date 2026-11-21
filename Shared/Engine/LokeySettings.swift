@@ -580,6 +580,20 @@ public enum LokeyAppGroup {
         return Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) * 1e-9
     }
 
+    public static func sharedSelectionFeedbackFileURL() -> URL {
+        sharedSupportDirectoryURL().appendingPathComponent("lokey_selection_feedback.json")
+    }
+
+    public static func sharedSelectionFeedbackModificationTime() -> TimeInterval {
+        let url = sharedSelectionFeedbackFileURL()
+        var st = stat()
+        let ok = url.path.withCString { cPath in
+            stat(cPath, &st) == 0
+        }
+        guard ok else { return 0 }
+        return Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) * 1e-9
+    }
+
     /// Writes live host keyboard container geometry from `Lokey` Host App so `LokeyKeyboard` compensates
     /// iOS 26's `+17.0pt` Liquid Glass rounded top padding (`additionalTopPaddingForRoundedKeyboard`) after `🌐` input-mode switches.
     public static func writeHostGeometry(_ snapshot: LokeyHostGeometrySnapshot, notifyIPC: Bool = true) {
@@ -922,6 +936,8 @@ public enum LokeyIPC {
     public static let baseLexiconDidChangeNotification = Notification.Name("com.kianuni.lokey.local.baseLexiconDidChange")
     public static let diagnosticLogDidChangeNotification = Notification.Name("com.kianuni.lokey.local.diagnosticLogDidChange")
     public static let diagnosticLogDidClearNotification = Notification.Name("com.kianuni.lokey.local.diagnosticLogDidClear")
+    public static let selectionFeedbackDidChangeNotification = Notification.Name("com.kianuni.lokey.local.selectionFeedbackDidChange")
+    public static let selectionFeedbackDidClearNotification = Notification.Name("com.kianuni.lokey.local.selectionFeedbackDidClear")
     public static let hostGeometryDidChangeNotification = Notification.Name("com.kianuni.lokey.local.hostGeometryDidChange")
 
     private static let darwinSettingsName = "com.kianuni.lokey.darwin.settingsChanged" as CFString
@@ -929,6 +945,8 @@ public enum LokeyIPC {
     private static let darwinBaseLexiconName = "com.kianuni.lokey.darwin.baseLexiconChanged" as CFString
     private static let darwinDiagnosticLogName = "com.kianuni.lokey.darwin.diagnosticLogChanged" as CFString
     private static let darwinDiagnosticLogClearedName = "com.kianuni.lokey.darwin.diagnosticLogCleared" as CFString
+    private static let darwinSelectionFeedbackName = "com.kianuni.lokey.darwin.selectionFeedbackChanged" as CFString
+    private static let darwinSelectionFeedbackClearedName = "com.kianuni.lokey.darwin.selectionFeedbackCleared" as CFString
     private static let darwinHostGeometryName = "com.kianuni.lokey.darwin.hostGeometryChanged" as CFString
     private static var didRegisterObservers = false
     private static let lock = NSLock()
@@ -1026,6 +1044,30 @@ public enum LokeyIPC {
             nil,
             .deliverImmediately
         )
+        CFNotificationCenterAddObserver(
+            center,
+            nil,
+            { _, _, _, _, _ in
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: LokeyIPC.selectionFeedbackDidChangeNotification, object: nil)
+                }
+            },
+            darwinSelectionFeedbackName,
+            nil,
+            .deliverImmediately
+        )
+        CFNotificationCenterAddObserver(
+            center,
+            nil,
+            { _, _, _, _, _ in
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: LokeyIPC.selectionFeedbackDidClearNotification, object: nil)
+                }
+            },
+            darwinSelectionFeedbackClearedName,
+            nil,
+            .deliverImmediately
+        )
     }
 
     public static func postSettingsChanged() {
@@ -1052,6 +1094,16 @@ public enum LokeyIPC {
     public static func postDiagnosticLogCleared() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(center, CFNotificationName(darwinDiagnosticLogClearedName), nil, nil, true)
+    }
+
+    public static func postSelectionFeedbackChanged() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(center, CFNotificationName(darwinSelectionFeedbackName), nil, nil, true)
+    }
+
+    public static func postSelectionFeedbackCleared() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(center, CFNotificationName(darwinSelectionFeedbackClearedName), nil, nil, true)
     }
 
     public static func postHostGeometryChanged() {
@@ -1188,6 +1240,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
     public var enableAdaptiveTouchCalibration: Bool
     public var enableEmojiCandidates: Bool
     public var enableDiagnosticLogging: Bool
+    public var enableSelectionFeedbackLogging: Bool
     public var fuzzyOptions: FuzzyPinyinOptions
     public var chineseScriptMode: ChineseScriptMode
     public var enableComposingSpaceTrackpad: Bool
@@ -1203,6 +1256,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         enableAdaptiveTouchCalibration: Bool = true,
         enableEmojiCandidates: Bool = true,
         enableDiagnosticLogging: Bool = true,
+        enableSelectionFeedbackLogging: Bool = true,
         fuzzyOptions: FuzzyPinyinOptions = [],
         chineseScriptMode: ChineseScriptMode = .simplified,
         enableComposingSpaceTrackpad: Bool = false,
@@ -1233,6 +1287,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.enableAdaptiveTouchCalibration = enableAdaptiveTouchCalibration
         self.enableEmojiCandidates = enableEmojiCandidates
         self.enableDiagnosticLogging = enableDiagnosticLogging
+        self.enableSelectionFeedbackLogging = enableSelectionFeedbackLogging
         self.fuzzyOptions = fuzzyOptions
         self.chineseScriptMode = chineseScriptMode
         self.enableComposingSpaceTrackpad = enableComposingSpaceTrackpad
@@ -1249,6 +1304,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         case enableAdaptiveTouchCalibration
         case enableEmojiCandidates
         case enableDiagnosticLogging
+        case enableSelectionFeedbackLogging
         case fuzzyOptions
         case chineseScriptMode
         case enableComposingSpaceTrackpad
@@ -1295,6 +1351,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.enableAdaptiveTouchCalibration = try container.decodeIfPresent(Bool.self, forKey: .enableAdaptiveTouchCalibration) ?? true
         self.enableEmojiCandidates = try container.decodeIfPresent(Bool.self, forKey: .enableEmojiCandidates) ?? true
         self.enableDiagnosticLogging = try container.decodeIfPresent(Bool.self, forKey: .enableDiagnosticLogging) ?? true
+        self.enableSelectionFeedbackLogging = try container.decodeIfPresent(Bool.self, forKey: .enableSelectionFeedbackLogging) ?? true
         self.fuzzyOptions = try container.decodeIfPresent(FuzzyPinyinOptions.self, forKey: .fuzzyOptions) ?? []
         self.chineseScriptMode = try container.decodeIfPresent(ChineseScriptMode.self, forKey: .chineseScriptMode) ?? .simplified
         self.enableComposingSpaceTrackpad = try container.decodeIfPresent(Bool.self, forKey: .enableComposingSpaceTrackpad) ?? false
@@ -1312,6 +1369,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         try container.encode(enableAdaptiveTouchCalibration, forKey: .enableAdaptiveTouchCalibration)
         try container.encode(enableEmojiCandidates, forKey: .enableEmojiCandidates)
         try container.encode(enableDiagnosticLogging, forKey: .enableDiagnosticLogging)
+        try container.encode(enableSelectionFeedbackLogging, forKey: .enableSelectionFeedbackLogging)
         try container.encode(fuzzyOptions, forKey: .fuzzyOptions)
         try container.encode(chineseScriptMode, forKey: .chineseScriptMode)
         try container.encode(enableComposingSpaceTrackpad, forKey: .enableComposingSpaceTrackpad)
