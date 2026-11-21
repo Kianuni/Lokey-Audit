@@ -122,6 +122,22 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     private let wEos: Vec32
     private let uEos: Vec32
 
+    // L1-cache-resident 32x32 backward rerank head (`LNBR` v1, 25.3 KB total, shares frozen embeddings)
+    private let hasBackwardHead: Bool
+    private let bwdWCtxRows: [Vec32]
+    private let bwdWRecRows: [Vec32]
+    private let bwdB1: Vec32
+    private let bwdWProjRows: [Vec32]
+    private let bwdBDirectRows: [Vec32]
+    private let bwdBSkipRows: [Vec32]
+    private let bwdB2: Vec32
+    private let bwdWCharRows: [Vec32]
+    private let bwdAlpha: Vec32
+    private let bwdOneMinusAlpha: Vec32
+    private let bwdHEos: Vec32
+    private let bwdWBos: Vec32
+    private let bwdUBos: Vec32
+
     // Consolidated in-memory cache for hot word records (single lock acquisition per unique word)
     private var cacheLock = os_unfair_lock_s()
     private var wordRecordCache: [String: WordNeuralRecord] = [:]
@@ -130,6 +146,8 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     private static let maxWordRecordCacheCount = 3072
 
     public static let magicLNLM: UInt32 = 0x4D4C4E4C // "LNLM"
+    public static let magicLNBR: UInt32 = 0x52424E4C // "LNBR"
+    public static let backwardBinaryByteSize: Int = 16 + 6336 * 4
     public static let maxBonusQ8: Int = 520
     public static let minBonusQ8: Int = -560
 
@@ -190,11 +208,166 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         return (offset: off, size: sz, charCount: cCount, wordCount: wCount)
     }
 
-    public convenience init(data: Data, stringPoolOffset: Int, stringPoolSize: Int) {
-        self.init(nsData: data as NSData, stringPoolOffset: stringPoolOffset, stringPoolSize: stringPoolSize)
+    private struct ParsedBackwardHead {
+        let loaded: Bool
+        let wCtxRows: [Vec32]
+        let wRecRows: [Vec32]
+        let b1: Vec32
+        let wProjRows: [Vec32]
+        let bDirectRows: [Vec32]
+        let bSkipRows: [Vec32]
+        let b2: Vec32
+        let wCharRows: [Vec32]
+        let alpha: Vec32
+        let oneMinusAlpha: Vec32
+        let hEos: Vec32
+        let wBos: Vec32
+        let uBos: Vec32
+
+        static var empty: ParsedBackwardHead {
+            let zeroRows = Array(repeating: Vec32.zero, count: 32)
+            let half = Vec32(
+                v0: SIMD8<Float>(repeating: 0.5),
+                v1: SIMD8<Float>(repeating: 0.5),
+                v2: SIMD8<Float>(repeating: 0.5),
+                v3: SIMD8<Float>(repeating: 0.5)
+            )
+            return ParsedBackwardHead(
+                loaded: false,
+                wCtxRows: zeroRows,
+                wRecRows: zeroRows,
+                b1: .zero,
+                wProjRows: zeroRows,
+                bDirectRows: zeroRows,
+                bSkipRows: zeroRows,
+                b2: .zero,
+                wCharRows: zeroRows,
+                alpha: half,
+                oneMinusAlpha: half,
+                hEos: .zero,
+                wBos: .zero,
+                uBos: .zero
+            )
+        }
     }
 
-    public init(nsData: NSData, stringPoolOffset: Int, stringPoolSize: Int) {
+    private static func parseBackwardHead(_ data: NSData?) -> ParsedBackwardHead {
+        guard let data, data.length >= backwardBinaryByteSize else {
+            return .empty
+        }
+        let raw = UnsafeRawBufferPointer(start: data.bytes, count: data.length)
+        let magic = loadU32(raw, at: 0)
+        let ver = loadU32(raw, at: 4)
+        let dim = loadU32(raw, at: 8)
+        let floatCount = loadU32(raw, at: 12)
+        guard magic == magicLNBR, ver == 1, dim == 32, floatCount == 6336 else {
+            return .empty
+        }
+        for i in 0..<6336 {
+            let weight = Float(bitPattern: loadU32(raw, at: 16 + i * 4))
+            guard weight.isFinite, abs(weight) <= 100.0 else {
+                return .empty
+            }
+        }
+        // `bwd_alpha` occupies indices [6208..<6240]
+        for i in 6208..<6240 {
+            let a = Float(bitPattern: loadU32(raw, at: 16 + i * 4))
+            guard a >= 0.01, a <= 0.99 else {
+                return .empty
+            }
+        }
+
+        var cursor = 16
+        func readVec32() -> Vec32 {
+            let v0 = loadSIMD8F32(raw, at: cursor)
+            let v1 = loadSIMD8F32(raw, at: cursor + 32)
+            let v2 = loadSIMD8F32(raw, at: cursor + 64)
+            let v3 = loadSIMD8F32(raw, at: cursor + 96)
+            cursor += 128
+            return Vec32(v0: v0, v1: v1, v2: v2, v3: v3)
+        }
+        func readMatrix32x32() -> [Vec32] {
+            var rows: [Vec32] = []
+            rows.reserveCapacity(32)
+            for _ in 0..<32 {
+                rows.append(readVec32())
+            }
+            return rows
+        }
+
+        let wCtx = readMatrix32x32()
+        let wRec = readMatrix32x32()
+        let b1Vec = readVec32()
+        let wProj = readMatrix32x32()
+        let bDir = readMatrix32x32()
+        let bSkp = readMatrix32x32()
+        let b2Vec = readVec32()
+        let wCh = readMatrix32x32()
+        let aVec = readVec32()
+        let hEosVec = readVec32()
+        let wBosVec = readVec32()
+        let uBosVec = readVec32()
+        let ones = Vec32(
+            v0: SIMD8<Float>(repeating: 1.0),
+            v1: SIMD8<Float>(repeating: 1.0),
+            v2: SIMD8<Float>(repeating: 1.0),
+            v3: SIMD8<Float>(repeating: 1.0)
+        )
+
+        return ParsedBackwardHead(
+            loaded: true,
+            wCtxRows: transpose32x32(wCtx),
+            wRecRows: transpose32x32(wRec),
+            b1: b1Vec,
+            wProjRows: transpose32x32(wProj),
+            bDirectRows: transpose32x32(bDir),
+            bSkipRows: transpose32x32(bSkp),
+            b2: b2Vec,
+            wCharRows: transpose32x32(wCh),
+            alpha: aVec,
+            oneMinusAlpha: ones - aVec,
+            hEos: hEosVec,
+            wBos: wBosVec,
+            uBos: uBosVec
+        )
+    }
+
+    public convenience init(
+        data: Data,
+        stringPoolOffset: Int,
+        stringPoolSize: Int,
+        backwardData: Data? = nil
+    ) {
+        self.init(
+            nsData: data as NSData,
+            stringPoolOffset: stringPoolOffset,
+            stringPoolSize: stringPoolSize,
+            backwardData: backwardData as NSData?
+        )
+    }
+
+    public init(
+        nsData: NSData,
+        stringPoolOffset: Int,
+        stringPoolSize: Int,
+        backwardData: NSData? = nil
+    ) {
+        let parsedBwd = Self.parseBackwardHead(backwardData)
+        self.hasBackwardHead = parsedBwd.loaded
+        self.bwdWCtxRows = parsedBwd.wCtxRows
+        self.bwdWRecRows = parsedBwd.wRecRows
+        self.bwdB1 = parsedBwd.b1
+        self.bwdWProjRows = parsedBwd.wProjRows
+        self.bwdBDirectRows = parsedBwd.bDirectRows
+        self.bwdBSkipRows = parsedBwd.bSkipRows
+        self.bwdB2 = parsedBwd.b2
+        self.bwdWCharRows = parsedBwd.wCharRows
+        self.bwdAlpha = parsedBwd.alpha
+        self.bwdOneMinusAlpha = parsedBwd.oneMinusAlpha
+        self.bwdHEos = parsedBwd.hEos
+        self.bwdWBos = parsedBwd.wBos
+        self.bwdUBos = parsedBwd.uBos
+
         self.backingData = nsData
         let raw = UnsafeRawBufferPointer(start: nsData.bytes, count: nsData.length)
         self.rawBuffer = raw
@@ -417,6 +590,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     }
 
     public var isLoaded: Bool { hasBinarySection }
+    public var isBackwardLoaded: Bool { hasBinarySection && hasBackwardHead }
     public var version: UInt32 { modelVersion }
 
     // MARK: - Recurrent Neural Forward Pass (`SIMD8<Float> x 4`)
@@ -650,6 +824,60 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
                 oneCharRun = 0
             }
             prevWord = w
+        }
+        return totalQ8
+    }
+
+    /// Evaluates right-to-left (`LNBR` v1) coherence across a segmented word sequence `words`.
+    /// Reuses frozen `LNLM-v2` character/word embeddings while disambiguating early words from later context.
+    public func scoreBackwardSentence(words: [String]) -> Int {
+        guard hasBinarySection, hasBackwardHead, words.count >= 2 else { return 0 }
+        var rightWord = words[words.count - 1]
+        var rightRec = wordRecord(for: rightWord)
+        guard rightRec.charCount > 0 else { return 0 }
+        var hidden = bwdAlpha * bwdHEos + bwdOneMinusAlpha * rightRec.tanhCtx
+
+        var totalQ8 = 0
+        for idx in stride(from: words.count - 2, through: 0, by: -1) {
+            let leftWord = words[idx]
+            let leftRec = wordRecord(for: leftWord)
+            guard leftRec.charCount > 0 else { return 0 }
+
+            let wx = Self.matVec32(bwdWCtxRows, x: rightRec.ctx)
+            let wr = Self.matVec32(bwdWRecRows, x: hidden)
+            let z = Self.silu32(wx + wr + bwdB1)
+
+            let wp = Self.matVec32(bwdWProjRows, x: z)
+            let bd = Self.matVec32(bwdBDirectRows, x: rightRec.ctx)
+            let bs = Self.matVec32(bwdBSkipRows, x: hidden)
+            let wordPred = wp + bd + bs + bwdB2
+
+            let rightFirstCtx = rightWord.first.map { embedding(forChar: $0).ctx } ?? .zero
+            let leftLastTgt = leftWord.last.map { embedding(forChar: $0).tgt } ?? .zero
+            let charPred = Self.matVec32(bwdWCharRows, x: rightFirstCtx)
+
+            var raw = wordPred.dot(leftRec.tgt) + 0.30 * charPred.dot(leftLastTgt)
+            let nextHidden = bwdAlpha * hidden + bwdOneMinusAlpha * Self.tanh32(leftRec.ctx + 0.35 * z)
+            if idx == 0 {
+                raw += 0.25 * (bwdWBos.dot(nextHidden) + bwdUBos.dot(leftRec.ctx))
+            }
+
+            if raw.isFinite {
+                let scaled = (raw * 170.0).rounded()
+                if scaled.isFinite {
+                    let clamped = min(Float(Self.maxBonusQ8), max(Float(Self.minBonusQ8), scaled))
+                    var bonusQ8 = Int(clamped)
+                    if bonusQ8 > Self.maxBonusQ8 { bonusQ8 = Self.maxBonusQ8 }
+                    if bonusQ8 < Self.minBonusQ8 { bonusQ8 = Self.minBonusQ8 }
+                    totalQ8 += bonusQ8
+                } else {
+                    totalQ8 += (raw > 0 ? Self.maxBonusQ8 : Self.minBonusQ8)
+                }
+            }
+
+            hidden = nextHidden
+            rightWord = leftWord
+            rightRec = leftRec
         }
         return totalQ8
     }

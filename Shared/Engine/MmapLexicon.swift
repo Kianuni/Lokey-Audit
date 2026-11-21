@@ -193,19 +193,22 @@ public final class MmapLexicon: @unchecked Sendable {
         let siblingEmojiURL = url.deletingLastPathComponent().appendingPathComponent("lokey_emoji.bin")
         let emojiMapped = try? NSData(contentsOf: siblingEmojiURL, options: [.mappedIfSafe])
         let spellingURL = url.deletingLastPathComponent().appendingPathComponent("lokey_spelling.bin")
+        let bwdURL = url.deletingLastPathComponent().appendingPathComponent("lokey_lnlm_bwd.bin")
         try self.init(nsData: mapped, emojiData: emojiMapped,
-                      spellingData: try? NSData(contentsOf: spellingURL, options: [.mappedIfSafe]))
+                      spellingData: try? NSData(contentsOf: spellingURL, options: [.mappedIfSafe]),
+                      backwardNeuralData: try? NSData(contentsOf: bwdURL, options: [.mappedIfSafe]))
     }
 
     public convenience init(data: Data) throws {
         try self.init(nsData: data as NSData, emojiData: nil)
     }
 
-    public init(nsData: NSData, emojiData: NSData? = nil, spellingData: NSData? = nil) throws {
+    public init(nsData: NSData, emojiData: NSData? = nil, spellingData: NSData? = nil, backwardNeuralData: NSData? = nil) throws {
         guard nsData.length >= 64 else { throw LexiconError.fileTooSmall }
         self.backingData = nsData
         let raw = UnsafeRawBufferPointer(start: nsData.bytes, count: nsData.length)
         self.rawBuffer = raw
+        let resolvedBwdData = backwardNeuralData ?? Self.discoverResource("lokey_lnlm_bwd")
 
         let spelling = spellingData ?? Self.discoverResource("lokey_spelling")
         self.spellingData = spelling
@@ -307,7 +310,8 @@ public final class MmapLexicon: @unchecked Sendable {
         self.neuralLM = NeuralSentenceScorer(
             nsData: nsData,
             stringPoolOffset: headerVals.15,
-            stringPoolSize: headerVals.14
+            stringPoolSize: headerVals.14,
+            backwardData: resolvedBwdData
         )
 
         // Only the existing "=" namespace contains complete spoken readings. Bucket its
@@ -1589,6 +1593,19 @@ public final class MmapLexicon: @unchecked Sendable {
             return dedup
         }
         return hits
+    }
+
+    /// Walks the syllable trie down `syllables` and returns exact homophone `WordHit` entries at the leaf node.
+    public func lookupExactWords(forSyllables syllables: [String], limit: Int = 8) -> [WordHit] {
+        guard !syllables.isEmpty, limit > 0 else { return [] }
+        var node: UInt32 = rootNodeIndex
+        for syl in syllables {
+            guard let sid = syllableToID[syl], let next = step(from: node, syllableID: sid) else {
+                return []
+            }
+            node = next
+        }
+        return words(at: node, limit: limit)
     }
 
     // MARK: - Jianpin (First-Letter Acronym) O(log N) Lookup

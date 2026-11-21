@@ -757,7 +757,7 @@ public final class KeyboardViewController: UIInputViewController {
         let canQueryHostXPCOnLoad = !isRunningInExtensionProcess || customTextDocumentProxyForTesting != nil
         if canQueryHostXPCOnLoad {
             cachedHasFullAccess = hasFullAccess
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.2"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.3"
             if cachedHasFullAccess {
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -846,7 +846,7 @@ public final class KeyboardViewController: UIInputViewController {
         refreshCachedHostTopPadding()
         updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
         if cachedHasFullAccess {
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.2"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.3"
             publishExtensionVisibility(isVisible: true)
             Self.extensionStateIOQueue.async {
                 LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -1556,7 +1556,7 @@ public final class KeyboardViewController: UIInputViewController {
             let wasFullAccess = cachedHasFullAccess
             cachedHasFullAccess = self.hasFullAccess
             if cachedHasFullAccess && !wasFullAccess {
-                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.2"
+                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.3"
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
                 }

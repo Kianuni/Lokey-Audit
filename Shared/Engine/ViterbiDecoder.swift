@@ -570,6 +570,50 @@ public final class ViterbiDecoder: @unchecked Sendable {
         let isPureCleanOrJianpin: Bool
         let hasAccidentalSingleton: Bool
         let hidden: NeuralSentenceScorer.Vec32
+        let wordCharEnds: UInt64
+        let wordSylEnds: UInt64
+    }
+
+    private static func unpackSegmentedWords(
+        text: String,
+        syllables: [String],
+        wordCharEnds: UInt64,
+        wordSylEnds: UInt64
+    ) -> [(word: String, syls: [String])]? {
+        guard wordCharEnds != 0, wordSylEnds != 0 else { return nil }
+        let segCount = wordCharEnds.nonzeroBitCount
+        guard segCount >= 2, segCount == wordSylEnds.nonzeroBitCount else { return nil }
+        let textCount = text.count
+        let sylCount = syllables.count
+        guard textCount <= 64, sylCount <= 64 else { return nil }
+        guard (64 - wordCharEnds.leadingZeroBitCount) == textCount,
+              (64 - wordSylEnds.leadingZeroBitCount) == sylCount else {
+            return nil
+        }
+
+        var charBits = wordCharEnds
+        var sylBits = wordSylEnds
+        var segments: [(word: String, syls: [String])] = []
+        segments.reserveCapacity(segCount)
+        var charStart = text.startIndex
+        var prevCharEnd = 0
+        var prevSylEnd = 0
+        while charBits != 0 && sylBits != 0 {
+            let charEnd = charBits.trailingZeroBitCount + 1
+            let sylEnd = sylBits.trailingZeroBitCount + 1
+            guard charEnd > prevCharEnd, sylEnd > prevSylEnd else { return nil }
+            let charFinish = text.index(charStart, offsetBy: charEnd - prevCharEnd)
+            segments.append((word: String(text[charStart..<charFinish]), syls: Array(syllables[prevSylEnd..<sylEnd])))
+            charStart = charFinish
+            prevCharEnd = charEnd
+            prevSylEnd = sylEnd
+            charBits &= charBits - 1
+            sylBits &= sylBits - 1
+        }
+        guard charBits == 0, sylBits == 0, charStart == text.endIndex, prevSylEnd == sylCount else {
+            return nil
+        }
+        return segments
     }
 
     @inline(__always)
@@ -6104,7 +6148,9 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     keySubstitutionCount: 0,
                     isPureCleanOrJianpin: true,
                     hasAccidentalSingleton: false,
-                    hidden: initHidden
+                    hidden: initHidden,
+                    wordCharEnds: 0,
+                    wordSylEnds: 0
                 )
             ]
         }
@@ -7064,6 +7110,26 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         )
                     }
 
+                    let nextWordCharEnds: UInt64
+                    let nextWordSylEnds: UInt64
+                    if !sp.isEnglishSpan
+                        && !(cur.lastWord.last?.isASCII == true)
+                        && (cur.text.isEmpty || cur.wordCharEnds != 0) {
+                        let prevChars = cur.wordCharEnds == 0 ? 0 : (64 - cur.wordCharEnds.leadingZeroBitCount)
+                        let nextChars = prevChars + sp.text.count
+                        let nextSyls = cur.syllables.count + sp.syllables.count
+                        if !sp.text.isEmpty && !sp.syllables.isEmpty && nextChars <= 64 && nextSyls <= 64 {
+                            nextWordCharEnds = cur.wordCharEnds | (UInt64(1) << (nextChars - 1))
+                            nextWordSylEnds = cur.wordSylEnds | (UInt64(1) << (nextSyls - 1))
+                        } else {
+                            nextWordCharEnds = 0
+                            nextWordSylEnds = 0
+                        }
+                    } else {
+                        nextWordCharEnds = 0
+                        nextWordSylEnds = 0
+                    }
+
                     let node = DPNode(
                         scoreQ8: candScore,
                         penaltyQ8: combinedPen,
@@ -7080,7 +7146,9 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         keySubstitutionCount: cur.keySubstitutionCount &+ sp.keySubstitutionCount,
                         isPureCleanOrJianpin: cur.isPureCleanOrJianpin && (sp.penaltyQ8 <= 70 || (sp.isJianpinSpan && !sp.hasKeySubstitution)),
                         hasAccidentalSingleton: cur.hasAccidentalSingleton || spRec.isAccidentalSingleton,
-                        hidden: nextHidden
+                        hidden: nextHidden,
+                        wordCharEnds: nextWordCharEnds,
+                        wordSylEnds: nextWordSylEnds
                     )
                     let insIdx = dest.firstIndex(where: {
                         if candScore != $0.scoreQ8 { return candScore > $0.scoreQ8 }
@@ -7279,6 +7347,124 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     && topExtraNoisy.scoreQ8 < bestLower.scoreQ8 + extraPen + 380 {
                     ordered.remove(at: lowerIdx)
                     ordered.insert(bestLower, at: 0)
+                }
+            }
+
+            // 4B. Post-DP lightweight whole-sentence bidirectional rerank (`LNBR` v1 + frozen `LNLM-v2`).
+            // Strictly same-segmentation, zero-left-context sentence-start (`slot 0` 2..3-char exact homophone)
+            // reranker so early homophones disambiguated by right context recover cleanly without distorting
+            // mid-sentence DP grammatical rules or segmentation lengths.
+            if lexicon.neuralLM.isBackwardLoaded,
+               !urgentNow,
+               seedWord.isEmpty,
+               let ref = ordered.first,
+               ref.penaltyQ8 == 0,
+               !ref.hasKeySubstitution,
+               ref.syllables.count >= 3,
+               ref.wordCharEnds != 0,
+               ref.text.unicodeScalars.allSatisfy({ $0.value >= 0x4E00 && $0.value < 0xA000 }),
+               ref.syllables.allSatisfy({ $0.utf8.count >= 2 || $0 == "a" || $0 == "e" || $0 == "o" }),
+               let refSegs = Self.unpackSegmentedWords(
+                   text: ref.text,
+                   syllables: ref.syllables,
+                   wordCharEnds: ref.wordCharEnds,
+                   wordSylEnds: ref.wordSylEnds
+               ),
+               refSegs.count >= 2 {
+
+                let slot0 = refSegs[0]
+                if (2...3).contains(slot0.syls.count),
+                   slot0.word.count == slot0.syls.count,
+                   Self.curClauseSwitchTable[slot0.word] == nil,
+                   spansByStart[firstStart]?.contains(where: { $0.text == slot0.word && $0.isUserPhrase }) != true {
+
+                    let exactHits = lexicon.lookupExactWords(forSyllables: slot0.syls, limit: 24)
+                    if let origHit = exactHits.first(where: { $0.text == slot0.word }) {
+                        let origLexScore = origHit.scoreQ8
+                        let rightNext = refSegs[1].word
+                        let rightDiv = (rightNext.count == 1) ? 4 : 1
+
+                        @inline(__always)
+                        func assocScore(_ prev: String, _ next: String) -> Int {
+                            (assocMap(for: prev)[next] ?? 0) + (userSnapshot.bigramBonuses(after: prev)?[next] ?? 0)
+                        }
+
+                        let oldRightAssoc = assocScore(slot0.word, rightNext) / rightDiv
+                        let refWords = refSegs.map(\.word)
+
+                        struct SentenceStartChallenger {
+                            let text: String
+                            let words: [String]
+                            let lexDelta: Int
+                        }
+
+                        var challengers: [SentenceStartChallenger] = []
+                        challengers.reserveCapacity(6)
+                        var seenChallengers = Set<String>([ref.text])
+
+                        for hit in exactHits {
+                            guard challengers.count < 6 else { break }
+                            guard hit.text != slot0.word,
+                                  hit.text.count == slot0.syls.count,
+                                  origLexScore - hit.scoreQ8 <= 1100 else {
+                                continue
+                            }
+                            var chWords = refWords
+                            chWords[0] = hit.text
+                            let chText = chWords.joined()
+                            guard seenChallengers.insert(chText).inserted else { continue }
+                            let newRightAssoc = assocScore(hit.text, rightNext) / rightDiv
+                            let lexDelta = (hit.scoreQ8 - origLexScore) + (newRightAssoc - oldRightAssoc)
+                            challengers.append(SentenceStartChallenger(text: chText, words: chWords, lexDelta: lexDelta))
+                        }
+
+                        if !challengers.isEmpty {
+                            let refFwdQ8 = lexicon.neuralLM.scoreWholeSentence(words: refWords, precedingContext: nil)
+                            let refBwdQ8 = lexicon.neuralLM.scoreBackwardSentence(words: refWords)
+
+                            var bestWinner: (cand: SentenceStartChallenger, fwdQ8: Int, bwdQ8: Int, netDelta: Int)? = nil
+                            for ch in challengers {
+                                let chFwdQ8 = lexicon.neuralLM.scoreWholeSentence(words: ch.words, precedingContext: nil)
+                                let chBwdQ8 = lexicon.neuralLM.scoreBackwardSentence(words: ch.words)
+                                let fwdDelta = chFwdQ8 - refFwdQ8
+                                let bwdDelta = chBwdQ8 - refBwdQ8
+                                let netDelta = ch.lexDelta + fwdDelta + bwdDelta
+                                if bwdDelta >= 140,
+                                   fwdDelta >= -80,
+                                   netDelta >= 180 {
+                                    if bestWinner == nil || netDelta > bestWinner!.netDelta {
+                                        bestWinner = (ch, chFwdQ8, chBwdQ8, netDelta)
+                                    }
+                                }
+                            }
+
+                            if let winner = bestWinner {
+                                let deltaLead = min(300, max(1, winner.netDelta))
+                                let promoted = DPNode(
+                                    scoreQ8: ref.scoreQ8 + deltaLead,
+                                    penaltyQ8: 0,
+                                    lastSpanPenaltyQ8: 0,
+                                    neuralScoreQ8: winner.fwdQ8 + winner.bwdQ8,
+                                    textFingerprint: nil,
+                                    text: winner.cand.text,
+                                    prevWord: winner.cand.words.dropLast().last ?? "",
+                                    lastWord: winner.cand.words.last ?? "",
+                                    syllables: ref.syllables,
+                                    singleCharRun: 0,
+                                    maxOneCharRun: ref.maxOneCharRun,
+                                    hasKeySubstitution: false,
+                                    keySubstitutionCount: 0,
+                                    isPureCleanOrJianpin: true,
+                                    hasAccidentalSingleton: false,
+                                    hidden: ref.hidden,
+                                    wordCharEnds: ref.wordCharEnds,
+                                    wordSylEnds: ref.wordSylEnds
+                                )
+                                ordered.removeAll { $0.text == winner.cand.text }
+                                ordered.insert(promoted, at: 0)
+                            }
+                        }
+                    }
                 }
             }
             return ordered.prefix(4).map { full in
