@@ -157,6 +157,29 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
+    var spaceWatermarkTitle: String = "拼" {
+        didSet {
+            if oldValue != spaceWatermarkTitle {
+                if isHandlingTouchDown {
+                    bottomRowNeedsAppearanceRefresh = true
+                    scheduleDeferredAppearanceRefresh()
+                } else {
+                    refreshBottomRowAppearanceOnly()
+                }
+            }
+        }
+    }
+
+    var enableTopRowNumberSwipe: Bool = false {
+        didSet {
+            if oldValue != enableTopRowNumberSwipe {
+                refreshKeyAppearances()
+            }
+        }
+    }
+
+    private static let topRowDigits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+
     var spaceTitle: String = ""
 
     var isComposing: Bool = false
@@ -321,6 +344,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         var didTriggerBackspaceSwipeClear: Bool
         var calloutLabel: String?
         var isMomentaryNumericSlide: Bool = false
+        var isDeferredTopRowLetter: Bool = false
+        var swipedUpDigit: String? = nil
     }
 
     private var activeTouches: [UITouch: ActiveTouchState] = [:]
@@ -904,7 +929,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         for (rIdx, row) in rowItems.enumerated() {
             for (cIdx, item) in row.enumerated() {
                 let isPressed = nextPressed.contains((rIdx << 4) | cIdx)
-                configureKeyView(item.view, role: item.role, dark: dark, pressed: isPressed)
+                configureKeyView(item.view, role: item.role, dark: dark, pressed: isPressed, row: rIdx, col: cIdx)
             }
         }
     }
@@ -966,7 +991,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
-    private func configureKeyView(_ v: KeycapItemView, role: KeyRole, dark: Bool, pressed: Bool) {
+    private func configureKeyView(_ v: KeycapItemView, role: KeyRole, dark: Bool, pressed: Bool, row: Int = -1, col: Int = -1) {
         let primaryText = KeyboardTheme.primaryKeyTextColor(dark: dark)
         let fgPrimary = isTrackpadActive ? primaryText.withAlphaComponent(0.16) : primaryText
 
@@ -974,6 +999,9 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         case let .letter(ch):
             let isUpper = (shiftState != .lower)
             let display = isUpper ? String(ch.uppercased()) : String(ch)
+            let subHint = (enableTopRowNumberSwipe && page == .alphabetic && row == 0 && col >= 0 && col < Self.topRowDigits.count)
+                ? Self.topRowDigits[col]
+                : nil
             // Calibrated against iOS 26: lowercase 25.0pt regular with -2.9pt offset centers x-height at 0.0px!
             v.apply(
                 title: display,
@@ -985,7 +1013,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 verticalOffset: isUpper ? -0.5 : -2.9,
                 fill: KeyboardTheme.letterKeyFill(dark: dark, pressed: false),
                 foreground: fgPrimary,
-                dark: dark
+                dark: dark,
+                subHint: subHint
             )
 
         case let .symbol(sym):
@@ -1128,7 +1157,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 fill: KeyboardTheme.letterKeyFill(dark: dark, pressed: pressed && !isTrackpadActive),
                 foreground: primaryText.withAlphaComponent(0.75 * labelAlpha),
                 dark: dark,
-                watermark: showWatermark ? "拼" : nil
+                watermark: showWatermark ? spaceWatermarkTitle : nil
             )
 
         case .returnKey:
@@ -1219,6 +1248,16 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         default:
             return nil
         }
+    }
+
+    private func shouldDeferTopRowSwipeCommit(role: KeyRole, row: Int, col: Int) -> Bool {
+        guard enableTopRowNumberSwipe, page == .alphabetic, row == 0, col >= 0, col < Self.topRowDigits.count else {
+            return false
+        }
+        if case .letter = role {
+            return true
+        }
+        return false
     }
 
     private func isImmediateTouchDownCommitRole(_ role: KeyRole) -> Bool {
@@ -1555,8 +1594,12 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                     if !otherState.didCommitOnTouchDown && isCommitOnRolloverRole(otherRole) {
                         if otherRole == .space { stopSpaceTimer() }
                         if case .pageSwitch = otherRole { stopSettingsLongPressTimer() }
-                        let commitPt = otherState.hasUnlockedSlide ? otherState.currentPoint : otherState.initialPoint
-                        commitKey(row: otherState.rowIndex, col: otherState.colIndex, point: commitPt, touchSeq: otherState.touchSeq)
+                        if let swipeDigit = otherState.swipedUpDigit {
+                            onSymbolTap?(swipeDigit)
+                        } else {
+                            let commitPt = otherState.hasUnlockedSlide ? otherState.currentPoint : otherState.initialPoint
+                            commitKey(row: otherState.rowIndex, col: otherState.colIndex, point: commitPt, touchSeq: otherState.touchSeq)
+                        }
                         // If rollover committed `.emoji` and hid `KeyGridView`, abort immediately so the new touch
                         // never leaks into `activeTouches` or types into Pinyin behind `EmojiKeyboardView`!
                         if isHidden || !isUserInteractionEnabled || alpha <= 0.01 {
@@ -1586,7 +1629,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             }
         }
 
-        let commitsImmediately = isImmediateTouchDownCommitRole(role)
+        let deferredTopRow = shouldDeferTopRowSwipeCommit(role: role, row: hit.row, col: hit.col)
+        let commitsImmediately = !deferredTopRow && isImmediateTouchDownCommitRole(role)
         let isLetterRole: Bool
         if case .letter = role {
             isLetterRole = true
@@ -1599,7 +1643,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             let actionStatic: StaticString
             switch role {
             case .letter:
-                actionStatic = "按下触发字母输入"
+                actionStatic = commitsImmediately ? "按下触发字母输入" : "待抬手输入字母/上滑数字"
             case .backspace:
                 actionStatic = "0ms按下即刻退格"
             case .space:
@@ -1641,7 +1685,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             hasUnlockedSlide: false,
             didCommitOnTouchDown: commitsImmediately,
             didTriggerBackspaceSwipeClear: false,
-            calloutLabel: calloutText(for: role)
+            calloutLabel: calloutText(for: role),
+            isMomentaryNumericSlide: false,
+            isDeferredTopRowLetter: deferredTopRow,
+            swipedUpDigit: nil
         )
         triggerHaptic()
         playKeySound(for: role)
@@ -1651,8 +1698,11 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         case .letter:
             // Immediate `0 ms` touch-down commit eliminates `60-100 ms` lift-off lag ("黏连感")
             // and guarantees zero dropped keys even if iOS edge/Home-bar gestures cancel the touch!
+            // When `enableTopRowNumberSwipe` is enabled on Row 0, commit waits for lift/rollover/swipe-up.
             onActiveKeyTouchDown?()
-            commitKey(row: hit.row, col: hit.col, point: pt, touchSeq: seq)
+            if commitsImmediately {
+                commitKey(row: hit.row, col: hit.col, point: pt, touchSeq: seq)
+            }
         case .symbol, .smartPeriod, .returnKey:
             commitKey(row: hit.row, col: hit.col, point: pt, touchSeq: seq)
         case .shift:
@@ -1787,6 +1837,32 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                     updateCalloutAndHighlights()
                 } else {
                     activeTouches[touch] = state
+                }
+                continue
+            }
+
+            if state.isDeferredTopRowLetter {
+                let dx = pt.x - state.initialPoint.x
+                let dy = pt.y - state.initialPoint.y
+                var labelChanged = false
+                if dy <= -18.0 && abs(dy) > abs(dx) * 1.05,
+                   state.colIndex >= 0, state.colIndex < Self.topRowDigits.count {
+                    let digit = Self.topRowDigits[state.colIndex]
+                    if state.swipedUpDigit != digit || state.calloutLabel != digit {
+                        state.swipedUpDigit = digit
+                        state.calloutLabel = digit
+                        labelChanged = true
+                    }
+                } else if dy > -10.0, state.swipedUpDigit != nil {
+                    state.swipedUpDigit = nil
+                    if state.rowIndex < rowItems.count && state.colIndex < rowItems[state.rowIndex].count {
+                        state.calloutLabel = calloutText(for: rowItems[state.rowIndex][state.colIndex].role)
+                    }
+                    labelChanged = true
+                }
+                activeTouches[touch] = state
+                if labelChanged {
+                    updateCalloutAndHighlights()
                 }
                 continue
             }
@@ -2000,6 +2076,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         if !state.didCommitOnTouchDown,
            state.initialRole != .backspace,
            let role {
+            if let swipeDigit = state.swipedUpDigit {
+                onSymbolTap?(swipeDigit)
+                return
+            }
             let endPt = touch.location(in: self)
             if role == .space && state.wasComposingAtTouchDown && enableComposingSpaceTrackpad {
                 let duration = ProcessInfo.processInfo.systemUptime - state.touchDownTime
@@ -2082,6 +2162,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 return
             }
             if !state.didCommitOnTouchDown,
+               !state.isDeferredTopRowLetter,
                state.initialRole != .backspace,
                !triggeredSettings,
                state.rowIndex < rowItems.count,
@@ -2396,12 +2477,14 @@ private final class KeycapItemView: UIView {
         let foreground: UIColor
         let dark: Bool
         let watermark: String?
+        let subHint: String?
         let boundsSize: CGSize
     }
 
     private let label = UILabel()
     private let iconView = UIImageView()
     private let watermarkLabel = UILabel()
+    private let subHintLabel = UILabel()
     private var horizontalOffset: CGFloat = 0
     private var verticalOffset: CGFloat = 0
     private var lastRenderState: RenderState?
@@ -2425,6 +2508,11 @@ private final class KeycapItemView: UIView {
         watermarkLabel.font = .systemFont(ofSize: 13.5, weight: .regular)
         watermarkLabel.isHidden = true
         addSubview(watermarkLabel)
+
+        subHintLabel.textAlignment = .right
+        subHintLabel.font = .systemFont(ofSize: 9.5, weight: .medium)
+        subHintLabel.isHidden = true
+        addSubview(subHintLabel)
     }
 
     @available(*, unavailable)
@@ -2438,6 +2526,7 @@ private final class KeycapItemView: UIView {
         iconView.frame = bounds.offsetBy(dx: horizontalOffset, dy: verticalOffset)
         // Calibrated to native iOS 26 `拼` watermark (`(716..743, 587..613)` in 1024px crop)
         watermarkLabel.frame = CGRect(x: bounds.width - 20.4, y: bounds.height - 18.7, width: 16.0, height: 15.5)
+        subHintLabel.frame = CGRect(x: bounds.width - 14.0, y: 2.0, width: 11.0, height: 11.0)
     }
 
     func apply(
@@ -2451,7 +2540,8 @@ private final class KeycapItemView: UIView {
         fill: UIColor,
         foreground: UIColor,
         dark: Bool,
-        watermark: String? = nil
+        watermark: String? = nil,
+        subHint: String? = nil
     ) {
         let nextState = RenderState(
             title: title,
@@ -2465,6 +2555,7 @@ private final class KeycapItemView: UIView {
             foreground: foreground,
             dark: dark,
             watermark: watermark,
+            subHint: subHint,
             boundsSize: bounds.size
         )
         if lastRenderState == nextState {
@@ -2487,6 +2578,16 @@ private final class KeycapItemView: UIView {
             watermarkLabel.isHidden = false
         } else if !watermarkLabel.isHidden {
             watermarkLabel.isHidden = true
+        }
+
+        if let subHint {
+            subHintLabel.text = subHint
+            subHintLabel.textColor = dark
+                ? UIColor(white: 1.0, alpha: 0.42)
+                : UIColor(white: 0.0, alpha: 0.36)
+            subHintLabel.isHidden = false
+        } else if !subHintLabel.isHidden {
+            subHintLabel.isHidden = true
         }
 
         let targetFrame = bounds.offsetBy(dx: horizontalOffset, dy: verticalOffset)

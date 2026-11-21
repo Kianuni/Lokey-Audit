@@ -381,4 +381,212 @@ public struct PinyinSyllableAutomaton: Sendable {
         allExpanded.remove(syl)
         return Array(allExpanded)
     }
+
+    // MARK: - Double Pinyin (Shuangpin: Xiaohe & Ziranma)
+
+    private struct ShuangpinTableKey: Hashable {
+        let lexiconID: ObjectIdentifier
+        let scheme: PinyinScheme
+    }
+
+    private static let shuangpinLock = NSLock()
+    private static var shuangpinTableCache: [ShuangpinTableKey: [[ExpandedSyllable]]] = [:]
+
+    private static let xiaoheZeroInitialPrimary: [String: String] = [
+        "a": "aa", "o": "oo", "e": "ee",
+        "ai": "ai", "ei": "ei", "ao": "ao", "ou": "ou",
+        "an": "an", "en": "en", "er": "er",
+        "ang": "ah", "eng": "eg",
+    ]
+    private static let xiaoheZeroInitialAlias: [String: String] = [
+        "oa": "a", "oe": "e",
+        "od": "ai", "ow": "ei", "oc": "ao", "oz": "ou",
+        "oj": "an", "of": "en", "or": "er", "oh": "ang", "og": "eng",
+    ]
+    private static let ziranmaZeroInitialPrimary: [String: String] = [
+        "a": "aa", "o": "oo", "e": "ee",
+        "ai": "ai", "ei": "ei", "ao": "ao", "ou": "ou",
+        "an": "an", "en": "en", "er": "er",
+        "ang": "ah", "eng": "eg",
+    ]
+    private static let ziranmaZeroInitialAlias: [String: String] = [
+        "oa": "a", "oe": "e",
+        "ol": "ai", "oz": "ei", "ok": "ao", "ob": "ou",
+        "oj": "an", "of": "en", "or": "er", "oh": "ang", "og": "eng",
+    ]
+
+    private static let xiaoheFinalMap: [String: String] = [
+        "a": "a", "o": "o", "e": "e", "i": "i", "u": "u", "v": "v",
+        "ai": "d", "ei": "w", "ui": "v", "ao": "c", "ou": "z", "iu": "q", "ie": "p",
+        "ve": "t", "ue": "t", "an": "j", "en": "f", "in": "b", "un": "y",
+        "ang": "h", "eng": "g", "ing": "k", "ong": "s", "iong": "s",
+        "ia": "x", "ua": "x", "iao": "n", "ian": "m", "iang": "l", "uang": "l",
+        "uai": "k", "uan": "r", "uo": "o",
+    ]
+    private static let ziranmaFinalMap: [String: String] = [
+        "a": "a", "o": "o", "e": "e", "i": "i", "u": "u", "v": "v",
+        "ai": "l", "ei": "z", "ui": "v", "ao": "k", "ou": "b", "iu": "q", "ie": "x",
+        "ve": "t", "ue": "t", "an": "j", "en": "f", "in": "n", "un": "p",
+        "ang": "h", "eng": "g", "ing": "y", "ong": "s", "iong": "s",
+        "ia": "w", "ua": "w", "iao": "c", "ian": "m", "iang": "d", "uang": "d",
+        "uai": "y", "uan": "r", "uo": "o",
+    ]
+
+    public static func primaryShuangpinCode(forCanonicalSyllable syl: String, scheme: PinyinScheme) -> String? {
+        guard scheme != .quanpin else { return syl }
+        let lower = syl.lowercased()
+        let zeroMap = (scheme == .xiaohe) ? xiaoheZeroInitialPrimary : ziranmaZeroInitialPrimary
+        if let code = zeroMap[lower] {
+            return code
+        }
+        let initialKey: String
+        let remainder: String
+        if lower.hasPrefix("zh") {
+            initialKey = "v"
+            remainder = String(lower.dropFirst(2))
+        } else if lower.hasPrefix("ch") {
+            initialKey = "i"
+            remainder = String(lower.dropFirst(2))
+        } else if lower.hasPrefix("sh") {
+            initialKey = "u"
+            remainder = String(lower.dropFirst(2))
+        } else if let first = lower.first, first >= "b" && first <= "z" && first != "e" && first != "o" && first != "i" && first != "u" && first != "v" {
+            initialKey = String(first)
+            remainder = String(lower.dropFirst(1))
+        } else {
+            return nil
+        }
+        guard !remainder.isEmpty else { return nil }
+        let finalMap = (scheme == .xiaohe) ? xiaoheFinalMap : ziranmaFinalMap
+        guard let finalKey = finalMap[remainder] else { return nil }
+        return initialKey + finalKey
+    }
+
+    public static func shuangpinInitialString(forKeyByte b: UInt8, scheme: PinyinScheme) -> String? {
+        guard scheme != .quanpin, b >= 0x61 && b <= 0x7A else { return nil }
+        switch b {
+        case 0x76: return "zh"
+        case 0x69: return "ch"
+        case 0x75: return "sh"
+        default: return String(UnicodeScalar(b))
+        }
+    }
+
+    private static func shuangpinLookupTable(for scheme: PinyinScheme, in lexicon: MmapLexicon) -> [[ExpandedSyllable]] {
+        let key = ShuangpinTableKey(lexiconID: ObjectIdentifier(lexicon), scheme: scheme)
+        shuangpinLock.lock()
+        if let cached = shuangpinTableCache[key] {
+            shuangpinLock.unlock()
+            return cached
+        }
+        shuangpinLock.unlock()
+
+        var buckets = [[ExpandedSyllable]](repeating: [], count: 26 * 26)
+        @inline(__always)
+        func appendSlot(code: String, sid: UInt16, canonical: String, penaltyQ8: Int) {
+            let bytes = Array(code.utf8)
+            guard bytes.count == 2 else { return }
+            let i0 = Int(bytes[0] - 0x61)
+            let i1 = Int(bytes[1] - 0x61)
+            guard (0..<26).contains(i0), (0..<26).contains(i1) else { return }
+            let slot = i0 * 26 + i1
+            if let idx = buckets[slot].firstIndex(where: { $0.syllableID == sid }) {
+                if penaltyQ8 < buckets[slot][idx].penaltyQ8 {
+                    buckets[slot][idx] = ExpandedSyllable(syllableID: sid, canonical: canonical, penaltyQ8: penaltyQ8)
+                }
+            } else {
+                buckets[slot].append(ExpandedSyllable(syllableID: sid, canonical: canonical, penaltyQ8: penaltyQ8))
+            }
+        }
+
+        for rawSID in 1...lexicon.totalSyllables {
+            let sid = UInt16(rawSID)
+            let canon = lexicon.idToSyllable[rawSID]
+            guard let code = primaryShuangpinCode(forCanonicalSyllable: canon, scheme: scheme) else { continue }
+            appendSlot(code: code, sid: sid, canonical: canon, penaltyQ8: 0)
+
+            // Support j/q/x/y + v (`jv/qv/xv/yv -> ju/qu/xu/yu`) and `nv`/`lv` aliases seamlessly
+            if code.count == 2 && code.hasSuffix("u"),
+               let first = code.first, first == "j" || first == "q" || first == "x" || first == "y" {
+                appendSlot(code: "\(first)v", sid: sid, canonical: canon, penaltyQ8: 0)
+            }
+        }
+
+        // Standard alternate zero-initial mappings (`o*` aliases)
+        let zeroAliases = (scheme == .xiaohe) ? xiaoheZeroInitialAlias : ziranmaZeroInitialAlias
+        for (code, canon) in zeroAliases {
+            if let sid = lexicon.syllableToID[canon] {
+                appendSlot(code: code, sid: sid, canonical: canon, penaltyQ8: scheme == .ziranma ? 15 : 25)
+            }
+        }
+
+        // Preserve `yue`/`nve`/`lve` orthographic consistency
+        if let nveSID = lexicon.syllableToID["nve"], let nveCode = primaryShuangpinCode(forCanonicalSyllable: "nve", scheme: scheme) {
+            appendSlot(code: nveCode, sid: nveSID, canonical: "nve", penaltyQ8: 0)
+        }
+        if let lveSID = lexicon.syllableToID["lve"], let lveCode = primaryShuangpinCode(forCanonicalSyllable: "lve", scheme: scheme) {
+            appendSlot(code: lveCode, sid: lveSID, canonical: "lve", penaltyQ8: 0)
+        }
+
+        for idx in buckets.indices where buckets[idx].count > 1 {
+            buckets[idx].sort {
+                if $0.penaltyQ8 != $1.penaltyQ8 { return $0.penaltyQ8 < $1.penaltyQ8 }
+                return $0.canonical < $1.canonical
+            }
+        }
+
+        shuangpinLock.lock()
+        shuangpinTableCache[key] = buckets
+        shuangpinLock.unlock()
+        return buckets
+    }
+
+    public static func matchShuangpinPair(
+        b0: UInt8,
+        b1: UInt8,
+        scheme: PinyinScheme,
+        in lexicon: MmapLexicon,
+        fuzzy: FuzzyPinyinOptions
+    ) -> [ExpandedSyllable] {
+        guard scheme != .quanpin else { return [] }
+        let i0 = Int(b0) - 0x61
+        let i1 = Int(b1) - 0x61
+        guard (0..<26).contains(i0), (0..<26).contains(i1) else { return [] }
+        let table = shuangpinLookupTable(for: scheme, in: lexicon)
+        let baseHits = table[i0 * 26 + i1]
+        guard !fuzzy.isEmpty, !baseHits.isEmpty else { return baseHits }
+
+        var expanded = baseHits
+        for hit in baseHits {
+            for variant in fuzzyVariants(of: hit.canonical, options: fuzzy) {
+                if let varSID = lexicon.syllableToID[variant],
+                   !expanded.contains(where: { $0.syllableID == varSID }) {
+                    expanded.append(ExpandedSyllable(syllableID: varSID, canonical: variant, penaltyQ8: hit.penaltyQ8 + 90))
+                }
+            }
+        }
+        return expanded
+    }
+
+    public static func canSegmentShuangpinCleanly(
+        _ bytes: ArraySlice<UInt8>,
+        scheme: PinyinScheme,
+        in lexicon: MmapLexicon
+    ) -> Bool {
+        guard scheme != .quanpin, !bytes.isEmpty else { return false }
+        let arr = Array(bytes)
+        let count = arr.count
+        guard count.isMultiple(of: 2) else { return false }
+        let table = shuangpinLookupTable(for: scheme, in: lexicon)
+        var i = 0
+        while i < count {
+            let i0 = Int(arr[i]) - 0x61
+            let i1 = Int(arr[i + 1]) - 0x61
+            guard (0..<26).contains(i0), (0..<26).contains(i1), !table[i0 * 26 + i1].isEmpty else {
+                return false
+            }
+            i += 2
+        }
+        return true
+    }
 }

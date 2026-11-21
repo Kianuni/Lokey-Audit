@@ -146,11 +146,26 @@ private enum SharedLexiconHolder {
     private static let lexiconLock = NSLock()
     private static var cachedLexicon: MmapLexicon?
     private static var cachedSignature: LokeyLexiconPackManager.ActiveSignature?
+    private static var didStartPrewarm = false
 
     static func builtInLexiconURL() -> URL? {
         Bundle(for: KeyboardViewController.self)
             .url(forResource: "lokey_lexicon", withExtension: "bin")
             ?? Bundle.main.url(forResource: "lokey_lexicon", withExtension: "bin")
+    }
+
+    static func prewarmInBackground() {
+        lexiconLock.lock()
+        if didStartPrewarm || cachedLexicon != nil {
+            lexiconLock.unlock()
+            return
+        }
+        didStartPrewarm = true
+        lexiconLock.unlock()
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = currentLexicon()
+            _ = userStore.totalPhraseCount()
+        }
     }
 
     static func currentLexicon(
@@ -188,6 +203,7 @@ private enum SharedLexiconHolder {
         lexiconLock.lock()
         cachedLexicon = nil
         cachedSignature = nil
+        didStartPrewarm = false
         lexiconLock.unlock()
     }
 
@@ -665,10 +681,25 @@ public final class KeyboardViewController: UIInputViewController {
     private var pendingBaseLexiconReloadDir: URL?
     private var pendingBaseLexiconReloadDefaults: UserDefaults?
     private var cachedSupplementaryEntries: [(String, String)] = []
+    private var lastSupplementaryRefreshUptime: TimeInterval = -100
     private static let extensionStateIOQueue = DispatchQueue(label: "com.kianuni.lokey.extStateIO", qos: .userInitiated)
 
     private var isRunningInExtensionProcess: Bool {
         Bundle.main.bundleURL.pathExtension == "appex"
+    }
+
+    public override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
+        if Bundle.main.bundleURL.pathExtension == "appex" {
+            SharedLexiconHolder.prewarmInBackground()
+        }
+        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+    }
+
+    public required init?(coder: NSCoder) {
+        if Bundle.main.bundleURL.pathExtension == "appex" {
+            SharedLexiconHolder.prewarmInBackground()
+        }
+        super.init(coder: coder)
     }
     public override var textDocumentProxy: UITextDocumentProxy {
         if let custom = customTextDocumentProxyForTesting {
@@ -726,17 +757,22 @@ public final class KeyboardViewController: UIInputViewController {
         let canQueryHostXPCOnLoad = !isRunningInExtensionProcess || customTextDocumentProxyForTesting != nil
         if canQueryHostXPCOnLoad {
             cachedHasFullAccess = hasFullAccess
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.8.0"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.0"
             if cachedHasFullAccess {
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
                 }
             }
         }
-        LokeyDiagnosticLogger.shared.bootstrapFromDiskAsync()
+        if !isRunningInExtensionProcess {
+            LokeyDiagnosticLogger.shared.bootstrapFromDiskAsync()
+        }
         refreshCachedHostTopPadding()
-        let initialSettings = setupEngine()
         setupHierarchy()
+        let initialSettings = setupEngine(
+            refreshCalibration: !isRunningInExtensionProcess,
+            requestSupplementary: !isRunningInExtensionProcess
+        )
         setupDiagnosticTouchSniffer()
         wireCallbacks()
         markedTextCoalescer.onMarkedTextApplied = { [weak self] appliedText in
@@ -750,7 +786,18 @@ public final class KeyboardViewController: UIInputViewController {
             self?.cachedHasFullAccess ?? false
         }
         observeAppGroupUpdates()
-        reloadPreferencesFromAppGroup(refreshFullAccess: false, preloadedSettings: initialSettings)
+        reloadPreferencesFromAppGroup(
+            refreshFullAccess: false,
+            preloadedSettings: initialSettings,
+            refreshCalibration: !isRunningInExtensionProcess
+        )
+        if isRunningInExtensionProcess {
+            DispatchQueue.main.async { [weak self] in
+                LokeyDiagnosticLogger.shared.bootstrapFromDiskAsync()
+                self?.refreshCalibrationFromDiskAsync()
+                self?.refreshSupplementaryLexiconIfNeeded(force: true)
+            }
+        }
         composingContextAnchor = ""
         if canQueryHostXPCOnLoad {
             activeDocumentID = currentDocumentIdentifier()
@@ -799,7 +846,7 @@ public final class KeyboardViewController: UIInputViewController {
         refreshCachedHostTopPadding()
         updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
         if cachedHasFullAccess {
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.8.0"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.0"
             publishExtensionVisibility(isVisible: true)
             Self.extensionStateIOQueue.async {
                 LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -822,6 +869,7 @@ public final class KeyboardViewController: UIInputViewController {
         session?.notifyContextBreak()
         reloadPreferencesFromAppGroup(refreshFullAccess: false)
         reloadBaseLexiconIfNeeded()
+        refreshSupplementaryLexiconIfNeeded()
         SharedLexiconHolder.userStore.reloadFromDiskAsyncIfExternal { [weak self] in
             guard let self, !self.candidateBar.hasActiveTouch else { return }
             self.refreshCandidateUI()
@@ -1234,7 +1282,11 @@ public final class KeyboardViewController: UIInputViewController {
     // MARK: - Setup
 
     @discardableResult
-    private func setupEngine(lexiconOverride: MmapLexicon? = nil) -> LokeySettings? {
+    private func setupEngine(
+        lexiconOverride: MmapLexicon? = nil,
+        refreshCalibration: Bool = true,
+        requestSupplementary: Bool = true
+    ) -> LokeySettings? {
         guard let lexicon = lexiconOverride ?? SharedLexiconHolder.currentLexicon() else { return nil }
         let prevSecure = self.session?.isSecureContext ?? false
         let prevExternalContext = self.session?.externalContextBeforeInput
@@ -1260,7 +1312,9 @@ public final class KeyboardViewController: UIInputViewController {
         newSession.externalContextBeforeInput = prevExternalContext
         self.session = newSession
         self.session?.prewarmEngineAsync()
-        refreshCalibrationFromDiskAsync()
+        if refreshCalibration {
+            refreshCalibrationFromDiskAsync()
+        }
         session?.canPublishCandidates = { [weak self] in
             guard let self else { return false }
             return !self.candidateBar.hasActiveTouch && !self.expandedGrid.hasActiveInteraction
@@ -1313,20 +1367,30 @@ public final class KeyboardViewController: UIInputViewController {
             }
         }
 
-        requestSupplementaryLexicon { [weak self, weak decoder] uiLexicon in
+        if requestSupplementary {
+            refreshSupplementaryLexiconIfNeeded(force: true)
+        }
+        return loadedSettings
+    }
+
+    private func refreshSupplementaryLexiconIfNeeded(force: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard force || (now - lastSupplementaryRefreshUptime) >= 60.0 else { return }
+        lastSupplementaryRefreshUptime = now
+        requestSupplementaryLexicon { [weak self] uiLexicon in
             guard unsafeBitCast(uiLexicon, to: AnyObject?.self) != nil else { return }
             let pairs = uiLexicon.entries.compactMap { entry -> (String, String)? in
                 let inp = entry.userInput.trimmingCharacters(in: .whitespacesAndNewlines)
                 let doc = entry.documentText.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !inp.isEmpty, !doc.isEmpty else { return nil }
+                guard !doc.isEmpty else { return nil }
                 return (inp, doc)
             }
             DispatchQueue.main.async {
-                self?.cachedSupplementaryEntries = pairs
-                decoder?.setSupplementaryEntries(pairs)
+                guard let self else { return }
+                self.cachedSupplementaryEntries = pairs
+                self.session?.setSupplementaryEntries(pairs)
             }
         }
-        return loadedSettings
     }
 
     private func refreshCalibrationFromDiskAsync() {
@@ -1479,17 +1543,20 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func reloadPreferencesFromAppGroup(
         refreshFullAccess: Bool = true,
-        preloadedSettings: LokeySettings? = nil
+        preloadedSettings: LokeySettings? = nil,
+        refreshCalibration: Bool = true
     ) {
         lastSettingsGeneration = LokeyIPC.settingsGeneration
         loadingSettingsGeneration = nil
-        refreshCalibrationFromDiskAsync()
+        if refreshCalibration {
+            refreshCalibrationFromDiskAsync()
+        }
 
         if refreshFullAccess && (hasAppearedInHost || !isRunningInExtensionProcess || customTextDocumentProxyForTesting != nil) {
             let wasFullAccess = cachedHasFullAccess
             cachedHasFullAccess = self.hasFullAccess
             if cachedHasFullAccess && !wasFullAccess {
-                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.8.0"
+                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.0"
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
                 }
@@ -1501,15 +1568,18 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func applyPreferences(_ latest: LokeySettings) {
         let prevScriptMode = session?.settings.chineseScriptMode
+        let prevScheme = session?.settings.pinyinScheme
         session?.settings = latest
         LokeyDiagnosticLogger.shared.isEnabled = latest.enableDiagnosticLogging
         keyGrid.showPeriodBesideSpace = latest.showPeriodBesideSpace
+        keyGrid.spaceWatermarkTitle = latest.pinyinScheme.spaceWatermark
+        keyGrid.enableTopRowNumberSwipe = latest.enableTopRowNumberSwipe
         keyGrid.hapticStrength = latest.hapticStrength
         keyGrid.hapticFeedbackIntensity = latest.hapticFeedbackIntensity
         keyGrid.isKeyClickSoundEnabled = latest.isKeyClickSoundEnabled
         keyGrid.enableComposingSpaceTrackpad = latest.enableComposingSpaceTrackpad
         keyGrid.hasFullAccess = cachedHasFullAccess
-        if (session?.isComposing == true || prevScriptMode != latest.chineseScriptMode) && !candidateBar.hasActiveTouch {
+        if (session?.isComposing == true || prevScriptMode != latest.chineseScriptMode || prevScheme != latest.pinyinScheme) && !candidateBar.hasActiveTouch {
             refreshCandidateUI()
         }
     }

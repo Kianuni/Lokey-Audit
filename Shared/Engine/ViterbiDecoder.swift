@@ -73,8 +73,19 @@ public final class ViterbiDecoder: @unchecked Sendable {
 
     /// Optional offline supplementary entries supplied by `UIInputViewController.requestSupplementaryLexicon`
     /// (system Text Replacements & Contacts names).
+    private struct SupplementaryContactItem {
+        let phrase: String
+        let syllables: [String]
+        let compactQuanpin: String
+        let xiaoheCode: String
+        let ziranmaCode: String
+        let jianpin: String
+    }
+
     private(set) var supplementaryGeneration: UInt64 = 0
+    private(set) var rawSupplementaryEntries: [(shortcut: String, phrase: String)] = []
     private(set) var supplementaryShortcuts: [(shortcut: String, phrase: String)] = []
+    private var supplementaryContacts: [SupplementaryContactItem] = []
 
     // Only these exact terminal readings have a conversational recovery entry in
     // the compiled lexicon. Avoid additional mmap probes on ordinary keystrokes.
@@ -263,7 +274,54 @@ public final class ViterbiDecoder: @unchecked Sendable {
 
     public func setSupplementaryEntries(_ entries: [(shortcut: String, phrase: String)]) {
         supplementaryGeneration &+= 1
-        self.supplementaryShortcuts = entries.map { ($0.shortcut.lowercased(), $0.phrase) }
+        self.rawSupplementaryEntries = entries
+
+        var shortcuts: [(shortcut: String, phrase: String)] = []
+        shortcuts.reserveCapacity(min(entries.count, 512))
+        var seenShortcuts = Set<String>()
+
+        var contacts: [SupplementaryContactItem] = []
+        var seenContacts = Set<String>()
+
+        for (rawShortcut, rawPhrase) in entries {
+            let trimmedPhrase = rawPhrase.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedPhrase.isEmpty else { continue }
+
+            let shortcutLower = rawShortcut.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !shortcutLower.isEmpty,
+               shortcutLower.allSatisfy({ $0.isASCII && !$0.isWhitespace }),
+               shortcutLower != trimmedPhrase.lowercased(),
+               seenShortcuts.insert("\(shortcutLower)\0\(trimmedPhrase)").inserted {
+                shortcuts.append((shortcutLower, trimmedPhrase))
+            }
+
+            if (2...5).contains(trimmedPhrase.count),
+               trimmedPhrase.unicodeScalars.allSatisfy({ $0.value >= 0x4E00 && $0.value <= 0x9FFF }),
+               contacts.count < 2048,
+               seenContacts.insert(trimmedPhrase).inserted,
+               let syls = lexicon.primarySyllables(forCJKName: trimmedPhrase),
+               syls.count == trimmedPhrase.count {
+                let xiaoheCodes = syls.compactMap {
+                    PinyinSyllableAutomaton.primaryShuangpinCode(forCanonicalSyllable: $0, scheme: .xiaohe)
+                }
+                let ziranmaCodes = syls.compactMap {
+                    PinyinSyllableAutomaton.primaryShuangpinCode(forCanonicalSyllable: $0, scheme: .ziranma)
+                }
+                contacts.append(
+                    SupplementaryContactItem(
+                        phrase: trimmedPhrase,
+                        syllables: syls,
+                        compactQuanpin: syls.joined(),
+                        xiaoheCode: xiaoheCodes.count == syls.count ? xiaoheCodes.joined() : "",
+                        ziranmaCode: ziranmaCodes.count == syls.count ? ziranmaCodes.joined() : "",
+                        jianpin: String(syls.compactMap(\.first))
+                    )
+                )
+            }
+        }
+
+        self.supplementaryShortcuts = shortcuts
+        self.supplementaryContacts = contacts
     }
 
     /// Convenience helper for decoding plain ASCII test strings (synthesizing exact center taps).
@@ -795,7 +853,14 @@ public final class ViterbiDecoder: @unchecked Sendable {
         }
 
         let firstStart = hasApostrophe ? (samples.firstIndex(where: { $0.primaryChar != "'" }) ?? n) : 0
-        let currentWholeClean = cleanLower.count >= 4 && !hasApostrophe && lexicon.canSegmentCleanlyOrActiveTail(cleanLower)
+        let currentWholeClean: Bool
+        if settings.pinyinScheme == .quanpin {
+            currentWholeClean = cleanLower.count >= 4 && !hasApostrophe && lexicon.canSegmentCleanlyOrActiveTail(cleanLower)
+        } else {
+            let cleanBytes = Array(cleanLower.utf8)
+            currentWholeClean = cleanBytes.count >= 4 && !hasApostrophe
+                && PinyinSyllableAutomaton.canSegmentShuangpinCleanly(cleanBytes[...], scheme: settings.pinyinScheme, in: lexicon)
+        }
         let prevN = cachedSamples.count
         let minCommon = min(commonPrefixLen, min(prevN, n))
         let wholeCleanUnchanged = (currentWholeClean == cachedWholeInputClean)
@@ -809,6 +874,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             lowerASCII: lowerASCII,
             hasApostrophe: hasApostrophe,
             posHyps: posHyps,
+            scheme: settings.pinyinScheme,
             fuzzy: settings.fuzzyOptions,
             enableErrorCorrection: settings.enableSpatialCorrection,
             canReuseLatticePrefix: canReusePrefix && cachedHasApostrophe == hasApostrophe,
@@ -843,6 +909,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             n: n,
             arcsByStart: arcsByStart,
             userSnapshot: userSnap,
+            scheme: settings.pinyinScheme,
             enableErrorCorrection: settings.enableSpatialCorrection,
             wholeInputClean: currentWholeClean,
             canReuseSpansBase: canReuseSpansBase,
@@ -1028,12 +1095,30 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     )
                 )
             }
+            for item in supplementaryContacts {
+                let code: String
+                switch settings.pinyinScheme {
+                case .quanpin: code = item.compactQuanpin
+                case .xiaohe: code = item.xiaoheCode
+                case .ziranma: code = item.ziranmaCode
+                }
+                guard !code.isEmpty, code == cleanLower else { continue }
+                appendCandidate(
+                    LokeyCandidate(
+                        text: item.phrase,
+                        consumedInputCount: n,
+                        matchedSyllables: item.syllables,
+                        scoreQ8: -240,
+                        kind: .userPhrase
+                    )
+                )
+            }
         }
 
         // 5B. User SQLite learned phrases (exact or Jianpin match for full buffer)
         let userHits = userStore.lookup(query: cleanLower, limit: 6)
         var exactUserHitCount = 0
-        for up in userHits where up.compactPinyin == cleanLower || up.jianpin == cleanLower {
+        for up in userHits where up.compactPinyin == cleanLower || (settings.pinyinScheme == .quanpin && up.jianpin == cleanLower) {
             let prevCount = candidates.count
             appendCandidate(
                 LokeyCandidate(
@@ -1047,6 +1132,40 @@ public final class ViterbiDecoder: @unchecked Sendable {
             )
             if candidates.count > prevCount {
                 exactUserHitCount += 1
+            }
+        }
+        if settings.pinyinScheme != .quanpin && !cleanLower.isEmpty {
+            for up in userStore.allPhrases(limit: 256) {
+                let syls = up.pinyinNormalized.split(separator: " ").map(String.init)
+                guard !syls.isEmpty else { continue }
+                var encoded = ""
+                encoded.reserveCapacity(syls.count * 2)
+                var validShuangpin = true
+                for syl in syls {
+                    guard let spCode = PinyinSyllableAutomaton.primaryShuangpinCode(
+                        forCanonicalSyllable: syl,
+                        scheme: settings.pinyinScheme
+                    ) else {
+                        validShuangpin = false
+                        break
+                    }
+                    encoded.append(spCode)
+                }
+                guard validShuangpin && encoded == cleanLower else { continue }
+                let prevCount = candidates.count
+                appendCandidate(
+                    LokeyCandidate(
+                        text: up.surface,
+                        consumedInputCount: n,
+                        matchedSyllables: syls,
+                        scoreQ8: up.dynamicBoostQ8,
+                        kind: .userPhrase,
+                        isDeletableUserPhrase: true
+                    )
+                )
+                if candidates.count > prevCount {
+                    exactUserHitCount += 1
+                }
             }
         }
 
@@ -1075,51 +1194,82 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 return sp
             }
 
-        let singleSylExactID: UInt16? = (firstStart == 0 && n <= 6 && !hasApostrophe) ? lexicon.syllableToID[cleanLower] : nil
+        let singleSylExactIDs: [UInt16]
+        if firstStart == 0 && !hasApostrophe {
+            if settings.pinyinScheme == .quanpin {
+                if n <= 6, let exactSID = lexicon.syllableToID[cleanLower], exactSID > 0 {
+                    singleSylExactIDs = [exactSID]
+                } else {
+                    singleSylExactIDs = []
+                }
+            } else if n == 2 && cleanLower.count == 2 {
+                let bytes = Array(cleanLower.utf8)
+                singleSylExactIDs = PinyinSyllableAutomaton.matchShuangpinPair(
+                    b0: bytes[0],
+                    b1: bytes[1],
+                    scheme: settings.pinyinScheme,
+                    in: lexicon,
+                    fuzzy: settings.fuzzyOptions
+                ).filter { $0.penaltyQ8 == 0 }.map(\.syllableID)
+            } else {
+                singleSylExactIDs = []
+            }
+        } else {
+            singleSylExactIDs = []
+        }
         var singleSylExactOrderedSpans: [WordSpan] = []
         var hasBoostedSingleSylUnigram = false
-        if let exactSID = singleSylExactID, exactSID > 0,
-           let exactNode = lexicon.step(from: lexicon.rootNodeIndex, syllableID: exactSID),
-           fullBufferSpans.contains(where: { $0.penaltyQ8 == 0 && !$0.hasKeySubstitution && $0.syllables.count == 1 && $0.syllables[0] == cleanLower }) {
-            let uniMap = userSnap.unigramEntries(compactPinyin: cleanLower)
-            let rawExactWords = lexicon.words(at: exactNode, limit: uniMap == nil ? 28 : 48)
-            if !rawExactWords.isEmpty {
-                let topExact0Score = rawExactWords[0].scoreQ8
-                let fourthExactScore = rawExactWords[min(3, rawExactWords.count - 1)].scoreQ8
-                var scoredExact: [(idx: Int, span: WordSpan)] = []
-                scoredExact.reserveCapacity(rawExactWords.count)
-                for (wIdx, w) in rawExactWords.enumerated() {
-                    var effScore = w.scoreQ8
-                    if wIdx > 0, w.text.count == 1, let entry = uniMap?[w.text] {
-                        let effUses = Double(entry.count) * entry.recencyDecay
-                        if effUses >= 2.7 {
-                            let cap = (topExact0Score >= -1800) ? (topExact0Score - 60) : (topExact0Score + 40)
-                            effScore = min(cap, max(w.scoreQ8 + 960, min(w.scoreQ8 + 1350, fourthExactScore + 60)))
-                            hasBoostedSingleSylUnigram = true
-                        } else if effUses >= 1.5 {
-                            effScore = min(topExact0Score - 60, max(w.scoreQ8 + 800, min(w.scoreQ8 + 1250, fourthExactScore + 30)))
-                            hasBoostedSingleSylUnigram = true
-                        } else if effUses >= 0.4 {
-                            let delta = Int((380.0 * min(1.0, effUses)).rounded())
-                            effScore = min(topExact0Score - 80, w.scoreQ8 + delta)
-                            hasBoostedSingleSylUnigram = true
+        if !singleSylExactIDs.isEmpty {
+            var scoredExact: [(idx: Int, span: WordSpan)] = []
+            var seqIdx = 0
+            for exactSID in singleSylExactIDs.prefix(2) {
+                let canonSyl = lexicon.idToSyllable[Int(exactSID)]
+                guard let exactNode = lexicon.step(from: lexicon.rootNodeIndex, syllableID: exactSID),
+                      fullBufferSpans.contains(where: { $0.penaltyQ8 == 0 && !$0.hasKeySubstitution && $0.syllables.count == 1 && $0.syllables[0] == canonSyl }) else {
+                    continue
+                }
+                let uniMap = userSnap.unigramEntries(compactPinyin: canonSyl)
+                let rawExactWords = lexicon.words(at: exactNode, limit: uniMap == nil ? 28 : 48)
+                if !rawExactWords.isEmpty {
+                    let topExact0Score = rawExactWords[0].scoreQ8
+                    let fourthExactScore = rawExactWords[min(3, rawExactWords.count - 1)].scoreQ8
+                    scoredExact.reserveCapacity(scoredExact.count + rawExactWords.count)
+                    for (wIdx, w) in rawExactWords.enumerated() {
+                        var effScore = w.scoreQ8
+                        if wIdx > 0, w.text.count == 1, let entry = uniMap?[w.text] {
+                            let effUses = Double(entry.count) * entry.recencyDecay
+                            if effUses >= 2.7 {
+                                let cap = (topExact0Score >= -1800) ? (topExact0Score - 60) : (topExact0Score + 40)
+                                effScore = min(cap, max(w.scoreQ8 + 960, min(w.scoreQ8 + 1350, fourthExactScore + 60)))
+                                hasBoostedSingleSylUnigram = true
+                            } else if effUses >= 1.5 {
+                                effScore = min(topExact0Score - 60, max(w.scoreQ8 + 800, min(w.scoreQ8 + 1250, fourthExactScore + 30)))
+                                hasBoostedSingleSylUnigram = true
+                            } else if effUses >= 0.4 {
+                                let delta = Int((380.0 * min(1.0, effUses)).rounded())
+                                effScore = min(topExact0Score - 80, w.scoreQ8 + delta)
+                                hasBoostedSingleSylUnigram = true
+                            }
+                        }
+                        if wIdx < 28 || effScore > w.scoreQ8 {
+                            scoredExact.append((
+                                seqIdx,
+                                WordSpan(
+                                    start: 0,
+                                    end: n,
+                                    text: w.text,
+                                    syllables: [canonSyl],
+                                    scoreQ8: effScore,
+                                    penaltyQ8: 0,
+                                    isUserPhrase: false
+                                )
+                            ))
+                            seqIdx += 1
                         }
                     }
-                    if wIdx < 28 || effScore > w.scoreQ8 {
-                        scoredExact.append((
-                            wIdx,
-                            WordSpan(
-                                start: 0,
-                                end: n,
-                                text: w.text,
-                                syllables: [cleanLower],
-                                scoreQ8: effScore,
-                                penaltyQ8: 0,
-                                isUserPhrase: false
-                            )
-                        ))
-                    }
                 }
+            }
+            if !scoredExact.isEmpty {
                 scoredExact.sort { a, b in
                     if a.span.scoreQ8 != b.span.scoreQ8 { return a.span.scoreQ8 > b.span.scoreQ8 }
                     return a.idx < b.idx
@@ -1727,7 +1877,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 && (bestSentence!.penaltyQ8 <= 70
                     || (bestSentence!.penaltyQ8 < 180 && bestSentence!.lastWord.hasSuffix("儿"))))
 
-        if cleanLower.count >= 2 && cleanLower.count <= 8 && !(currentWholeClean && cleanLower.count >= 5) {
+        if settings.pinyinScheme == .quanpin && cleanLower.count >= 2 && cleanLower.count <= 8 && !(currentWholeClean && cleanLower.count >= 5) {
             let allowJpPrefix = cleanLower.count >= 3 && !hasCleanChineseFull && !currentWholeClean
             let jpHits = lexicon.lookupJianpinWithExactFlag(
                 cleanLower,
@@ -1793,7 +1943,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             && (bestSentence?.penaltyQ8 ?? 999) <= 210
             && (bestSentence?.scoreQ8 ?? Int.min) >= (bestSentence?.syllables.count ?? 1) * -1200
             && fullBufferSpans.contains(where: { !$0.hasKeySubstitution && $0.penaltyQ8 <= 210 && $0.scoreQ8 >= $0.syllables.count * -1200 })
-        if !hasCleanChineseFull, !hasStrongPrefixClean, !hasApostrophe, rawString == cleanLower,
+        if settings.pinyinScheme == .quanpin, !hasCleanChineseFull, !hasStrongPrefixClean, !hasApostrophe, rawString == cleanLower,
            candidates.first?.kind != .userPhrase {
             let mixed = lexicon.mixedInitialMatches(cleanLower)
             if let best = mixed.first {
@@ -1955,6 +2105,40 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 } else {
                     appendCandidate(cand)
                 }
+            }
+        }
+
+        // 5E.5. Prefix ASCII Text Replacements & >= 3-char Contacts Jianpin (never clobbers everyday Chinese words)
+        if cleanLower.count >= 2 {
+            var prefixShortcutHits = 0
+            for (shortcut, phrase) in supplementaryShortcuts where shortcut.hasPrefix(cleanLower) && shortcut != cleanLower {
+                appendCandidate(
+                    LokeyCandidate(
+                        text: phrase,
+                        consumedInputCount: n,
+                        matchedSyllables: [],
+                        scoreQ8: -900,
+                        kind: .userPhrase
+                    )
+                )
+                prefixShortcutHits += 1
+                if prefixShortcutHits >= 2 { break }
+            }
+        }
+        if !currentWholeClean && cleanLower.count >= 3 {
+            var contactJianpinHits = 0
+            for item in supplementaryContacts where item.jianpin == cleanLower {
+                appendCandidate(
+                    LokeyCandidate(
+                        text: item.phrase,
+                        consumedInputCount: n,
+                        matchedSyllables: item.syllables,
+                        scoreQ8: -850,
+                        kind: .userPhrase
+                    )
+                )
+                contactJianpinHits += 1
+                if contactJianpinHits >= 2 { break }
             }
         }
 
@@ -2211,13 +2395,20 @@ public final class ViterbiDecoder: @unchecked Sendable {
            topCand.consumedInputCount == n,
            (topCand.kind == .lexiconPhrase || topCand.kind == .userPhrase || (topCand.kind == .sentence && topCand.matchedSyllables.count >= 2)),
            !topCand.matchedSyllables.isEmpty {
-            let leadSyllableStr = topCand.matchedSyllables.joined()
             let isExactCleanReading: Bool = {
-                if leadSyllableStr == cleanLower { return true }
-                if leadSyllableStr.count == cleanLower.count {
-                    return leadSyllableStr.replacingOccurrences(of: "v", with: "u") == cleanLower
+                if settings.pinyinScheme == .quanpin {
+                    let leadSyllableStr = topCand.matchedSyllables.joined()
+                    if leadSyllableStr == cleanLower { return true }
+                    if leadSyllableStr.count == cleanLower.count {
+                        return leadSyllableStr.replacingOccurrences(of: "v", with: "u") == cleanLower
+                    }
+                    return false
+                } else {
+                    let spCodes = topCand.matchedSyllables.compactMap {
+                        PinyinSyllableAutomaton.primaryShuangpinCode(forCanonicalSyllable: $0, scheme: settings.pinyinScheme)
+                    }
+                    return spCodes.count == topCand.matchedSyllables.count && spCodes.joined() == cleanLower
                 }
-                return false
             }()
             let leadPenaltyQ8 = fullSpanByText[topCand.text]?.penaltyQ8 ?? bestSentence?.penaltyQ8 ?? 0
             let leadHasKeySub = fullSpanByText[topCand.text]?.hasKeySubstitution ?? bestSentence?.hasKeySubstitution ?? false
@@ -2266,6 +2457,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             samples: samples,
             rawString: rawString,
             hasApostrophe: hasApostrophe,
+            pinyinScheme: settings.pinyinScheme,
             topCandidateKind: candidates.first?.kind,
             topCandidateCharCount: candidates.first?.text.count ?? 0,
             guideSyllables: guideSyllables
@@ -2458,6 +2650,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         samples: [TouchSample],
         rawString: String,
         hasApostrophe: Bool,
+        pinyinScheme: PinyinScheme = .quanpin,
         topCandidateKind: LokeyCandidate.Kind?,
         topCandidateCharCount: Int = 0,
         guideSyllables: [String]
@@ -2465,6 +2658,26 @@ public final class ViterbiDecoder: @unchecked Sendable {
         if samples.isEmpty { return "" }
         if !hasApostrophe && (topCandidateKind == .english || topCandidateKind == .rawInput) {
             return rawString
+        }
+
+        if pinyinScheme != .quanpin {
+            var out = ""
+            out.reserveCapacity(rawString.count + rawString.count / 2 + 2)
+            var pairLen = 0
+            for ch in rawString {
+                if ch == "'" {
+                    out.append("'")
+                    pairLen = 0
+                } else {
+                    if pairLen == 2 {
+                        out.append("'")
+                        pairLen = 0
+                    }
+                    out.append(ch)
+                    pairLen += 1
+                }
+            }
+            return out
         }
 
         var nonApostropheIndices: [Int] = []
@@ -2825,6 +3038,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         lowerASCII: [UInt8],
         hasApostrophe: Bool,
         posHyps: [[KeyHypothesis]],
+        scheme: PinyinScheme = .quanpin,
         fuzzy: FuzzyPinyinOptions,
         enableErrorCorrection: Bool,
         canReuseLatticePrefix: Bool = false,
@@ -2889,6 +3103,93 @@ public final class ViterbiDecoder: @unchecked Sendable {
             )
             if samples[start].primaryChar == "'" {
                 // Explicit apostrophe separator: zero-cost epsilon bridge handled by skipping leading `'`
+                latticeDepsByStart[start] = deps
+                continue
+            }
+
+            if scheme != .quanpin {
+                let primaryByte = lowerASCII[start]
+                var end1 = start + 1
+                while end1 < n && samples[end1].primaryChar == "'" { end1 += 1 }
+                let localClean = wholeInputClean
+                deps.dependsOnWholeClean = true
+
+                var arcs: [SyllableArc] = []
+                if start + 1 < n && samples[start + 1].primaryChar != "'" && end1 == start + 1 {
+                    var end2 = start + 2
+                    while end2 < n && samples[end2].primaryChar == "'" { end2 += 1 }
+                    deps.maxRawReadEnd = max(deps.maxRawReadEnd, min(n, end2 + 1))
+                    deps.maxEndPos = max(deps.maxEndPos, end2)
+
+                    let h0List = Array(posHyps[start].prefix(localClean ? 2 : 4))
+                    let h1List = Array(posHyps[start + 1].prefix(localClean ? 2 : 4))
+                    let b0Raw = lowerASCII[start]
+                    let b1Raw = lowerASCII[start + 1]
+                    var bestBySID: [UInt16: SyllableArc] = [:]
+
+                    for h0 in h0List {
+                        guard let b0 = h0.char.asciiValue else { continue }
+                        let t0 = (b0 != b0Raw) ? 1 : 0
+                        if !enableErrorCorrection && t0 > 0 { continue }
+                        for h1 in h1List {
+                            guard let b1 = h1.char.asciiValue else { continue }
+                            let t1 = (b1 != b1Raw) ? 1 : 0
+                            if !enableErrorCorrection && t1 > 0 { continue }
+                            let typos = t0 + t1
+                            guard typos <= 1 else { continue }
+                            let keyPen = h0.penaltyQ8 + h1.penaltyQ8
+                            guard keyPen <= (localClean ? 620 : 1080) else { continue }
+                            let matches = PinyinSyllableAutomaton.matchShuangpinPair(
+                                b0: b0,
+                                b1: b1,
+                                scheme: scheme,
+                                in: lexicon,
+                                fuzzy: fuzzy
+                            )
+                            for m in matches {
+                                let pen = m.penaltyQ8 + keyPen + (typos > 0 && localClean ? 180 : 0)
+                                let cand = SyllableArc(
+                                    start: start,
+                                    end: end2,
+                                    syllableID: m.syllableID,
+                                    canonical: m.canonical,
+                                    penaltyQ8: pen,
+                                    isInitialOnly: false,
+                                    hasKeySubstitution: typos > 0,
+                                    keySubstitutionCount: typos
+                                )
+                                if let prev = bestBySID[m.syllableID], prev.penaltyQ8 <= cand.penaltyQ8 {
+                                    continue
+                                }
+                                bestBySID[m.syllableID] = cand
+                            }
+                        }
+                    }
+                    arcs = bestBySID.values.sorted {
+                        if $0.penaltyQ8 != $1.penaltyQ8 { return $0.penaltyQ8 < $1.penaltyQ8 }
+                        return $0.canonical < $1.canonical
+                    }
+                }
+
+                if start + 1 == n || samples[start + 1].primaryChar == "'" {
+                    deps.maxRawReadEnd = max(deps.maxRawReadEnd, min(n, end1 + 1))
+                    deps.maxEndPos = max(deps.maxEndPos, end1)
+                    if !fastCleanSentenceOnly,
+                       let initStr = PinyinSyllableAutomaton.shuangpinInitialString(forKeyByte: primaryByte, scheme: scheme) {
+                        arcs.append(
+                            SyllableArc(
+                                start: start,
+                                end: end1,
+                                syllableID: 0,
+                                canonical: initStr,
+                                penaltyQ8: (end1 == n && start > 0) ? 340 : 420,
+                                isInitialOnly: true
+                            )
+                        )
+                    }
+                }
+
+                arcsByStart[start] = arcs
                 latticeDepsByStart[start] = deps
                 continue
             }
@@ -3940,6 +4241,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         n: Int,
         arcsByStart: [Int: [SyllableArc]],
         userSnapshot: UserLexiconStore.DecodeSnapshot,
+        scheme: PinyinScheme = .quanpin,
         enableErrorCorrection: Bool,
         wholeInputClean: Bool,
         canReuseSpansBase: Bool = false,
@@ -4344,14 +4646,14 @@ public final class ViterbiDecoder: @unchecked Sendable {
             let hasCleanFullSyllableAtStart = firstArcs.contains(where: {
                 !$0.isInitialOnly && $0.syllableID > 0 && !$0.hasKeySubstitution && !$0.isSoftClipped && !$0.isPrefixCompletion && $0.penaltyQ8 <= 70 && ($0.end - start) >= 2
             })
-            if !fastCleanSentenceOnly && !hasCleanFullSyllableAtStart && !isStartPrecedingCoda && !isStartSecondOfDigraph && !isStartMedialGlide {
+            if scheme == .quanpin && !fastCleanSentenceOnly && !hasCleanFullSyllableAtStart && !isStartPrecedingCoda && !isStartSecondOfDigraph && !isStartMedialGlide {
                 deps.dependsOnNMask |= SpanRegimeBit.nGE5
                 if n > 4 {
                     deps.dependsOnWholeClean = true
                 }
             }
             let maxAcroCap = start == 0 ? 4 : 3
-            let maxAcro = (fastCleanSentenceOnly || (n >= 10 && urgentNow) || (wholeInputClean && n > 4) || hasCleanFullSyllableAtStart || isStartPrecedingCoda || isStartSecondOfDigraph || isStartMedialGlide)
+            let maxAcro = (scheme != .quanpin || fastCleanSentenceOnly || (n >= 10 && urgentNow) || (wholeInputClean && n > 4) || hasCleanFullSyllableAtStart || isStartPrecedingCoda || isStartSecondOfDigraph || isStartMedialGlide)
                 ? 0
                 : min(maxAcroCap, n - start)
             if maxAcro >= 2 {
@@ -4413,13 +4715,13 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 && !isStartSecondOfDigraph
                 && startLeadByte >= 0x61 && startLeadByte <= 0x7A
                 && (lexicon.overlayJianpinLeadMask & (1 &<< (startLeadByte - 0x61))) != 0
-            if !fastCleanSentenceOnly && canMatchOverlayJp && !hasCleanFullSyllableAtStart {
+            if scheme == .quanpin && !fastCleanSentenceOnly && canMatchOverlayJp && !hasCleanFullSyllableAtStart {
                 deps.dependsOnNMask |= SpanRegimeBit.nGE5
                 if n > 4 {
                     deps.dependsOnWholeClean = true
                 }
             }
-            if !fastCleanSentenceOnly && canMatchOverlayJp && (!wholeInputClean || n <= 4) && !hasCleanFullSyllableAtStart {
+            if scheme == .quanpin && !fastCleanSentenceOnly && canMatchOverlayJp && (!wholeInputClean || n <= 4) && !hasCleanFullSyllableAtStart {
                 let maxJpLen = min(7, n - start)
                 if maxJpLen >= 2 {
                     if n - start < 7 {
@@ -4512,14 +4814,14 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     }
                     // Cross-syllable & cross-word boundary two-thumb transposition rescue
                     // (`nhiao -> 你好`, `mintgian -> 明天`, `mingtiawnomen -> 明天我们`, `jintiawnomen -> 今天我们`)
-                    if enableErrorCorrection && !stateIsVirtualUser && depth <= 1 && state.penaltyQ8 == 0 && state.initialCount == 0 && !urgentSpanMode && lexicon.hasOutgoingEdges(at: state.trieNode) {
+                    if scheme == .quanpin && enableErrorCorrection && !stateIsVirtualUser && depth <= 1 && state.penaltyQ8 == 0 && state.initialCount == 0 && !urgentSpanMode && lexicon.hasOutgoingEdges(at: state.trieNode) {
                         deps.dependsOnNMask |= SpanRegimeBit.nGE9
                         if n - state.pos < 4 {
                             deps.maxSpanEnd = n
                         }
                     }
                     let localTransposClean: Bool = {
-                        guard n >= 9 && state.pos + 8 < n else { return false }
+                        guard scheme == .quanpin && n >= 9 && state.pos + 8 < n else { return false }
                         let b = state.pos + 8
                         if b > deps.maxRawReadEnd { deps.maxRawReadEnd = b }
                         let cachedFlag = posCleanCache[state.pos]
@@ -4528,7 +4830,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         posCleanCache[state.pos] = clean ? 1 : 0
                         return clean
                     }()
-                    if enableErrorCorrection && !stateIsVirtualUser && depth <= 1 && state.penaltyQ8 == 0 && state.initialCount == 0 && n - state.pos >= 4 && !localTransposClean && !urgentSpanMode && lexicon.hasOutgoingEdges(at: state.trieNode) {
+                    if scheme == .quanpin && enableErrorCorrection && !stateIsVirtualUser && depth <= 1 && state.penaltyQ8 == 0 && state.initialCount == 0 && n - state.pos >= 4 && !localTransposClean && !urgentSpanMode && lexicon.hasOutgoingEdges(at: state.trieNode) {
                         let l1ReadBound = state.pos + 8
                         if l1ReadBound > deps.maxRawReadEnd { deps.maxRawReadEnd = l1ReadBound }
                         var rawWin: [UInt8] = []
@@ -4684,10 +4986,10 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     // Word-initial dropped consonant / semivowel 1-step lookahead (`ianzai -> 现在`, `intian -> 今天`,
                     // `ingtian -> 明天`, `enmeyang -> 怎么样`, `urufa -> 输入法`, `ihuan -> 喜欢`, `idao -> 知道`):
                     // Zero-fanout Trie lookahead verifies `(sid1, sid2)` exists in the lexicon BEFORE adding any state!
-                    if enableErrorCorrection && depth == 0 && state.penaltyQ8 == 0 {
+                    if scheme == .quanpin && enableErrorCorrection && depth == 0 && state.penaltyQ8 == 0 {
                         deps.dependsOnNMask |= SpanRegimeBit.nGE5
                     }
-                    if enableErrorCorrection && depth == 0 && state.penaltyQ8 == 0 && n >= 5 {
+                    if scheme == .quanpin && enableErrorCorrection && depth == 0 && state.penaltyQ8 == 0 && n >= 5 {
                         let firstC = lowerChars[start]
                         let isVowelStart = (firstC == "a" || firstC == "e" || firstC == "i" || firstC == "o" || firstC == "u" || firstC == "v")
                         let canFollowBoundary: Bool = {
@@ -4782,7 +5084,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     guard let arcs = arcsByStart[state.pos] else { continue }
                     // A burst can remove the end of one syllable and the entire next syllable.
                     // Require a two-syllable dictionary prefix, an exact suffix and more input after it.
-                    if enableErrorCorrection, !stateIsVirtualUser, depth == 2, state.initialCount == 0, !state.hasKeySubstitution,
+                    if scheme == .quanpin && enableErrorCorrection, !stateIsVirtualUser, depth == 2, state.initialCount == 0, !state.hasKeySubstitution,
                        (1...420).contains(state.penaltyQ8) {
                         deps.dependsOnWholeClean = true
                         deps.dependsOnNMask |= SpanRegimeBit.nGE12
@@ -5090,7 +5392,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                             // AND generalized Trie-guided dropped-initial consonant/semivowel recovery (`woen -> 我们`, `xianai -> 现在`,
                             // `meiou -> 没有`, `zhiao -> 知道`, `shiou -> 时候`, `xiuan -> 喜欢`, `kei -> 可以`, `suoi -> 所以`,
                             // `weni -> 问题`, `shurua -> 输入法`, `kuaiu -> 快速`, `zenmean -> 怎么办`)!
-                            if enableErrorCorrection && nextNode != virtualUserTrieNode && depth <= (urgentSpanMode ? 1 : 2) && spanPen <= (urgentSpanMode ? 300 : 620) && arc.end < n && arc.canonical.count >= 2 && lexicon.hasOutgoingEdges(at: nextNode) {
+                            if scheme == .quanpin && enableErrorCorrection && nextNode != virtualUserTrieNode && depth <= (urgentSpanMode ? 1 : 2) && spanPen <= (urgentSpanMode ? 300 : 620) && arc.end < n && arc.canonical.count >= 2 && lexicon.hasOutgoingEdges(at: nextNode) {
                                 if arc.end + 2 > deps.maxRawReadEnd { deps.maxRawReadEnd = arc.end + 2 }
                                 let firstVB = lowerASCII[arc.end]
                                 let v0IsVowel = (firstVB == 0x61 || firstVB == 0x65 || firstVB == 0x69 || firstVB == 0x6F || firstVB == 0x75 || firstVB == 0x76)

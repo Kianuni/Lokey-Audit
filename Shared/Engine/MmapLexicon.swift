@@ -99,6 +99,66 @@ public final class MmapLexicon: @unchecked Sendable {
     private var jpPrefix2Bitset = [UInt64](repeating: 0, count: 11)
     private var jpPrefix3Bitset = [UInt64](repeating: 0, count: 275)
     private var hasNonAlphaEnglishKeys: Bool = false
+    private let charReadingLock = NSLock()
+    private var primaryReadingByHanScalar: [Unicode.Scalar: (syllable: String, scoreQ8: Int)]?
+
+    private static let commonSurnamePrimaryReadings: [Character: String] = [
+        "单": "shan", "区": "ou", "仇": "qiu", "解": "xie",
+        "查": "zha", "曾": "zeng", "沈": "shen", "任": "ren",
+        "华": "hua", "纪": "ji", "盖": "ge", "朴": "piao",
+        "冼": "xian", "繁": "po", "乐": "yue", "费": "fei",
+    ]
+
+    /// Maps each Han character in a 2...5-char person name to its highest-frequency Pinyin reading
+    /// (with common Chinese surname polyphone overrides at position 0).
+    public func primarySyllables(forCJKName text: String) -> [String]? {
+        let chars = Array(text)
+        guard chars.count >= 2 && chars.count <= 5 else { return nil }
+        for ch in chars {
+            guard let scalar = ch.unicodeScalars.first, ch.unicodeScalars.count == 1,
+                  (0x4E00...0x9FFF).contains(scalar.value) else {
+                return nil
+            }
+        }
+
+        charReadingLock.lock()
+        let map: [Unicode.Scalar: (syllable: String, scoreQ8: Int)]
+        if let existing = primaryReadingByHanScalar {
+            map = existing
+        } else {
+            var built: [Unicode.Scalar: (syllable: String, scoreQ8: Int)] = [:]
+            built.reserveCapacity(8192)
+            for sid in 1...syllableCount {
+                let syl = idToSyllable[sid]
+                guard !syl.isEmpty, let node = step(from: rootNodeIndex, syllableID: UInt16(sid)) else { continue }
+                for w in words(at: node, limit: 80) where w.text.count == 1 {
+                    guard let scalar = w.text.unicodeScalars.first, w.text.unicodeScalars.count == 1 else { continue }
+                    if let prev = built[scalar], prev.scoreQ8 >= w.scoreQ8 {
+                        continue
+                    }
+                    built[scalar] = (syl, w.scoreQ8)
+                }
+            }
+            primaryReadingByHanScalar = built
+            map = built
+        }
+        charReadingLock.unlock()
+
+        var out: [String] = []
+        out.reserveCapacity(chars.count)
+        for (idx, ch) in chars.enumerated() {
+            if idx == 0 && chars.count <= 4, let surnameReading = Self.commonSurnamePrimaryReadings[ch],
+               syllableToID[surnameReading] != nil {
+                out.append(surnameReading)
+                continue
+            }
+            guard let scalar = ch.unicodeScalars.first, let hit = map[scalar] else {
+                return nil
+            }
+            out.append(hit.syllable)
+        }
+        return out
+    }
 
     @inline(__always)
     private func hasOverlayAt(_ nodeIndex: UInt32) -> Bool {

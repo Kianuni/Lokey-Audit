@@ -1123,6 +1123,28 @@ public enum ChineseScriptMode: Int, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum PinyinScheme: String, Codable, CaseIterable, Sendable, Hashable {
+    case quanpin
+    case xiaohe
+    case ziranma
+
+    public var title: String {
+        switch self {
+        case .quanpin: return "全拼（26 键）"
+        case .xiaohe: return "小鹤双拼"
+        case .ziranma: return "自然码双拼"
+        }
+    }
+
+    public var spaceWatermark: String {
+        switch self {
+        case .quanpin: return "拼"
+        case .xiaohe: return "鹤"
+        case .ziranma: return "自"
+        }
+    }
+}
+
 /// Shared preferences persisted in the `App Group` container (both direct atomic JSON file + `UserDefaults`).
 public struct LokeySettings: Codable, Equatable, Sendable {
     public var hapticStrength: HapticStrength {
@@ -1169,6 +1191,8 @@ public struct LokeySettings: Codable, Equatable, Sendable {
     public var fuzzyOptions: FuzzyPinyinOptions
     public var chineseScriptMode: ChineseScriptMode
     public var enableComposingSpaceTrackpad: Bool
+    public var pinyinScheme: PinyinScheme
+    public var enableTopRowNumberSwipe: Bool
 
     public init(
         hapticStrength: HapticStrength? = nil,
@@ -1181,7 +1205,9 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         enableDiagnosticLogging: Bool = true,
         fuzzyOptions: FuzzyPinyinOptions = [],
         chineseScriptMode: ChineseScriptMode = .simplified,
-        enableComposingSpaceTrackpad: Bool = false
+        enableComposingSpaceTrackpad: Bool = false,
+        pinyinScheme: PinyinScheme = .quanpin,
+        enableTopRowNumberSwipe: Bool = false
     ) {
         let clamped = min(1.0, max(0.0, hapticFeedbackIntensity))
         self.hapticFeedbackIntensity = clamped
@@ -1210,6 +1236,8 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.fuzzyOptions = fuzzyOptions
         self.chineseScriptMode = chineseScriptMode
         self.enableComposingSpaceTrackpad = enableComposingSpaceTrackpad
+        self.pinyinScheme = pinyinScheme
+        self.enableTopRowNumberSwipe = enableTopRowNumberSwipe
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1224,6 +1252,8 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         case fuzzyOptions
         case chineseScriptMode
         case enableComposingSpaceTrackpad
+        case pinyinScheme
+        case enableTopRowNumberSwipe
     }
 
     public init(from decoder: Decoder) throws {
@@ -1268,6 +1298,8 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.fuzzyOptions = try container.decodeIfPresent(FuzzyPinyinOptions.self, forKey: .fuzzyOptions) ?? []
         self.chineseScriptMode = try container.decodeIfPresent(ChineseScriptMode.self, forKey: .chineseScriptMode) ?? .simplified
         self.enableComposingSpaceTrackpad = try container.decodeIfPresent(Bool.self, forKey: .enableComposingSpaceTrackpad) ?? false
+        self.pinyinScheme = try container.decodeIfPresent(PinyinScheme.self, forKey: .pinyinScheme) ?? .quanpin
+        self.enableTopRowNumberSwipe = try container.decodeIfPresent(Bool.self, forKey: .enableTopRowNumberSwipe) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1283,6 +1315,8 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         try container.encode(fuzzyOptions, forKey: .fuzzyOptions)
         try container.encode(chineseScriptMode, forKey: .chineseScriptMode)
         try container.encode(enableComposingSpaceTrackpad, forKey: .enableComposingSpaceTrackpad)
+        try container.encode(pinyinScheme, forKey: .pinyinScheme)
+        try container.encode(enableTopRowNumberSwipe, forKey: .enableTopRowNumberSwipe)
     }
 
     private static let storageKey = "com.kianuni.lokey.settings.v1"

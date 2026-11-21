@@ -715,6 +715,10 @@ public final class LokeySessionController {
         return currentDecode
     }
 
+    public func setSupplementaryEntries(_ entries: [(shortcut: String, phrase: String)]) {
+        decoder.setSupplementaryEntries(entries)
+    }
+
     public func setComposingCursor(utf16OffsetInPreedit: Int) {
         guard !samples.isEmpty else {
             composingCaretIndex = 0
@@ -853,7 +857,17 @@ public final class LokeySessionController {
         }
         let waitStart = DispatchTime.now().uptimeNanoseconds
         let rawLower = String(samples.map { Character($0.primaryChar.lowercased()) })
-        let isClean = !rawLower.contains("'") && decoder.lexicon.canSegmentCleanly(rawLower)
+        let isClean: Bool
+        if settings.pinyinScheme == .quanpin {
+            isClean = !rawLower.contains("'") && decoder.lexicon.canSegmentCleanly(rawLower)
+        } else {
+            isClean = !rawLower.contains("'")
+                && PinyinSyllableAutomaton.canSegmentShuangpinCleanly(
+                    Array(rawLower.utf8)[...],
+                    scheme: settings.pinyinScheme,
+                    in: decoder.lexicon
+                )
+        }
         let isExactEnglish = !rawLower.contains("'")
             && samples.count >= 2
             && decoder.lexicon.lookupExactEnglish(rawLower) != nil
@@ -873,6 +887,7 @@ public final class LokeySessionController {
             } else {
                 let provTop = (job.provisionalResult ?? deferredPrimary)?.candidates.first
                 let nonLiteralCleanWorker = isClean && samples.count >= 10
+                    && settings.pinyinScheme == .quanpin
                     && samples.allSatisfy { $0.normalizedPoint == nil }
                     && provTop.map { $0.consumedInputCount == samples.count && $0.matchedSyllables.joined() != rawLower } ?? false
                 if !nonLiteralCleanWorker {
@@ -924,6 +939,7 @@ public final class LokeySessionController {
         #else
         let fallbackRaw = job.provisionalResult ?? deferredPrimary
         let nonLiteralCleanFallback = isClean && samples.count >= 10
+            && settings.pinyinScheme == .quanpin
             && samples.allSatisfy { $0.normalizedPoint == nil }
             && (fallbackRaw?.candidates.first.map {
                 $0.consumedInputCount == samples.count && $0.matchedSyllables.joined() != rawLower
@@ -981,6 +997,7 @@ public final class LokeySessionController {
         let minSoftBudgetNs: UInt64 = isShortUnsegmentedNoisy ? 200_000 : 80_000
         #endif
         if refinesNoisyInput && !isSecureContext
+            && settings.pinyinScheme == .quanpin
             && samples.count >= NoisyChannelRefiner.minimumInputLength
             && samples.count <= 20
             && !result.candidates.isEmpty
@@ -1031,8 +1048,8 @@ public final class LokeySessionController {
             let model = decoder.spatialModel
             let anchors = model.anchors, calibration = model.calibration, landscape = model.isLandscapeLayout
             let spatialGeneration = model.modelGeneration
-            let shortcuts = decoder.supplementaryShortcuts, supplementaryGeneration = decoder.supplementaryGeneration
-            let refinesNoisyInput = self.refinesNoisyInput && !isSecureContext
+            let rawSupplementary = decoder.rawSupplementaryEntries, supplementaryGeneration = decoder.supplementaryGeneration
+            let refinesNoisyInput = self.refinesNoisyInput && !isSecureContext && settings.pinyinScheme == .quanpin
             let resolvedTouchSeq = touchSeq ?? (LokeyDiagnosticLogger.shared.isEnabled ? LokeyDiagnosticLogger.shared.currentActiveTouchSeq : 0)
             let jobGen = worker.advanceGeneration()
             let job = CandidateDecodeOperation(touchSequence: resolvedTouchSeq) { isCancelled, isPastDeadline, isUrgentCommit, provisional in
@@ -1046,7 +1063,7 @@ public final class LokeySessionController {
                     worker.spatialGeneration = spatialGeneration
                 }
                 if worker.supplementaryGeneration != supplementaryGeneration {
-                    worker.decoder.setSupplementaryEntries(shortcuts)
+                    worker.decoder.setSupplementaryEntries(rawSupplementary)
                     worker.supplementaryGeneration = supplementaryGeneration
                 }
                 let base = worker.decoder.decode(
@@ -1457,9 +1474,22 @@ public final class LokeySessionController {
               !consumedSamples.isEmpty else {
             return
         }
+        let calibrationSyllables: [String]
+        if settings.pinyinScheme == .quanpin {
+            calibrationSyllables = matchedSyllables
+        } else {
+            let mapped = matchedSyllables.compactMap {
+                PinyinSyllableAutomaton.primaryShuangpinCode(forCanonicalSyllable: $0, scheme: settings.pinyinScheme)
+            }
+            guard mapped.count == matchedSyllables.count,
+                  mapped.reduce(0, { $0 + $1.count }) == consumedSamples.count else {
+                return
+            }
+            calibrationSyllables = mapped
+        }
         let learned = decoder.spatialModel.recordConfirmedAlignment(
             samples: consumedSamples,
-            intendedSyllables: matchedSyllables
+            intendedSyllables: calibrationSyllables
         )
         if learned > 0 && persistTouchCalibration {
             decoder.spatialModel.flushCalibrationToDiskIfNeeded(force: false)
