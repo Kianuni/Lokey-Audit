@@ -1255,8 +1255,8 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         enableSpatialCorrection: Bool = true,
         enableAdaptiveTouchCalibration: Bool = true,
         enableEmojiCandidates: Bool = true,
-        enableDiagnosticLogging: Bool = true,
-        enableSelectionFeedbackLogging: Bool = true,
+        enableDiagnosticLogging: Bool = false,
+        enableSelectionFeedbackLogging: Bool = false,
         fuzzyOptions: FuzzyPinyinOptions = [],
         chineseScriptMode: ChineseScriptMode = .simplified,
         enableComposingSpaceTrackpad: Bool = false,
@@ -1305,6 +1305,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         case enableEmojiCandidates
         case enableDiagnosticLogging
         case enableSelectionFeedbackLogging
+        case labLoggingOptInV2
         case fuzzyOptions
         case chineseScriptMode
         case enableComposingSpaceTrackpad
@@ -1350,8 +1351,16 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.enableSpatialCorrection = try container.decodeIfPresent(Bool.self, forKey: .enableSpatialCorrection) ?? true
         self.enableAdaptiveTouchCalibration = try container.decodeIfPresent(Bool.self, forKey: .enableAdaptiveTouchCalibration) ?? true
         self.enableEmojiCandidates = try container.decodeIfPresent(Bool.self, forKey: .enableEmojiCandidates) ?? true
-        self.enableDiagnosticLogging = try container.decodeIfPresent(Bool.self, forKey: .enableDiagnosticLogging) ?? true
-        self.enableSelectionFeedbackLogging = try container.decodeIfPresent(Bool.self, forKey: .enableSelectionFeedbackLogging) ?? true
+        // Build 81+: Both lab logging toggles default to OFF (developer-only opt-in).
+        // Legacy pre-Build-81 configs without `labLoggingOptInV2` migrate cleanly to OFF.
+        let hasOptInSchema = (try container.decodeIfPresent(Bool.self, forKey: .labLoggingOptInV2)) ?? false
+        if hasOptInSchema {
+            self.enableDiagnosticLogging = try container.decodeIfPresent(Bool.self, forKey: .enableDiagnosticLogging) ?? false
+            self.enableSelectionFeedbackLogging = try container.decodeIfPresent(Bool.self, forKey: .enableSelectionFeedbackLogging) ?? false
+        } else {
+            self.enableDiagnosticLogging = false
+            self.enableSelectionFeedbackLogging = false
+        }
         self.fuzzyOptions = try container.decodeIfPresent(FuzzyPinyinOptions.self, forKey: .fuzzyOptions) ?? []
         self.chineseScriptMode = try container.decodeIfPresent(ChineseScriptMode.self, forKey: .chineseScriptMode) ?? .simplified
         self.enableComposingSpaceTrackpad = try container.decodeIfPresent(Bool.self, forKey: .enableComposingSpaceTrackpad) ?? false
@@ -1368,6 +1377,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         try container.encode(enableSpatialCorrection, forKey: .enableSpatialCorrection)
         try container.encode(enableAdaptiveTouchCalibration, forKey: .enableAdaptiveTouchCalibration)
         try container.encode(enableEmojiCandidates, forKey: .enableEmojiCandidates)
+        try container.encode(true, forKey: .labLoggingOptInV2)
         try container.encode(enableDiagnosticLogging, forKey: .enableDiagnosticLogging)
         try container.encode(enableSelectionFeedbackLogging, forKey: .enableSelectionFeedbackLogging)
         try container.encode(fuzzyOptions, forKey: .fuzzyOptions)

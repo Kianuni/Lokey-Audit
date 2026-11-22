@@ -688,7 +688,7 @@ private final class FastFlagStorage: @unchecked Sendable {
 /// Bounded local diagnostic trace recorder
 /// with automatic secure-field (`isSecureTextEntry`) redaction and coalesced background App Group persistence.
 public final class LokeyDiagnosticLogger: @unchecked Sendable {
-    public static let shared = LokeyDiagnosticLogger()
+    public static let shared = LokeyDiagnosticLogger(initialEnabled: false)
     public static let maxEntries = 2048
     private static let defaultsStorageKey = "com.kianuni.lokey.diagnostics.v2"
     private static let fileName = "lokey_touch_diagnostics.json"
@@ -2127,7 +2127,7 @@ private struct SelectionFeedbackRing {
 /// Persistent, zero-network, main-thread non-blocking collector of candidate selection mismatches
 /// (up to `5,000` entries) with automatic secure-field redaction and one-tap TSV export.
 public final class LokeySelectionFeedbackLogger: @unchecked Sendable {
-    public static let shared = LokeySelectionFeedbackLogger()
+    public static let shared = LokeySelectionFeedbackLogger(initialEnabled: false)
     public static let maxEntries = 5000
     private static let defaultsStorageKey = "com.kianuni.lokey.selection_feedback.v1"
     private static let fileName = "lokey_selection_feedback.json"

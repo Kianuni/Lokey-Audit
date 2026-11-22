@@ -671,11 +671,15 @@ public final class KeyboardViewController: UIInputViewController {
     private var lastObservedScreenObjectID: ObjectIdentifier?
     private var lastObservedScreenSize: CGSize = .zero
     private var isWindowMoveFollowUpScheduled: Bool = false
+    private var hasFoldedFromUnfoldedToDuoCover: Bool = false
+    private var duoCoverGlobeFallbackTimer: Timer?
+    private var didAdvanceInputModeForCurrentGlobeTouch: Bool = false
     private lazy var caretFeedback = UISelectionFeedbackGenerator()
 
     private static let systemLayoutStateLock = NSLock()
     private static var _didActivateSystemKeyboardLayoutInProcess: Bool = false
     private static var _lastControllerAppearOrLoadUptime: TimeInterval = -10
+    private static var _hasObservedUnfoldedDuoInProcess: Bool = false
     internal static var didActivateSystemKeyboardLayoutInProcess: Bool {
         get {
             systemLayoutStateLock.lock()
@@ -700,12 +704,26 @@ public final class KeyboardViewController: UIInputViewController {
             systemLayoutStateLock.unlock()
         }
     }
+    internal static var hasObservedUnfoldedDuoInProcess: Bool {
+        get {
+            systemLayoutStateLock.lock()
+            defer { systemLayoutStateLock.unlock() }
+            return _hasObservedUnfoldedDuoInProcess
+        }
+        set {
+            systemLayoutStateLock.lock()
+            _hasObservedUnfoldedDuoInProcess = newValue
+            systemLayoutStateLock.unlock()
+        }
+    }
 
     internal var overrideHostTopPaddingForTesting: CGFloat?
     internal var overrideScreenSizeForTesting: CGSize?
     internal var overrideShowStarterCandidatesForTesting: Bool = false
     internal var customTextDocumentProxyForTesting: UITextDocumentProxy?
     internal var onHostInputViewLayoutInvalidatedForTesting: (() -> Void)?
+    internal var onAdvanceToNextInputModeForTesting: (() -> Void)?
+    internal var onSuperHandleInputModeListForTesting: ((UIView, UIEvent) -> Void)?
     internal var activeDecoderLexiconForTesting: MmapLexicon? { session?.decoder.lexicon }
     internal var isBaseLexiconReloadPendingForTesting: Bool { pendingBaseLexiconReload }
     internal static func resetSharedLexiconCacheForTesting() {
@@ -763,6 +781,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     deinit {
+        cancelDuoCoverGlobeFallbackTimer()
         keyGrid.globeSwitchButton.removeTarget(self, action: nil, for: .allEvents)
         candidateRefreshWorkItem?.cancel()
         contextReconcileWorkItem?.cancel()
@@ -887,6 +906,9 @@ public final class KeyboardViewController: UIInputViewController {
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         isDisappearing = false
+        cancelDuoCoverGlobeFallbackTimer()
+        didAdvanceInputModeForCurrentGlobeTouch = false
+        observeDuoScreenProfileIfNeeded()
         appearGeneration &+= 1
         if isRunningInExtensionProcess {
             Self.lastControllerAppearOrLoadUptime = ProcessInfo.processInfo.systemUptime
@@ -943,6 +965,7 @@ public final class KeyboardViewController: UIInputViewController {
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         isDisappearing = false
+        observeDuoScreenProfileIfNeeded()
         reconcileDisplayTransitionIfNeeded()
         if hasAppearedInHost || view.window != nil {
             syncNeedsGlobeKeyIfConnected()
@@ -1006,6 +1029,8 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func viewWillDisappear(_ animated: Bool) {
         isDisappearing = true
+        cancelDuoCoverGlobeFallbackTimer()
+        didAdvanceInputModeForCurrentGlobeTouch = false
         deliverPendingDocumentEdits()
         super.viewWillDisappear(animated)
         if isCandidateGridExpanded {
@@ -1067,6 +1092,38 @@ public final class KeyboardViewController: UIInputViewController {
         LokeyHapticEngine.shared.suspend()
     }
 
+    private func cancelDuoCoverGlobeFallbackTimer() {
+        duoCoverGlobeFallbackTimer?.invalidate()
+        duoCoverGlobeFallbackTimer = nil
+    }
+
+    private func observeDuoScreenProfileIfNeeded() {
+        let scr = effectiveScreenSize()
+        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let profile = KeyboardTheme.layoutProfile(forWidth: refWidth, screenSize: scr)
+        if profile == .duoUnfoldedPortrait || profile == .duoUnfoldedLandscape || min(scr.width, scr.height) > 550.0 {
+            Self.hasObservedUnfoldedDuoInProcess = true
+            hasFoldedFromUnfoldedToDuoCover = false
+        }
+    }
+
+    /// Returns `true` when running on `iPhone Duo` Outer Cover **after** the extension has observed an
+    /// unfolded inner display (`LCD-1 -> LCD`). On `iPhone OS 27.2.1 (24B91034)`, calling
+    /// `UIInputViewController.handleInputModeList(from:with:)` on long-press triggers an Apple `UIKitCore`
+    /// use-after-free in `-[UIKeyboardMenuView supplementalVisibleFramesInView:]` (`objc_retain` on a freed
+    /// `UIInputSwitcherView.referenceKey`), crashing the host app. Bypassing the HUD menu with public
+    /// `advanceToNextInputMode()` completely prevents the host crash while preserving full long-press menus
+    /// on regular iPhones, Unfolded `iPhone Duo`, and fresh Cover sessions.
+    internal func shouldBypassInputModeListHUDForDuoFold() -> Bool {
+        let scr = effectiveScreenSize()
+        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let profile = KeyboardTheme.layoutProfile(forWidth: refWidth, screenSize: scr)
+        guard profile == .duoCover else {
+            return false
+        }
+        return hasFoldedFromUnfoldedToDuoCover || Self.hasObservedUnfoldedDuoInProcess
+    }
+
     private func reconcileDisplayTransitionIfNeeded() {
         let currentScreenID: ObjectIdentifier? = view.window?.windowScene.map { ObjectIdentifier($0.screen) }
         let currentScreenSize = effectiveScreenSize()
@@ -1086,6 +1143,14 @@ public final class KeyboardViewController: UIInputViewController {
             && wasFoldableUnfolded != isFoldableUnfolded)
             || screenIDChanged
 
+        if isFoldableUnfolded {
+            Self.hasObservedUnfoldedDuoInProcess = true
+            hasFoldedFromUnfoldedToDuoCover = false
+        } else if lastObservedScreenSize.width > 0.0 && wasFoldableUnfolded && !isFoldableUnfolded {
+            Self.hasObservedUnfoldedDuoInProcess = true
+            hasFoldedFromUnfoldedToDuoCover = true
+        }
+
         if let currentScreenID {
             lastObservedScreenObjectID = currentScreenID
         }
@@ -1095,6 +1160,8 @@ public final class KeyboardViewController: UIInputViewController {
 
         guard screenIDChanged || screenSizeChanged else { return }
 
+        cancelDuoCoverGlobeFallbackTimer()
+        didAdvanceInputModeForCurrentGlobeTouch = false
         diagnosticTouchSniffer.resetTrackedTouches()
         candidateBar.resetTouchTracking()
         keyGrid.resetTransientInteractions()
@@ -1153,6 +1220,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     public override func viewWillLayoutSubviews() {
+        observeDuoScreenProfileIfNeeded()
         reconcileDisplayTransitionIfNeeded()
         super.viewWillLayoutSubviews()
         if view.bounds.height <= 420.0 {
@@ -2653,9 +2721,53 @@ public final class KeyboardViewController: UIInputViewController {
         candidateRefreshPending = false
         contextReconcileWorkItem?.cancel()
         contextReconcileWorkItem = nil
+
+        if shouldBypassInputModeListHUDForDuoFold() {
+            let relevantTouches = event.touches(for: view) ?? event.allTouches
+            if let touches = relevantTouches, !touches.isEmpty {
+                if touches.contains(where: { $0.phase == .began }) {
+                    cancelDuoCoverGlobeFallbackTimer()
+                    didAdvanceInputModeForCurrentGlobeTouch = false
+                    duoCoverGlobeFallbackTimer = Timer.scheduledTimer(withTimeInterval: 0.32, repeats: false) { [weak self] _ in
+                        guard let self else { return }
+                        self.duoCoverGlobeFallbackTimer = nil
+                        guard !self.didAdvanceInputModeForCurrentGlobeTouch else { return }
+                        self.didAdvanceInputModeForCurrentGlobeTouch = true
+                        self.advanceToNextInputMode()
+                    }
+                } else if touches.contains(where: { $0.phase == .cancelled }) {
+                    cancelDuoCoverGlobeFallbackTimer()
+                    didAdvanceInputModeForCurrentGlobeTouch = false
+                } else if let endedTouch = touches.first(where: { $0.phase == .ended }) {
+                    cancelDuoCoverGlobeFallbackTimer()
+                    if !didAdvanceInputModeForCurrentGlobeTouch {
+                        let isWithinTolerance = (endedTouch.view == nil)
+                            || view.bounds.insetBy(dx: -24.0, dy: -24.0).contains(endedTouch.location(in: view))
+                        if isWithinTolerance {
+                            didAdvanceInputModeForCurrentGlobeTouch = true
+                            advanceToNextInputMode()
+                        }
+                    }
+                } else if let movedTouch = touches.first(where: { $0.phase == .moved }) {
+                    if movedTouch.view === view
+                        && !view.bounds.insetBy(dx: -32.0, dy: -32.0).contains(movedTouch.location(in: view)) {
+                        cancelDuoCoverGlobeFallbackTimer()
+                    }
+                }
+            } else {
+                cancelDuoCoverGlobeFallbackTimer()
+                advanceToNextInputMode()
+            }
+            return
+        }
+
         if isRunningInExtensionProcess {
             pendingGlobeSwitchDeparture = true
             lastGlobeInteractionUptime = ProcessInfo.processInfo.systemUptime
+        }
+        if let hook = onSuperHandleInputModeListForTesting {
+            hook(view, event)
+            return
         }
         super.handleInputModeList(from: view, with: event)
     }
@@ -2667,6 +2779,10 @@ public final class KeyboardViewController: UIInputViewController {
         if isRunningInExtensionProcess {
             pendingGlobeSwitchDeparture = true
             lastGlobeInteractionUptime = ProcessInfo.processInfo.systemUptime
+        }
+        if let hook = onAdvanceToNextInputModeForTesting {
+            hook()
+            return
         }
         super.advanceToNextInputMode()
     }
