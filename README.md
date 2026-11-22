@@ -2,7 +2,7 @@
 
 **Lokey Security Audit Repository · 纯离线零联网安全审计仓库**
 
-[中文说明](#中文说明) | [English](#english) | [隐私政策 / Privacy Policy](./PRIVACY.md)
+[中文说明](#中文说明) | [外部词库包指南](#external-lexicon-packs) | [English](#english) | [隐私政策 / Privacy Policy](./PRIVACY.md)
 
 ---
 
@@ -66,6 +66,28 @@ codesign -d --entitlements - --xml "$EXT_DIR"
 ### 许可声明
 - 本仓库代码采用 **Source-Available Security Audit License**（见根目录 `LICENSE`）：允许出于安全审计与本地测试目的进行源码查阅、编译与测试，**禁止分发 `.ipa`/二进制安装包或用于商业/App Store 重新上架**。
 - 示范词库使用的开放许可上游数据声明见 `LICENSES/`（`rime-pinyin-simp` Apache-2.0、`OpenCC` Apache-2.0、`Unicode Unihan & CLDR` Unicode-3.0）。
+
+---
+
+<a id="external-lexicon-packs"></a>
+
+## 外部词库包（`.lokeypack`）格式说明与获取指引 / External `.lokeypack` Lexicon Guide
+
+Lokey 内置 100% 开放许可的基础词库（开箱即用，无需联网），同时也支持用户通过本地文件导入被动的只读静态 `.lokeypack` 扩展基础词库包（`LKLF-v2` + `LNLM-v2` + `EOF-16`）。Lokey 本体永远不会联网下载任何词库；用户手动导入本地文件后，App 在本机完成魔数、段边界与 SHA-256 校验，再通过只读零拷贝 `mmap` 热挂载至键盘扩展。
+
+### 1. 社区开源扩展词库参考（独立仓库）
+- **`Kianuni/lokey-frost-pack`**（独立 `GPL-3.0` 开源词库与离线编译仓库）：
+  - 仓库主页：<https://github.com/Kianuni/lokey-frost-pack>
+  - 最新预编译 Release 下载：<https://github.com/Kianuni/lokey-frost-pack/releases/latest>（下载其中的 `rime-frost.lokeypack`；约 `38.23 MB`，含 `553,351` 中文词条、与 `v0.9.4` 对齐的端侧 `LNLM-v2` 神经权重及可独立校验的 `.sha256` 文件）
+
+### 2. iOS 设备导入步骤
+1. **下载保存至「文件」App**：用系统浏览器打开上方 Releases 页面下载 `*.lokeypack` 文件至 iPhone「文件」App（或从 Mac 隔空投送 AirDrop 到 iPhone）。
+2. **两种任选方式导入 Lokey**：
+   - **方式 A（在 Lokey 内导入）**：打开 **Lokey → 词库数据 → 导入外部 `.lokeypack` 词库包**（或进入「管理基础词库与已安装包」），在文件选择器中选中下载好的 `.lokeypack` 文件。
+   - **方式 B（用 Lokey 打开）**：在系统「文件」App 中长按或点击该 `.lokeypack` 文件 → 点击左下角**分享** → 选择 **「用 Lokey 打开」**。
+3. **本机校验与热挂载**：在预览页核对词条数、来源与 SHA-256 摘要后确认安装，即可零延迟切换生效；在「基础词库管理」中可随时**一键切回内置词库**或左滑删除外部包。
+
+> **English Summary**: Lokey ships with a permissive GPL-free built-in lexicon and never downloads dictionaries over the network. Users who wish to mount a standalone community `.lokeypack` pack (such as the independent GPL-3.0 [`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack/releases/latest)) can download the `.lokeypack` file to the iOS **Files** app (or AirDrop it), then import it via **Lokey → Lexicon Data → Import External `.lokeypack`** or **Share → Open in Lokey**. Lokey validates format bounds and SHA-256 locally before read-only `mmap` mounting and supports one-tap rollback to the built-in lexicon at any time.
 
 ---
 
