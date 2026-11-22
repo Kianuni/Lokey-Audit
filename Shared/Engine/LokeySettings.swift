@@ -1542,6 +1542,8 @@ public final class LokeyHapticEngine {
     #if canImport(CoreHaptics)
     private var engine: CHHapticEngine?
     private var isEngineRunning = false
+    private var engineGeneration: UInt64 = 0
+    private var isSuspended = false
     private var cachedPlayers: [Int: CHHapticPatternPlayer] = [:]
     private let supportsCoreHaptics: Bool
     #endif
@@ -1570,6 +1572,7 @@ public final class LokeyHapticEngine {
         if supportsCoreHaptics && ProcessInfo.processInfo.systemUptime >= coreHapticsCooldownUntilUptime {
             hapticQueue.async { [weak self] in
                 guard let self else { return }
+                self.isSuspended = false
                 self.ensureCoreHapticsRunningOnQueue()
                 if !self.isEngineRunning {
                     DispatchQueue.main.async { [weak self] in
@@ -1588,10 +1591,14 @@ public final class LokeyHapticEngine {
         if supportsCoreHaptics {
             coreHapticsCooldownUntilUptime = 0
             hapticQueue.async { [weak self] in
-                guard let self, self.isEngineRunning else { return }
+                guard let self else { return }
+                self.isSuspended = true
+                self.engineGeneration &+= 1
                 self.cachedPlayers.removeAll(keepingCapacity: true)
-                self.engine?.stop(completionHandler: nil)
+                let oldEngine = self.engine
+                self.engine = nil
                 self.isEngineRunning = false
+                self.retireEngineOnQueue(oldEngine)
             }
         }
         #endif
@@ -1604,17 +1611,19 @@ public final class LokeyHapticEngine {
         coreHapticsCooldownUntilUptime = 0
         hapticQueue.async { [weak self] in
             guard let self else { return }
+            self.engineGeneration &+= 1
             self.cachedPlayers.removeAll(keepingCapacity: true)
-            self.engine?.stop(completionHandler: nil)
+            let oldEngine = self.engine
             self.engine = nil
             self.isEngineRunning = false
+            self.retireEngineOnQueue(oldEngine)
         }
         #endif
     }
 
     /// Plays a key-tap haptic strictly proportional to `intensity` in `0.0 ... 1.0`.
     /// Dispatches CoreHaptics IPC off the main UI thread so `touchesBegan` returns in `< 0.01 ms`.
-    public func playTap(intensity rawIntensity: Double) {
+    public func playTap(intensity rawIntensity: Double, avoidCoreHapticsColdStart: Bool = false) {
         let t = min(1.0, max(0.0, rawIntensity))
         guard t > 0.004 else { return }
 
@@ -1622,7 +1631,22 @@ public final class LokeyHapticEngine {
         if supportsCoreHaptics && ProcessInfo.processInfo.systemUptime >= coreHapticsCooldownUntilUptime {
             hapticQueue.async { [weak self] in
                 guard let self else { return }
-                if !self.playCoreHapticTapOnQueue(normalizedIntensity: t) {
+                if avoidCoreHapticsColdStart {
+                    guard !self.isSuspended, self.isEngineRunning, self.engine != nil else {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.playFallbackImpact(normalizedIntensity: t)
+                        }
+                        return
+                    }
+                    if !self.playCoreHapticTapOnQueue(normalizedIntensity: t, allowColdStart: false) {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.playFallbackImpact(normalizedIntensity: t)
+                        }
+                    }
+                    return
+                }
+                self.isSuspended = false
+                if !self.playCoreHapticTapOnQueue(normalizedIntensity: t, allowColdStart: true) {
                     DispatchQueue.main.async { [weak self] in
                         self?.playFallbackImpact(normalizedIntensity: t)
                     }
@@ -1655,7 +1679,18 @@ public final class LokeyHapticEngine {
     }
 
     #if canImport(CoreHaptics)
+    private func retireEngineOnQueue(_ oldEngine: CHHapticEngine?) {
+        guard let oldEngine else { return }
+        oldEngine.stoppedHandler = { _ in }
+        oldEngine.resetHandler = {}
+        oldEngine.stop { _ in
+            // Strongly retain the retiring engine until CoreHaptics completes its async XPC stop.
+            _ = oldEngine
+        }
+    }
+
     private func ensureCoreHapticsRunningOnQueue() {
+        guard !isSuspended else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if now < coreHapticsCooldownUntilUptime {
             return
@@ -1666,27 +1701,35 @@ public final class LokeyHapticEngine {
                 eng.playsHapticsOnly = true
                 // Keep engine warm while keyboard is visible to eliminate 20-45ms cold-start XPC stalls!
                 eng.isAutoShutdownEnabled = false
-                eng.stoppedHandler = { [weak self] _ in
+                engineGeneration &+= 1
+                let expectedGen = engineGeneration
+                eng.stoppedHandler = { [weak self, weak eng] _ in
                     self?.hapticQueue.async {
-                        guard let self else { return }
+                        guard let self,
+                              let eng,
+                              self.engine === eng,
+                              self.engineGeneration == expectedGen else { return }
                         self.isEngineRunning = false
                         self.cachedPlayers.removeAll(keepingCapacity: true)
                         self.engine = nil
                     }
                 }
-                eng.resetHandler = { [weak self] in
+                eng.resetHandler = { [weak self, weak eng] in
                     self?.hapticQueue.async {
-                        guard let self else { return }
+                        guard let self,
+                              let eng,
+                              self.engine === eng,
+                              self.engineGeneration == expectedGen,
+                              !self.isSuspended else { return }
                         self.isEngineRunning = false
                         self.cachedPlayers.removeAll(keepingCapacity: true)
                         do {
-                            if let eng = self.engine {
-                                try eng.start()
-                                self.isEngineRunning = true
-                            }
+                            try eng.start()
+                            self.isEngineRunning = true
                         } catch {
                             self.isEngineRunning = false
                             self.engine = nil
+                            self.retireEngineOnQueue(eng)
                         }
                     }
                 }
@@ -1704,14 +1747,19 @@ public final class LokeyHapticEngine {
                 isEngineRunning = true
             } catch {
                 isEngineRunning = false
+                self.engine = nil
+                retireEngineOnQueue(eng)
                 coreHapticsCooldownUntilUptime = now + 12.0
             }
         }
     }
 
-    private func playCoreHapticTapOnQueue(normalizedIntensity t: Double) -> Bool {
-        ensureCoreHapticsRunningOnQueue()
-        guard isEngineRunning, let eng = engine else { return false }
+    private func playCoreHapticTapOnQueue(normalizedIntensity t: Double, allowColdStart: Bool = true) -> Bool {
+        guard !isSuspended else { return false }
+        if allowColdStart {
+            ensureCoreHapticsRunningOnQueue()
+        }
+        guard !isSuspended, isEngineRunning, let eng = engine else { return false }
 
         let bucket = max(1, min(50, Int((t * 50.0).rounded())))
         if let existingPlayer = cachedPlayers[bucket] {
@@ -1766,8 +1814,11 @@ public final class LokeyHapticEngine {
             try player.start(atTime: CHHapticTimeImmediate)
             return true
         } catch {
+            let oldEngine = engine
+            engine = nil
             isEngineRunning = false
             cachedPlayers.removeAll(keepingCapacity: true)
+            retireEngineOnQueue(oldEngine)
             coreHapticsCooldownUntilUptime = ProcessInfo.processInfo.systemUptime + 12.0
             return false
         }

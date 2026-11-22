@@ -4,13 +4,13 @@ import UIKit
 /// Dedicated transparent control overlay aligned over the `.globe` keycap so UIKit receives genuine
 /// `.allTouchEvents` (`UITouch.view === button`) for both short-tap switching and long-press input-mode picker popups.
 internal final class GlobeSwitchOverlayButton: UIButton {
-    private static let expandedHitInsets = UIEdgeInsets(top: -4.0, left: -3.0, bottom: -10.0, right: -3.0)
+    private static let expandedHitInsets = UIEdgeInsets(top: -6.0, left: -4.0, bottom: -12.0, right: -4.0)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = KeyboardTheme.hitTestableClearBacking
         isExclusiveTouch = false
-        isMultipleTouchEnabled = true
+        isMultipleTouchEnabled = false
         accessibilityLabel = "切换输入法"
     }
 
@@ -486,7 +486,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         LokeyHapticEngine.shared.prepare(forIntensity: hapticFeedbackIntensity)
     }
 
-    func triggerHaptic(intensityOverride: Double? = nil) {
+    func triggerHaptic(intensityOverride: Double? = nil, avoidCoreHapticsColdStart: Bool = false) {
         let intensity = intensityOverride ?? hapticFeedbackIntensity
         guard intensity > 0.0 else { return }
         if intensityOverride == nil {
@@ -496,7 +496,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             }
             lastHapticUptime = now
         }
-        LokeyHapticEngine.shared.playTap(intensity: intensity)
+        LokeyHapticEngine.shared.playTap(
+            intensity: intensity,
+            avoidCoreHapticsColdStart: avoidCoreHapticsColdStart
+        )
     }
 
     // MARK: - Key Click Audio Feedback
@@ -573,15 +576,23 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         var cur: UIView? = self
         while let v = cur {
             for gr in v.gestureRecognizers ?? [] {
-                gr.delaysTouchesBegan = false
-                gr.delaysTouchesEnded = false
+                Self.disarmTouchDelaysIfSupported(gr)
             }
             cur = v.superview
         }
         for gr in window?.gestureRecognizers ?? [] {
-            gr.delaysTouchesBegan = false
-            gr.delaysTouchesEnded = false
+            Self.disarmTouchDelaysIfSupported(gr)
         }
+    }
+
+    @inline(__always)
+    private static func disarmTouchDelaysIfSupported(_ gr: UIGestureRecognizer) {
+        guard gr.delaysTouchesBegan || gr.delaysTouchesEnded else { return }
+        if NSStringFromClass(type(of: gr)).contains("SystemGestureGate") {
+            return
+        }
+        if gr.delaysTouchesBegan { gr.delaysTouchesBegan = false }
+        if gr.delaysTouchesEnded { gr.delaysTouchesEnded = false }
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -1056,7 +1067,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             if subviews.last !== globeSwitchButton {
                 bringSubviewToFront(globeSwitchButton)
             }
-        } else {
+        } else if !(isGlobeButtonPressed && globeSwitchButton.frame.width > 1.0 && !globeSwitchButton.isHidden) {
             if !globeSwitchButton.isHidden {
                 globeSwitchButton.isHidden = true
             }
@@ -1064,6 +1075,16 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 globeSwitchButton.frame = .zero
             }
         }
+    }
+
+    private func resolvedGlobeEventSourceView() -> UIView {
+        if !globeSwitchButton.isHidden,
+           globeSwitchButton.window != nil,
+           globeSwitchButton.bounds.width > 1.0,
+           globeSwitchButton.bounds.height > 1.0 {
+            return globeSwitchButton
+        }
+        return self
     }
 
     @objc private func handleGlobeTouchDown(_ sender: UIButton, forEvent event: UIEvent?) {
@@ -1087,7 +1108,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
         isGlobeButtonPressed = true
         updatePressedKeyStatesDiff()
-        triggerHaptic()
+        triggerHaptic(avoidCoreHapticsColdStart: true)
         playKeySound(for: .globe)
     }
 
@@ -1952,7 +1973,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             isDeferredTopRowLetter: deferredTopRow,
             swipedUpDigit: nil
         )
-        triggerHaptic()
+        triggerHaptic(avoidCoreHapticsColdStart: role == .globe)
         playKeySound(for: role)
         updateCalloutAndHighlights()
 
@@ -1990,8 +2011,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             pendingLineBreakDeletion = shouldDeferLineBreakDeletion?() == true
             if !pendingLineBreakDeletion { onBackspaceTap?() }
         case .globe:
-            if let event {
-                onGlobeEvent?(self, event)
+            if let event, window != nil {
+                onGlobeEvent?(resolvedGlobeEventSourceView(), event)
             }
         default:
             break
@@ -2025,8 +2046,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             if state.initialRole == .globe {
                 state.currentPoint = pt
                 activeTouches[touch] = state
-                if let event {
-                    onGlobeEvent?(self, event)
+                if let event, window != nil {
+                    onGlobeEvent?(resolvedGlobeEventSourceView(), event)
                 }
                 continue
             }
@@ -2262,8 +2283,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         guard let state = activeTouches.removeValue(forKey: touch) else { return }
         if state.initialRole == .globe {
             updateCalloutAndHighlights()
-            if let event {
-                onGlobeEvent?(self, event)
+            if let event, window != nil {
+                onGlobeEvent?(resolvedGlobeEventSourceView(), event)
             }
             return
         }
@@ -2389,8 +2410,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 handleSingleTouchCancelled(touch, now: now, triggeredSettings: triggeredSettings, rescuedCommits: &rescuedCommits)
             }
         }
-        if hadCancelledGlobeTouch, let event {
-            onGlobeEvent?(self, event)
+        if hadCancelledGlobeTouch, let event, window != nil {
+            onGlobeEvent?(resolvedGlobeEventSourceView(), event)
         }
         if activeTouches.isEmpty {
             stopSpaceTimer()

@@ -31,6 +31,14 @@ internal final class DiagnosticTouchSnifferGestureRecognizer: UIGestureRecognize
         }
     }
 
+    func resetTrackedTouches() {
+        trackedTouches.removeAll(keepingCapacity: true)
+        sequences.removeAllObjects()
+        if state == .began || state == .changed {
+            state = .cancelled
+        }
+    }
+
     // UIKit can deliver both downs together. Share the same identity even when
     // the key grid gets its callback before the root gesture recognizer.
     func sequence(for touch: UITouch, event: UIEvent?) -> UInt64 {
@@ -652,6 +660,7 @@ public final class KeyboardViewController: UIInputViewController {
     private var lastSelfHostWriteUptime: TimeInterval = -10
     private var lastTextWillChangeUptime: TimeInterval = -10
     private var pendingGlobeSwitchDeparture: Bool = false
+    private var isDisappearing: Bool = false
     private var lastGlobeInteractionUptime: TimeInterval = -10
     private var didReceiveHostResignOrBackground: Bool = false
     private var lastActiveDisappearUptime: TimeInterval = -10
@@ -754,6 +763,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     deinit {
+        keyGrid.globeSwitchButton.removeTarget(self, action: nil, for: .allEvents)
         candidateRefreshWorkItem?.cancel()
         contextReconcileWorkItem?.cancel()
         markedTextCoalescer.cancel()
@@ -876,6 +886,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        isDisappearing = false
         appearGeneration &+= 1
         if isRunningInExtensionProcess {
             Self.lastControllerAppearOrLoadUptime = ProcessInfo.processInfo.systemUptime
@@ -931,6 +942,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        isDisappearing = false
         reconcileDisplayTransitionIfNeeded()
         if hasAppearedInHost || view.window != nil {
             syncNeedsGlobeKeyIfConnected()
@@ -993,6 +1005,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     public override func viewWillDisappear(_ animated: Bool) {
+        isDisappearing = true
         deliverPendingDocumentEdits()
         super.viewWillDisappear(animated)
         if isCandidateGridExpanded {
@@ -1014,11 +1027,12 @@ public final class KeyboardViewController: UIInputViewController {
         publishExtensionVisibility(isVisible: false)
         contextReconcileWorkItem?.cancel()
         markedTextCoalescer.cancel()
+        diagnosticTouchSniffer.resetTrackedTouches()
         candidateBar.resetTouchTracking()
         keyGrid.resetTransientInteractions()
         emojiKeyboard?.cancelActiveInteractions()
         if isEmojiKeyboardActive {
-            setEmojiKeyboardVisible(false)
+            setEmojiKeyboardVisible(false, performLayout: false)
         }
         if keyGrid.page != .alphabetic {
             keyGrid.page = .alphabetic
@@ -1081,6 +1095,7 @@ public final class KeyboardViewController: UIInputViewController {
 
         guard screenIDChanged || screenSizeChanged else { return }
 
+        diagnosticTouchSniffer.resetTrackedTouches()
         candidateBar.resetTouchTracking()
         keyGrid.resetTransientInteractions()
         emojiKeyboard?.cancelActiveInteractions()
@@ -1095,7 +1110,9 @@ public final class KeyboardViewController: UIInputViewController {
         if hasAppearedInHost || view.window != nil || customTextDocumentProxyForTesting != nil {
             syncNeedsGlobeKeyIfConnected()
         }
-        LokeyHapticEngine.shared.resetForDisplayTransition()
+        if didCrossFoldState {
+            LokeyHapticEngine.shared.resetForDisplayTransition()
+        }
     }
 
     public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -1752,14 +1769,16 @@ public final class KeyboardViewController: UIInputViewController {
             self.reconcileDisplayTransitionIfNeeded()
             self.disableSystemGestureTouchDelays()
             self.setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
-            if self.view.window != nil {
+            if self.view.window != nil && !self.isDisappearing && !self.pendingGlobeSwitchDeparture {
                 self.updateKeyboardHeightConstraint(forceHostLayoutNotify: false, inLayoutPass: true)
                 if !self.isWindowMoveFollowUpScheduled {
                     self.isWindowMoveFollowUpScheduled = true
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         self.isWindowMoveFollowUpScheduled = false
-                        guard self.view.window != nil else { return }
+                        guard self.view.window != nil,
+                              !self.isDisappearing,
+                              !self.pendingGlobeSwitchDeparture else { return }
                         self.reconcileDisplayTransitionIfNeeded()
                         self.updateKeyboardHeightConstraint(forceHostLayoutNotify: true, inLayoutPass: false)
                     }
@@ -2622,6 +2641,18 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     public override func handleInputModeList(from view: UIView, with event: UIEvent) {
+        guard !isDisappearing,
+              view.window != nil,
+              self.view.window != nil,
+              view.bounds.width > 0.5,
+              view.bounds.height > 0.5 else {
+            return
+        }
+        candidateRefreshWorkItem?.cancel()
+        candidateRefreshWorkItem = nil
+        candidateRefreshPending = false
+        contextReconcileWorkItem?.cancel()
+        contextReconcileWorkItem = nil
         if isRunningInExtensionProcess {
             pendingGlobeSwitchDeparture = true
             lastGlobeInteractionUptime = ProcessInfo.processInfo.systemUptime
@@ -2630,6 +2661,9 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     public override func advanceToNextInputMode() {
+        guard !isDisappearing, view.window != nil else {
+            return
+        }
         if isRunningInExtensionProcess {
             pendingGlobeSwitchDeparture = true
             lastGlobeInteractionUptime = ProcessInfo.processInfo.systemUptime
@@ -2638,7 +2672,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func makeIdlePredictiveCandidates() -> [LokeyCandidate] {
-        guard let session, session.inputMode == .chineseMixed else {
+        guard !isDisappearing, let session, session.inputMode == .chineseMixed else {
             return []
         }
         let contextBefore = effectiveContextBeforeInput()
@@ -2841,7 +2875,7 @@ public final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func setEmojiKeyboardVisible(_ visible: Bool) {
+    private func setEmojiKeyboardVisible(_ visible: Bool, performLayout: Bool = true) {
         isEmojiKeyboardActive = visible
         if visible {
             candidateBar.resetTouchTracking()
@@ -2865,12 +2899,16 @@ public final class KeyboardViewController: UIInputViewController {
             emojiKeyboard?.cancelActiveInteractions()
             emojiKeyboard?.isHidden = true
             candidateBar.isHidden = false
-            updateKeyboardHeightConstraint()
-            if view.window != nil {
-                view.layoutIfNeeded()
+            if performLayout {
+                updateKeyboardHeightConstraint()
+                if view.window != nil {
+                    view.layoutIfNeeded()
+                }
+                keyGrid.isHidden = false
+                refreshCandidateUI()
+            } else {
+                keyGrid.isHidden = false
             }
-            keyGrid.isHidden = false
-            refreshCandidateUI()
         }
         if hasAppearedInHost {
             publishExtensionVisibility(isVisible: true)
@@ -3098,12 +3136,16 @@ public final class KeyboardViewController: UIInputViewController {
             if (isRunningInExtensionProcess || onHostInputViewLayoutInvalidatedForTesting != nil)
                 && shouldNotifyForMismatch
                 && canNotifyHostWindow
-                && !isHostResizeRetryScheduled {
+                && !isHostResizeRetryScheduled
+                && !isDisappearing
+                && !pendingGlobeSwitchDeparture {
                 isHostResizeRetryScheduled = true
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.isHostResizeRetryScheduled = false
-                    guard self.view.window != nil || self.onHostInputViewLayoutInvalidatedForTesting != nil else { return }
+                    guard (self.view.window != nil || self.onHostInputViewLayoutInvalidatedForTesting != nil),
+                          !self.isDisappearing,
+                          !self.pendingGlobeSwitchDeparture else { return }
                     let retryTarget = self.desiredKeyboardHeight()
                     if self.view.bounds.width > 40.0,
                        self.view.bounds.height > 40.0,
@@ -3140,7 +3182,7 @@ public final class KeyboardViewController: UIInputViewController {
         guard sig != lastLoggedGeometrySignature else { return }
         lastLoggedGeometrySignature = sig
         let screenRect: CGRect = if let win = view.window {
-            view.convert(vb, to: win.screen.coordinateSpace)
+            view.convert(vb, to: win.windowScene?.screen.coordinateSpace ?? win.screen.coordinateSpace)
         } else {
             .zero
         }
