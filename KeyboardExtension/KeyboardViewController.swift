@@ -1,3 +1,4 @@
+import ObjectiveC
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
 
@@ -542,6 +543,27 @@ private final class WindowAttachmentObserverView: UIView {
     }
 }
 
+private final class FallbackEmptyTextDocumentProxy: NSObject, UITextDocumentProxy {
+    private static let zeroUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000") ?? UUID()
+
+    var documentContextBeforeInput: String? { nil }
+    var documentContextAfterInput: String? { nil }
+    var selectedText: String? { nil }
+    var documentInputMode: UITextInputMode? { nil }
+    var documentIdentifier: UUID { Self.zeroUUID }
+    var hasText: Bool { false }
+    @objc var isSecureTextEntry: Bool {
+        get { false }
+        set {}
+    }
+
+    func adjustTextPosition(byCharacterOffset offset: Int) {}
+    func setMarkedText(_ markedText: String, selectedRange: NSRange) {}
+    func unmarkText() {}
+    func insertText(_ text: String) {}
+    func deleteBackward() {}
+}
+
 public final class KeyboardViewController: UIInputViewController {
     private struct PresentedCandidateItem: Equatable {
         let text: String
@@ -637,6 +659,9 @@ public final class KeyboardViewController: UIInputViewController {
     private var lastLoggedGeometrySignature: GeometrySignature?
     private var lastNotifiedHostHeightMismatchSignature: String = ""
     private var isHostResizeRetryScheduled: Bool = false
+    private var lastObservedScreenObjectID: ObjectIdentifier?
+    private var lastObservedScreenSize: CGSize = .zero
+    private var isWindowMoveFollowUpScheduled: Bool = false
     private lazy var caretFeedback = UISelectionFeedbackGenerator()
 
     private static let systemLayoutStateLock = NSLock()
@@ -702,11 +727,30 @@ public final class KeyboardViewController: UIInputViewController {
         }
         super.init(coder: coder)
     }
+    private static let superTextDocumentProxySelector = #selector(getter: UIInputViewController.textDocumentProxy)
+    private static let fallbackEmptyTextDocumentProxy = FallbackEmptyTextDocumentProxy()
+
+    /// Reads `UIInputViewController.textDocumentProxy` via Objective-C IMP dispatch so a transient `nil` (`0x0`)
+    /// `_textDocumentInterface` during foldable display migration (`LCD-1 -> LCD`) never triggers Swift's fatal
+    /// non-optional bridging `SIGTRAP`.
+    private func safeSuperTextDocumentProxy() -> UITextDocumentProxy {
+        typealias GetterIMP = @convention(c) (AnyObject, Selector) -> UnsafeMutableRawPointer?
+        guard let imp = class_getMethodImplementation(UIInputViewController.self, Self.superTextDocumentProxySelector) else {
+            return Self.fallbackEmptyTextDocumentProxy
+        }
+        let fn = unsafeBitCast(imp, to: GetterIMP.self)
+        guard let rawPtr = fn(self, Self.superTextDocumentProxySelector) else {
+            return Self.fallbackEmptyTextDocumentProxy
+        }
+        return (Unmanaged<AnyObject>.fromOpaque(rawPtr).takeUnretainedValue() as? UITextDocumentProxy)
+            ?? Self.fallbackEmptyTextDocumentProxy
+    }
+
     public override var textDocumentProxy: UITextDocumentProxy {
         if let custom = customTextDocumentProxyForTesting {
             return custom
         }
-        return super.textDocumentProxy
+        return safeSuperTextDocumentProxy()
     }
 
     deinit {
@@ -887,6 +931,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        reconcileDisplayTransitionIfNeeded()
         if hasAppearedInHost || view.window != nil {
             syncNeedsGlobeKeyIfConnected()
         }
@@ -1008,10 +1053,56 @@ public final class KeyboardViewController: UIInputViewController {
         LokeyHapticEngine.shared.suspend()
     }
 
+    private func reconcileDisplayTransitionIfNeeded() {
+        let currentScreenID: ObjectIdentifier? = view.window?.windowScene.map { ObjectIdentifier($0.screen) }
+        let currentScreenSize = effectiveScreenSize()
+
+        let screenIDChanged = (lastObservedScreenObjectID != nil
+            && currentScreenID != nil
+            && lastObservedScreenObjectID != currentScreenID)
+        let screenSizeChanged = (lastObservedScreenSize.width > 0.0
+            && currentScreenSize.width > 0.0
+            && (abs(lastObservedScreenSize.width - currentScreenSize.width) > 1.0
+                || abs(lastObservedScreenSize.height - currentScreenSize.height) > 1.0))
+
+        let wasFoldableUnfolded = min(lastObservedScreenSize.width, lastObservedScreenSize.height) > 550.0
+        let isFoldableUnfolded = min(currentScreenSize.width, currentScreenSize.height) > 550.0
+        let didCrossFoldState = (lastObservedScreenSize.width > 0.0
+            && currentScreenSize.width > 0.0
+            && wasFoldableUnfolded != isFoldableUnfolded)
+            || screenIDChanged
+
+        if let currentScreenID {
+            lastObservedScreenObjectID = currentScreenID
+        }
+        if currentScreenSize.width > 0.0, currentScreenSize.height > 0.0 {
+            lastObservedScreenSize = currentScreenSize
+        }
+
+        guard screenIDChanged || screenSizeChanged else { return }
+
+        candidateBar.resetTouchTracking()
+        keyGrid.resetTransientInteractions()
+        emojiKeyboard?.cancelActiveInteractions()
+        calloutBubble.hide()
+
+        if didCrossFoldState && isCandidateGridExpanded {
+            setExpandedGrid(false, reason: "屏幕折叠切换")
+        }
+
+        lastNotifiedHostHeightMismatchSignature = ""
+        hasSyncedGlobeKey = false
+        if hasAppearedInHost || view.window != nil || customTextDocumentProxyForTesting != nil {
+            syncNeedsGlobeKeyIfConnected()
+        }
+        LokeyHapticEngine.shared.resetForDisplayTransition()
+    }
+
     public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         coordinator.animate(alongsideTransition: { [weak self] _ in
             guard let self else { return }
+            self.reconcileDisplayTransitionIfNeeded()
             _ = self.syncChildHostScreenSize()
             self.updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
             self.candidateBar.setNeedsLayout()
@@ -1020,6 +1111,7 @@ public final class KeyboardViewController: UIInputViewController {
             self.view.layoutIfNeeded()
         }, completion: { [weak self] _ in
             guard let self else { return }
+            self.reconcileDisplayTransitionIfNeeded()
             _ = self.syncChildHostScreenSize()
             if self.hasAppearedInHost || self.view.window != nil {
                 self.syncNeedsGlobeKeyIfConnected()
@@ -1044,15 +1136,17 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     public override func viewWillLayoutSubviews() {
+        reconcileDisplayTransitionIfNeeded()
         super.viewWillLayoutSubviews()
         if view.bounds.height <= 420.0 {
             updateKeyboardHeightConstraint(inLayoutPass: true)
         } else {
             _ = syncChildHostScreenSize()
         }
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
+        let scr = effectiveScreenSize()
+        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
         session?.decoder.spatialModel.isLandscapeLayout = (refWidth > 520.0)
-        if !hasSyncedGlobeKey && (hasAppearedInHost || customTextDocumentProxyForTesting != nil) {
+        if !hasSyncedGlobeKey && (hasAppearedInHost || view.window != nil || customTextDocumentProxyForTesting != nil) {
             syncNeedsGlobeKeyIfConnected()
         }
     }
@@ -1655,10 +1749,21 @@ public final class KeyboardViewController: UIInputViewController {
 
         windowAttachmentObserver.onHierarchyChanged = { [weak self] in
             guard let self else { return }
+            self.reconcileDisplayTransitionIfNeeded()
             self.disableSystemGestureTouchDelays()
             self.setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
             if self.view.window != nil {
-                self.updateKeyboardHeightConstraint(forceHostLayoutNotify: false)
+                self.updateKeyboardHeightConstraint(forceHostLayoutNotify: false, inLayoutPass: true)
+                if !self.isWindowMoveFollowUpScheduled {
+                    self.isWindowMoveFollowUpScheduled = true
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.isWindowMoveFollowUpScheduled = false
+                        guard self.view.window != nil else { return }
+                        self.reconcileDisplayTransitionIfNeeded()
+                        self.updateKeyboardHeightConstraint(forceHostLayoutNotify: true, inLayoutPass: false)
+                    }
+                }
             }
         }
         keyGrid.calloutBubble = calloutBubble
@@ -1817,7 +1922,8 @@ public final class KeyboardViewController: UIInputViewController {
 
         keyGrid.onAnchorsUpdated = { [weak self] anchors in
             guard let self else { return }
-            let refWidth = self.view.bounds.width > 0 ? self.view.bounds.width : UIScreen.main.bounds.width
+            let scr = self.effectiveScreenSize()
+            let refWidth = self.view.bounds.width > 0 ? self.view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
             self.session?.decoder.spatialModel.isLandscapeLayout = (refWidth > 520.0)
             self.session?.decoder.spatialModel.updateAnchors(anchors)
         }
@@ -2870,7 +2976,8 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func effectiveHostTopPadding() -> CGFloat {
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
+        let scr = effectiveScreenSize()
+        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
         let isiOS26OrNewer: Bool
         if #available(iOS 26.0, *) {
             isiOS26OrNewer = true
@@ -2982,20 +3089,10 @@ public final class KeyboardViewController: UIInputViewController {
 
             let canNotifyHostWindow = view.window != nil || onHostInputViewLayoutInvalidatedForTesting != nil
             if canNotifyHostWindow && (isRunningInExtensionProcess || shouldNotifyForMismatch || forceHostLayoutNotify) {
-                if !inLayoutPass, didMutate, view.window != nil, let hc = heightConstraint {
-                    hc.isActive = false
-                    hc.constant = target
-                    hc.isActive = true
-                } else if !inLayoutPass, shouldNotifyForMismatch, let hc = heightConstraint {
-                    hc.constant = target
-                }
                 inputView?.invalidateIntrinsicContentSize()
                 inputView?.setNeedsUpdateConstraints()
                 inputView?.setNeedsLayout()
                 onHostInputViewLayoutInvalidatedForTesting?()
-                if !inLayoutPass && didMutate && isRunningInExtensionProcess {
-                    view.layoutIfNeeded()
-                }
             }
 
             if (isRunningInExtensionProcess || onHostInputViewLayoutInvalidatedForTesting != nil)
@@ -3012,13 +3109,7 @@ public final class KeyboardViewController: UIInputViewController {
                        self.view.bounds.height > 40.0,
                        self.view.bounds.height <= 360.0,
                        abs(self.view.bounds.height - retryTarget) > 1.5 {
-                        if let hc = self.heightConstraint, self.view.window != nil {
-                            hc.isActive = false
-                            hc.constant = retryTarget
-                            hc.isActive = true
-                        } else {
-                            self.heightConstraint?.constant = retryTarget
-                        }
+                        self.heightConstraint?.constant = retryTarget
                         self.view.setNeedsUpdateConstraints()
                         self.view.setNeedsLayout()
                         self.inputView?.invalidateIntrinsicContentSize()

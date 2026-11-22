@@ -457,6 +457,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             || isGlobeButtonPressed
             || isTrackpadActive
             || isMomentaryNumericSlideActive
+            || !currentlyPressedKeys.isEmpty
             || spaceLongPressTimer != nil
             || backspaceDelayTimer != nil
             || backspaceRepeatTimer != nil
@@ -624,7 +625,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             CATransaction.setDisableActions(true)
             layoutKeyFrames(width: bounds.width, height: bounds.height)
             CATransaction.commit()
-        } else if bounds.width > 40 && bounds.height > 40 && bounds.height < Self.minimumValidGridHeight(forWidth: bounds.width, screenSize: resolvedScreenSize) {
+        } else if bounds.width >= 200.0 && bounds.height > 40.0 && bounds.height < Self.minimumValidGridHeight(forWidth: bounds.width, screenSize: resolvedScreenSize) {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             layoutKeyFrames(width: bounds.width, height: Self.canonicalFallbackGridHeight(forWidth: bounds.width, screenSize: resolvedScreenSize))
@@ -646,9 +647,9 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     static func minimumValidGridHeight(forWidth w: CGFloat, screenSize: CGSize = .zero) -> CGFloat {
         switch KeyboardTheme.layoutProfile(forWidth: w, screenSize: screenSize) {
         case .duoUnfoldedPortrait:
-            return 215.0
+            return 225.0
         case .duoUnfoldedLandscape:
-            return 188.0
+            return 198.0
         case .regularLandscape:
             return 140.0
         case .duoCover, .regularMaxPortrait:
@@ -674,7 +675,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     }
 
     static func isValidGridSize(width w: CGFloat, height h: CGFloat, screenSize: CGSize = .zero) -> Bool {
-        w > 40.0 && h >= minimumValidGridHeight(forWidth: w, screenSize: screenSize) && h <= 360.0
+        w >= 200.0 && h >= minimumValidGridHeight(forWidth: w, screenSize: screenSize) && h <= 360.0
     }
 
     private var hasLaidOutKeyFrames: Bool {
@@ -759,7 +760,12 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         // and `SpatialTouchModel` normalized anchors are never distorted!
         let screenSize = resolvedScreenSize
         if !Self.isValidGridSize(width: w, height: h, screenSize: screenSize) {
-            if !hasLaidOutKeyFrames && w > 40.0 && h > 40.0 && h < Self.minimumValidGridHeight(forWidth: w, screenSize: screenSize) {
+            let currentProfile = KeyboardTheme.layoutProfile(forWidth: w, screenSize: screenSize)
+            let didChangeWidthOrProfile = abs(w - lastLaidOutGridSize.width) > 1.0 || lastLaidOutProfile != currentProfile
+            if (!hasLaidOutKeyFrames || didChangeWidthOrProfile)
+                && w >= 200.0
+                && h > 40.0
+                && h < Self.minimumValidGridHeight(forWidth: w, screenSize: screenSize) {
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
                 defer { CATransaction.commit() }
@@ -804,13 +810,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         case .duoUnfoldedPortrait:
             sideInset = 11.0
             hGap = 9.0
-            bottomPad = 3.0
-            vGap = 14.0
+            bottomPad = 3.5
+            vGap = 14.5
         case .duoUnfoldedLandscape:
             sideInset = w > 860.0 ? (w - 781.0) * 0.5 : 10.0
             hGap = 10.0
-            bottomPad = 4.0
-            vGap = 13.0
+            bottomPad = 3.0
+            vGap = 13.5
         case .regularLandscape:
             sideInset = 6.0
             hGap = 7.0
@@ -827,7 +833,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         currentKeyCornerRadius = cornerR
 
         let keyH = max(30.0, (h - topPad - bottomPad - vGap * 3.0) / 4.0)
-        let stdKeyW = (w - sideInset * 2.0 - hGap * 9.0) / 10.0
+        let stdKeyW = max(18.0, (w - sideInset * 2.0 - hGap * 9.0) / 10.0)
 
         // Row 0: 10 equal-width keys (`q`..`p`)
         let y0 = topPad
@@ -891,9 +897,9 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             let globeW: CGFloat
             let emojiW: CGFloat
             if profile == .duoUnfoldedPortrait || profile == .duoUnfoldedLandscape {
-                returnW = 1.85 * stdKeyW + 0.5 * hGap
+                returnW = 1.80 * stdKeyW + 0.5 * hGap
                 if needsGlobeKey {
-                    let each = 0.82 * stdKeyW
+                    let each = 0.91 * stdKeyW
                     modeSwitchW = each
                     globeW = each
                     emojiW = each
@@ -1100,6 +1106,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private func pressedKeyIndices() -> Set<Int> {
         var nextPressed: Set<Int> = []
         for s in activeTouches.values {
+            guard s.rowIndex >= 0,
+                  s.rowIndex < rowItems.count,
+                  s.colIndex >= 0,
+                  s.colIndex < rowItems[s.rowIndex].count else { continue }
             // Letters use the popup exclusively. Their keycaps have no pressed fill.
             if case .letter = rowItems[s.rowIndex][s.colIndex].role { continue }
             nextPressed.insert((s.rowIndex << 4) | s.colIndex)
@@ -2684,6 +2694,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         isTrackpadActive = false
         trackpadTouch = nil
         activeTouches.removeAll()
+        currentlyPressedKeys.removeAll(keepingCapacity: true)
         calloutBubble?.hide()
     }
 

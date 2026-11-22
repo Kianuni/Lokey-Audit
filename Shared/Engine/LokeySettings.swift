@@ -1597,6 +1597,21 @@ public final class LokeyHapticEngine {
         #endif
     }
 
+    /// Resets CoreHaptics state across foldable display transitions (`LCD-1 <-> LCD`) so a migrated
+    /// extension instance recreates its haptic session cleanly on the destination display without stalling.
+    public func resetForDisplayTransition() {
+        #if canImport(CoreHaptics)
+        coreHapticsCooldownUntilUptime = 0
+        hapticQueue.async { [weak self] in
+            guard let self else { return }
+            self.cachedPlayers.removeAll(keepingCapacity: true)
+            self.engine?.stop(completionHandler: nil)
+            self.engine = nil
+            self.isEngineRunning = false
+        }
+        #endif
+    }
+
     /// Plays a key-tap haptic strictly proportional to `intensity` in `0.0 ... 1.0`.
     /// Dispatches CoreHaptics IPC off the main UI thread so `touchesBegan` returns in `< 0.01 ms`.
     public func playTap(intensity rawIntensity: Double) {
@@ -1653,8 +1668,10 @@ public final class LokeyHapticEngine {
                 eng.isAutoShutdownEnabled = false
                 eng.stoppedHandler = { [weak self] _ in
                     self?.hapticQueue.async {
-                        self?.isEngineRunning = false
-                        self?.cachedPlayers.removeAll(keepingCapacity: true)
+                        guard let self else { return }
+                        self.isEngineRunning = false
+                        self.cachedPlayers.removeAll(keepingCapacity: true)
+                        self.engine = nil
                     }
                 }
                 eng.resetHandler = { [weak self] in
@@ -1662,8 +1679,15 @@ public final class LokeyHapticEngine {
                         guard let self else { return }
                         self.isEngineRunning = false
                         self.cachedPlayers.removeAll(keepingCapacity: true)
-                        try? self.engine?.start()
-                        self.isEngineRunning = true
+                        do {
+                            if let eng = self.engine {
+                                try eng.start()
+                                self.isEngineRunning = true
+                            }
+                        } catch {
+                            self.isEngineRunning = false
+                            self.engine = nil
+                        }
                     }
                 }
                 self.engine = eng

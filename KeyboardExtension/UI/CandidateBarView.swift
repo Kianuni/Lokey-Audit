@@ -2786,7 +2786,10 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         guard range != drawnRows else { return }
         drawnRows = range
 
-        let visibleIndices = rowsModel[startRow][0].index...rowsModel[endRow - 1].last!.index
+        guard let firstIdx = rowsModel[startRow].first?.index,
+              let lastIdx = rowsModel[endRow - 1].last?.index,
+              firstIdx <= lastIdx else { return }
+        let visibleIndices = firstIdx...lastIdx
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
