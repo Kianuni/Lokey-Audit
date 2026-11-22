@@ -788,7 +788,14 @@ public final class LokeySessionController {
         } else {
             effectiveContext = lastCommittedChineseWord
         }
-        let rawList = decoder.predictNextWords(afterContext: effectiveContext, limit: limit)
+        let committedTail: String? = (!lastCommittedChineseWord.isEmpty && effectiveContext.hasSuffix(lastCommittedChineseWord))
+            ? lastCommittedChineseWord
+            : nil
+        let rawList = decoder.predictNextWords(
+            afterContext: effectiveContext,
+            committedTailWord: committedTail,
+            limit: limit
+        )
         return convertAuxiliaryCandidates(rawList)
     }
 

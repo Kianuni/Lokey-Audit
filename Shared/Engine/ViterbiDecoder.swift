@@ -3906,10 +3906,48 @@ public final class ViterbiDecoder: @unchecked Sendable {
         "的", "了", "吗", "呢", "吧", "啊", "是", "在", "也", "都", "不", "就", "和", "有", "很", "去"
     ]
 
+    private static let standaloneTwoCharParticleWords: Set<String> = [
+        "真的", "好的", "是的", "有的", "别的", "对的", "错的", "大的", "小的", "新的", "旧的",
+        "男的", "女的", "老的", "吃的", "喝的", "玩的", "用的", "穿的", "买的", "说的", "给的",
+        "觉得", "记得", "懂得", "舍得", "值得", "难得", "免得", "省得", "显得", "变得", "弄得"
+    ]
+
+    private static let openTailSingleCharPredicates: Set<String> = [
+        "是", "在", "有", "没", "无", "不", "别", "要", "想", "会", "能", "敢", "肯",
+        "去", "来", "到", "回", "进", "出", "上", "下", "过", "了", "着",
+        "给", "把", "被", "让", "叫", "请", "使", "跟", "和", "与", "同", "对", "向", "往", "从", "比", "按", "照",
+        "打", "看", "说", "听", "吃", "喝", "买", "卖", "做", "干", "搞", "弄", "写", "读", "学", "用", "拿", "带", "找", "穿", "开", "关"
+    ]
+
+    private static let postPhraseConversationalContinuations: Set<String> = [
+        "了", "的", "吗", "呢", "吧", "啊", "呀", "啦", "哦", "噢", "哈", "嘛", "呗",
+        "着", "过", "就", "也", "都", "还", "又", "才", "再", "很", "太", "真"
+    ]
+
+    private static func hasDegreeOrDemonstrativeModifierPrefix(_ tailCJK: String) -> Bool {
+        guard tailCJK.count >= 2 else { return false }
+        let suffix2 = String(tailCJK.suffix(2))
+        if let first = suffix2.first, ["太", "很", "真", "好", "最", "更", "越", "挺", "超", "特"].contains(first) {
+            return true
+        }
+        if tailCJK.count >= 3 {
+            let suffix3 = String(tailCJK.suffix(3))
+            let mod2 = String(suffix3.prefix(2))
+            if ["这么", "那么", "多么", "怎么", "非常", "特别", "比较", "有点", "稍微", "十分", "格外", "相当"].contains(mod2) {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Computes contextual next-word associations (`联想词`) tailored to the Chinese text immediately before the cursor.
     /// Returns `[]` when there is no trailing Chinese character before the cursor (empty field, after punctuation/space/ASCII).
     /// Runs in `< 0.02 ms` via zero-copy `mmap` binary search + in-memory user bigram cache.
-    public func predictNextWords(afterContext context: String?, limit: Int = 18) -> [LokeyCandidate] {
+    public func predictNextWords(
+        afterContext context: String?,
+        committedTailWord: String? = nil,
+        limit: Int = 18
+    ) -> [LokeyCandidate] {
         let tailCJK = Self.extractTrailingChineseSuffix(from: context ?? "", maxChars: 4)
         guard !tailCJK.isEmpty else {
             return []
@@ -3942,8 +3980,25 @@ public final class ViterbiDecoder: @unchecked Sendable {
             for nextSurf in userStore.learnedNextWords(after: sub, minCount: minLearned, limit: 4) {
                 addWord(nextSurf, score: 4000, isUser: true)
             }
+            let isBoundMultiCharTail = (k == 1)
+                && (tailCJK.count >= 2)
+                && !Self.openTailSingleCharPredicates.contains(sub)
+                && ((committedTailWord?.count ?? 0) >= 2 || Self.hasDegreeOrDemonstrativeModifierPrefix(tailCJK))
             let hits = lexicon.lookupAssociations(after: sub, limit: k >= 2 ? 12 : 8)
             for h in hits {
+                if k == 1 && tailCJK.count >= 2 {
+                    // Block severed 3-char `[sub][X]的` compound tails (e.g. `"这么早"` + `"期的"` from `"早期的"`).
+                    if h.text.count == 2,
+                       (h.text.hasSuffix("的") || h.text.hasSuffix("地") || h.text.hasSuffix("得")),
+                       !Self.standaloneTwoCharParticleWords.contains(h.text) {
+                        continue
+                    }
+                    // When `sub` is already bound inside a multi-char word/modifier phrase (e.g. `"这么早"`, `"郑钧"`),
+                    // do not hijack `sub` into unrelated 1-char word compounds (`"早期"`, `"早晨"`, `"早上"`).
+                    if isBoundMultiCharTail && !Self.postPhraseConversationalContinuations.contains(h.text) {
+                        continue
+                    }
+                }
                 addWord(h.text, score: h.scoreQ8, isUser: false)
             }
             if result.count >= 14 && k >= 2 {

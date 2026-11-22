@@ -138,6 +138,10 @@ internal final class DecelerationBrakeTracker {
 /// smoothly cancel any touched `UIButton` the instant a horizontal swipe begins!
 internal final class CandidateScrollView: UIScrollView {
     var onDecelerationBrakeTap: ((CGPoint) -> Void)?
+    var onRawTouchesBegan: ((Set<UITouch>) -> Void)?
+    var onRawTouchesMoved: ((Set<UITouch>) -> Void)?
+    var onRawTouchesEnded: ((Set<UITouch>) -> Void)?
+    var onRawTouchesCancelled: ((Set<UITouch>) -> Void)?
     internal var simulatedDeceleratingForTesting = false
     internal let brakeTapGestureRecognizer = DecelerationBrakeTapGestureRecognizer(target: nil, action: nil)
     private let brakeTracker = DecelerationBrakeTracker()
@@ -155,20 +159,25 @@ internal final class CandidateScrollView: UIScrollView {
     private func installBrakeTapRecognizer() {
         brakeTapGestureRecognizer.onTouchesBegan = { [weak self] touches in
             guard let self else { return }
+            self.onRawTouchesBegan?(touches)
             self.brakeTracker.handleBegan(touches, in: self, isDecelerating: self.isDecelerating)
         }
         brakeTapGestureRecognizer.onTouchesMoved = { [weak self] touches in
             guard let self else { return }
+            self.onRawTouchesMoved?(touches)
             self.brakeTracker.handleMoved(touches, in: self)
         }
         brakeTapGestureRecognizer.onTouchesEnded = { [weak self] touches in
             guard let self else { return }
+            self.onRawTouchesEnded?(touches)
             if let pt = self.brakeTracker.consumeIfEligibleOnLift(touches, in: self, isDragging: self.isDragging) {
                 self.onDecelerationBrakeTap?(pt)
             }
         }
         brakeTapGestureRecognizer.onTouchesCancelled = { [weak self] touches in
-            self?.brakeTracker.handleCancelled(touches)
+            guard let self else { return }
+            self.onRawTouchesCancelled?(touches)
+            self.brakeTracker.handleCancelled(touches)
         }
         addGestureRecognizer(brakeTapGestureRecognizer)
     }
@@ -395,6 +404,7 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     var onInteractionEnded: (() -> Void)?
 
     private func dispatchDisplayedCandidate(_ index: Int) {
+        consumeCurrentEpochTouchesAndAdvance()
         isSelectingDisplayedCandidate = true
         defer { isSelectingDisplayedCandidate = false }
         onSelectCandidate?(index)
@@ -631,6 +641,26 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         let touchDownUptime: TimeInterval
     }
 
+    /// Zero-delay touch record captured directly from `CandidateScrollView`'s passive gesture recognizer
+    /// (immune to `_UISystemGestureGateGestureRecognizer` hold-back near left/right screen edges `x <= ~31pt`).
+    /// Prevents delayed `UIControl` touch replays (`+3..80ms` after finger lift) from double-committing
+    /// newly populated associative candidates (`联想候选`, e.g. `"喊了"` -> `"我"`, `"这么早"` -> `"期的"`).
+    private struct TrackedBarTouch {
+        let id: ObjectIdentifier
+        weak var touch: UITouch?
+        var commitEpochAtBegan: UInt64
+        var beganUptime: TimeInterval
+        var startPointInScroll: CGPoint
+        var startOffsetX: CGFloat
+        var initialCandidateIndex: Int
+        var initialCandidateTitle: String
+        var movedBeyondSlop: Bool
+        var endedOrCancelled: Bool
+        var consumed: Bool
+    }
+
+    private static let maxTrackedBarTouches = 16
+
     private var buttonPool: [CandidatePoolButton] = []
     private var longPressPool: [UILongPressGestureRecognizer] = []
     private var isHighlightFirstActive: Bool = false
@@ -639,6 +669,8 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     private var pendingTouchStartOffsetX: CGFloat = 0
     private var pendingTouchDownUptime: TimeInterval = 0
     private var rescuableTap: RescuableCandidateTap?
+    private var trackedBarTouches: [TrackedBarTouch] = []
+    private var commitEpoch: UInt64 = 0
     private var lastCandidateCommitUptime: TimeInterval = -10
     private var lastBrakeTapCommitUptime: TimeInterval = -10
     private var scrollTrace: CandidateScrollTrace?
@@ -716,6 +748,19 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         scrollView.clipsToBounds = true
         scrollView.contentInset = UIEdgeInsets(top: 0, left: 6.5, bottom: 0, right: 8.0)
         KeyboardTheme.disableScrollEdgeEffects(on: scrollView)
+        trackedBarTouches.reserveCapacity(Self.maxTrackedBarTouches)
+        scrollView.onRawTouchesBegan = { [weak self] touches in
+            self?.recordRawTouchesBegan(touches)
+        }
+        scrollView.onRawTouchesMoved = { [weak self] touches in
+            self?.recordRawTouchesMoved(touches)
+        }
+        scrollView.onRawTouchesEnded = { [weak self] touches in
+            self?.recordRawTouchesEnded(touches)
+        }
+        scrollView.onRawTouchesCancelled = { [weak self] touches in
+            self?.recordRawTouchesCancelled(touches)
+        }
         scrollView.onDecelerationBrakeTap = { [weak self] ptInScroll in
             self?.handleDecelerationBrakeTap(at: ptInScroll)
         }
@@ -870,8 +915,8 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
             btn.layer.cornerRadius = 11.0
             btn.layer.cornerCurve = .continuous
             btn.layer.shadowOpacity = 0
-            btn.addTarget(self, action: #selector(handleCandidateTouchDown(_:)), for: .touchDown)
-            btn.addTarget(self, action: #selector(handleCandidateButtonTap(_:)), for: .touchUpInside)
+            btn.addTarget(self, action: #selector(handleCandidateTouchDown(_:forEvent:)), for: .touchDown)
+            btn.addTarget(self, action: #selector(handleCandidateButtonTap(_:forEvent:)), for: .touchUpInside)
             btn.addTarget(self, action: #selector(handleCandidateTouchCancel(_:)), for: .touchCancel)
             btn.addTarget(self, action: #selector(handleCandidateTouchUpOutside(_:)), for: .touchUpOutside)
 
@@ -1029,6 +1074,8 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         invalidatedHeldButtons.removeAll(keepingCapacity: true)
         pendingCandidateIndex = nil
         rescuableTap = nil
+        trackedBarTouches.removeAll(keepingCapacity: true)
+        commitEpoch &+= 1
         didTriggerLongPressDelete = false
         scrollView.resetBrakeTouchTracking()
         LokeyDiagnosticLogger.shared.setScrollInteractionActive(false, owner: self)
@@ -1211,6 +1258,9 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
             invalidatedHeldButtons.removeAll(keepingCapacity: true)
             pendingCandidateIndex = nil
             rescuableTap = nil
+            if !previousCandidates.isEmpty {
+                consumeCurrentEpochTouchesAndAdvance()
+            }
             slotLayouts.removeAll(keepingCapacity: true)
             candToSlot.removeAll(keepingCapacity: true)
             renderedWindowRange = 0..<0
@@ -1813,6 +1863,161 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         }
     }
 
+    // MARK: - Zero-Delay Touch Gate & Epoch Tracking
+
+    private func consumeCurrentEpochTouchesAndAdvance() {
+        for i in trackedBarTouches.indices where trackedBarTouches[i].commitEpochAtBegan == commitEpoch {
+            trackedBarTouches[i].consumed = true
+        }
+        commitEpoch &+= 1
+    }
+
+    private func nearestVisibleCandidateIndex(atScrollPoint ptInScroll: CGPoint, maxDistance: CGFloat) -> Int? {
+        var bestIdx: Int?
+        var bestDist = maxDistance
+        for btn in buttonPool where !btn.isHidden {
+            let dx: CGFloat
+            if ptInScroll.x < btn.frame.minX {
+                dx = btn.frame.minX - ptInScroll.x
+            } else if ptInScroll.x > btn.frame.maxX {
+                dx = ptInScroll.x - btn.frame.maxX
+            } else {
+                dx = 0
+            }
+            if dx < bestDist {
+                bestDist = dx
+                bestIdx = btn.tag
+            }
+        }
+        if let idx = bestIdx, idx >= 0, idx < currentCandidates.count {
+            return idx
+        }
+        return nil
+    }
+
+    internal func recordRawTouchesBegan(_ touches: Set<UITouch>) {
+        guard !touches.isEmpty else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let hasExistingActive = trackedBarTouches.contains(where: { entry in
+            !entry.endedOrCancelled
+                && !entry.consumed
+                && entry.commitEpochAtBegan == commitEpoch
+                && !touches.contains(where: { ObjectIdentifier($0) == entry.id })
+        })
+        if touches.count > 1 || hasExistingActive {
+            for i in trackedBarTouches.indices where !trackedBarTouches[i].endedOrCancelled {
+                trackedBarTouches[i].movedBeyondSlop = true
+            }
+        }
+        for t in touches {
+            let id = ObjectIdentifier(t)
+            if let existingIdx = trackedBarTouches.firstIndex(where: { $0.id == id && !$0.endedOrCancelled && $0.touch === t }) {
+                if touches.count > 1 {
+                    trackedBarTouches[existingIdx].movedBeyondSlop = true
+                }
+                continue
+            }
+            let pt = t.location(in: scrollView)
+            let candIdx = nearestVisibleCandidateIndex(atScrollPoint: pt, maxDistance: 14.0) ?? -1
+            let candTitle = (candIdx >= 0 && candIdx < currentCandidates.count) ? currentCandidates[candIdx].text : ""
+            let record = TrackedBarTouch(
+                id: id,
+                touch: t,
+                commitEpochAtBegan: commitEpoch,
+                beganUptime: now,
+                startPointInScroll: pt,
+                startOffsetX: scrollView.contentOffset.x,
+                initialCandidateIndex: candIdx,
+                initialCandidateTitle: candTitle,
+                movedBeyondSlop: touches.count > 1 || hasExistingActive,
+                endedOrCancelled: false,
+                consumed: false
+            )
+            if let sameIDIdx = trackedBarTouches.firstIndex(where: { $0.id == id }) {
+                trackedBarTouches[sameIDIdx] = record
+            } else if trackedBarTouches.count >= Self.maxTrackedBarTouches {
+                trackedBarTouches.removeFirst()
+                trackedBarTouches.append(record)
+            } else {
+                trackedBarTouches.append(record)
+            }
+        }
+    }
+
+    internal func recordRawTouchesMoved(_ touches: Set<UITouch>) {
+        let curOffsetX = scrollView.contentOffset.x
+        for t in touches {
+            let id = ObjectIdentifier(t)
+            guard let idx = trackedBarTouches.lastIndex(where: { $0.id == id }) else { continue }
+            if trackedBarTouches[idx].movedBeyondSlop { continue }
+            let pt = t.location(in: scrollView)
+            let moved = hypot(pt.x - trackedBarTouches[idx].startPointInScroll.x, pt.y - trackedBarTouches[idx].startPointInScroll.y)
+            if moved > 9.0 || abs(curOffsetX - trackedBarTouches[idx].startOffsetX) > 8.0 {
+                trackedBarTouches[idx].movedBeyondSlop = true
+            }
+        }
+    }
+
+    internal func recordRawTouchesEnded(_ touches: Set<UITouch>) {
+        let curOffsetX = scrollView.contentOffset.x
+        for t in touches {
+            let id = ObjectIdentifier(t)
+            guard let idx = trackedBarTouches.lastIndex(where: { $0.id == id }) else { continue }
+            let pt = t.location(in: scrollView)
+            let moved = hypot(pt.x - trackedBarTouches[idx].startPointInScroll.x, pt.y - trackedBarTouches[idx].startPointInScroll.y)
+            if moved > 9.0 || abs(curOffsetX - trackedBarTouches[idx].startOffsetX) > 8.0 {
+                trackedBarTouches[idx].movedBeyondSlop = true
+            }
+            trackedBarTouches[idx].endedOrCancelled = true
+        }
+    }
+
+    internal func recordRawTouchesCancelled(_ touches: Set<UITouch>) {
+        for t in touches {
+            let id = ObjectIdentifier(t)
+            guard let idx = trackedBarTouches.lastIndex(where: { $0.id == id }) else { continue }
+            trackedBarTouches[idx].movedBeyondSlop = true
+            trackedBarTouches[idx].endedOrCancelled = true
+            trackedBarTouches[idx].consumed = true
+        }
+    }
+
+    private func shouldRejectControlTouchEvent(_ event: UIEvent?, for sender: UIButton, isTapCommit: Bool) -> Bool {
+        guard let event else {
+            // Synthetic `UIControl.sendActions(for:)` in unit tests passes `event == nil`.
+            return false
+        }
+        let senderTouches = event.touches(for: sender)
+        let relevantTouches: Set<UITouch>
+        if let st = senderTouches, !st.isEmpty {
+            relevantTouches = st
+        } else if let all = event.allTouches, !all.isEmpty {
+            relevantTouches = all
+        } else {
+            relevantTouches = []
+        }
+        for t in relevantTouches {
+            let id = ObjectIdentifier(t)
+            if let entry = trackedBarTouches.last(where: { $0.id == id && ($0.touch == nil || $0.touch === t) }) {
+                if entry.consumed || entry.commitEpochAtBegan != commitEpoch {
+                    return true
+                }
+            }
+            // Hardware `UITouch.timestamp` (`systemUptime`) of any touch replayed by `_UISystemGestureGateGestureRecognizer`
+            // after an earlier commit (e.g. `bgTap` `间隙容差命中候选` at `+0.3ms` on lift) is strictly `<= lastCandidateCommitUptime`.
+            if lastCandidateCommitUptime > 0 && t.timestamp > 0 && t.timestamp <= lastCandidateCommitUptime + 0.002 {
+                return true
+            }
+        }
+        if isTapCommit {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastCandidateCommitUptime <= 0.06 {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Flushes any in-flight non-panning candidate button touch-down before `KeyGridView` processes a subsequent keystroke,
     /// guaranteeing strict chronological ordering during rapid two-thumb rollover (Thumb 1 taps candidate -> Thumb 2 taps next letter)
     /// while never falsely committing during a horizontal candidate-bar scroll!
@@ -1821,19 +2026,57 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
             handleDecelerationBrakeTap(at: brakePt)
             return
         }
-        guard let idx = pendingCandidateIndex,
-              !invalidatedHeldButtons.contains(idx),
-              !didTriggerLongPressDelete,
-              idx >= 0,
-              idx < currentCandidates.count else {
-            return
-        }
-        let scrollDelta = abs(scrollView.contentOffset.x - pendingTouchStartOffsetX)
-        guard !isActivelyDraggingScroll, scrollDelta < 8.0 else {
+        if let idx = pendingCandidateIndex,
+           !invalidatedHeldButtons.contains(idx),
+           !didTriggerLongPressDelete,
+           idx >= 0,
+           idx < currentCandidates.count {
+            let scrollDelta = abs(scrollView.contentOffset.x - pendingTouchStartOffsetX)
+            guard !isActivelyDraggingScroll, scrollDelta < 8.0 else {
+                pendingCandidateIndex = nil
+                return
+            }
+            let candText = currentCandidates[idx].text
+            invalidatedHeldButtons.insert(idx)
+            invalidatedHeldButtons.formUnion(activeDownButtons)
             pendingCandidateIndex = nil
+            rescuableTap = nil
+            scrollView.resetBrakeTouchTracking()
+            haltDecelerationIfNeeded()
+            lastCandidateCommitUptime = ProcessInfo.processInfo.systemUptime
+            LokeyDiagnosticLogger.shared.recordCandidateBarEventFast(
+                isTapCommit: true,
+                event: .autoFlushedCandidate(idx, candText)
+            )
+            dispatchDisplayedCandidate(idx)
             return
         }
-        let candText = currentCandidates[idx].text
+        // Left/right edge rollover protection: if `_UISystemGestureGateGestureRecognizer` is still withholding
+        // `UIControl` `.touchDown` on Candidate #0 (`x <= ~31pt`) when the user's other thumb presses the next letter,
+        // flush the unconsumed stationary touch from the current `commitEpoch` and mark it consumed so the later replay is ignored.
+        guard !didTriggerLongPressDelete, !isActivelyDraggingScroll else { return }
+        var gatedMatchIndex: Int?
+        for i in trackedBarTouches.indices {
+            let entry = trackedBarTouches[i]
+            guard !entry.endedOrCancelled,
+                  !entry.consumed,
+                  !entry.movedBeyondSlop,
+                  entry.commitEpochAtBegan == commitEpoch else { continue }
+            if gatedMatchIndex != nil {
+                return
+            }
+            gatedMatchIndex = i
+        }
+        guard let tIdx = gatedMatchIndex else { return }
+        let entry = trackedBarTouches[tIdx]
+        let idx = entry.initialCandidateIndex
+        guard idx >= 0,
+              idx < currentCandidates.count,
+              currentCandidates[idx].text == entry.initialCandidateTitle,
+              abs(scrollView.contentOffset.x - entry.startOffsetX) < 8.0 else {
+            return
+        }
+        trackedBarTouches[tIdx].consumed = true
         invalidatedHeldButtons.insert(idx)
         invalidatedHeldButtons.formUnion(activeDownButtons)
         pendingCandidateIndex = nil
@@ -1843,7 +2086,7 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         lastCandidateCommitUptime = ProcessInfo.processInfo.systemUptime
         LokeyDiagnosticLogger.shared.recordCandidateBarEventFast(
             isTapCommit: true,
-            event: .autoFlushedCandidate(idx, candText)
+            event: .autoFlushedCandidate(idx, entry.initialCandidateTitle)
         )
         dispatchDisplayedCandidate(idx)
     }
@@ -1882,9 +2125,11 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         arrowDownTime = nil
     }
 
-    @objc private func handleCandidateTouchDown(_ sender: UIButton) {
+    @objc private func handleCandidateTouchDown(_ sender: UIButton, forEvent event: UIEvent?) {
         let idx = sender.tag
-        guard let button = sender as? CandidatePoolButton, currentCandidates.indices.contains(idx) else { return }
+        guard let button = sender as? CandidatePoolButton,
+              currentCandidates.indices.contains(idx),
+              !shouldRejectControlTouchEvent(event, for: sender, isTapCommit: false) else { return }
         pressedCandidateBySlot[button.poolSlot] = idx
         invalidatedHeldButtons.remove(idx)
         let now = ProcessInfo.processInfo.systemUptime
@@ -1906,13 +2151,19 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
         )
     }
 
-    @objc private func handleCandidateButtonTap(_ sender: UIButton) {
+    @objc private func handleCandidateButtonTap(_ sender: UIButton, forEvent event: UIEvent?) {
         defer { onInteractionEnded?() }
         guard let button = sender as? CandidatePoolButton,
               let idx = pressedCandidateBySlot.removeValue(forKey: button.poolSlot) else { return }
         activeDownButtons.remove(idx)
         rescuableTap = nil
         scrollView.resetBrakeTouchTracking()
+        if shouldRejectControlTouchEvent(event, for: sender, isTapCommit: true) {
+            if pendingCandidateIndex == idx {
+                pendingCandidateIndex = nil
+            }
+            return
+        }
         if invalidatedHeldButtons.remove(idx) != nil || sender.tag != idx {
             if pendingCandidateIndex == idx {
                 pendingCandidateIndex = nil
@@ -2052,8 +2303,16 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     }
 
     @objc private func handleScrollBackgroundTap(_ recognizer: UITapGestureRecognizer) {
-        guard recognizer.state == .ended,
-              !composingContainer.isHidden,
+        guard recognizer.state == .ended else { return }
+        processScrollBackgroundGapTap(atScrollPoint: recognizer.location(in: scrollView))
+    }
+
+    internal func simulateBackgroundGapTapForTesting(atScrollPoint ptInScroll: CGPoint) {
+        processScrollBackgroundGapTap(atScrollPoint: ptInScroll)
+    }
+
+    private func processScrollBackgroundGapTap(atScrollPoint ptInScroll: CGPoint) {
+        guard !composingContainer.isHidden,
               activeDownButtons.isEmpty,
               pendingCandidateIndex == nil,
               rescuableTap == nil,
@@ -2061,8 +2320,14 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
               !didTriggerLongPressDelete else {
             return
         }
+        if !trackedBarTouches.isEmpty {
+            let hasEligibleUnconsumedTouch = trackedBarTouches.contains(where: {
+                !$0.consumed && !$0.movedBeyondSlop && $0.commitEpochAtBegan == commitEpoch
+            })
+            guard hasEligibleUnconsumedTouch else { return }
+        }
         selectNearestVisibleCandidate(
-            atScrollPoint: recognizer.location(in: scrollView),
+            atScrollPoint: ptInScroll,
             maxDistance: 22.0,
             logPrefix: "间隙容差命中候选"
         )
@@ -2490,8 +2755,8 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
             btn.titleLabel?.textAlignment = .center
             btn.titleLabel?.lineBreakMode = .byClipping
             btn.isHidden = true
-            btn.addTarget(self, action: #selector(handleTouchDown(_:)), for: .touchDown)
-            btn.addTarget(self, action: #selector(handleTap(_:)), for: .touchUpInside)
+            btn.addTarget(self, action: #selector(handleTouchDown(_:forEvent:)), for: .touchDown)
+            btn.addTarget(self, action: #selector(handleTap(_:forEvent:)), for: .touchUpInside)
             btn.addTarget(self, action: #selector(handleTouchCancel(_:)), for: .touchCancel)
             btn.addTarget(self, action: #selector(handleTouchUpOutside(_:)), for: .touchUpOutside)
 
@@ -3004,7 +3269,13 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         }
     }
 
-    @objc private func handleTouchDown(_ sender: UIButton) {
+    @objc private func handleTouchDown(_ sender: UIButton, forEvent event: UIEvent?) {
+        guard !isHidden else { return }
+        if let event, let touches = event.allTouches, !touches.isEmpty,
+           lastGridCommitUptime > 0,
+           touches.contains(where: { $0.timestamp > 0 && $0.timestamp <= lastGridCommitUptime + 0.002 }) {
+            return
+        }
         let idx = sender.tag
         guard idx >= 0 && idx < visibleCellCount else { return }
         let now = ProcessInfo.processInfo.systemUptime
@@ -3015,9 +3286,10 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         rescuableTap = RescuableGridTap(index: idx, title: gridCandidates[idx].text, startOffsetY: startY, touchDownUptime: now)
     }
 
-    @objc private func handleTap(_ sender: UIButton) {
+    @objc private func handleTap(_ sender: UIButton, forEvent event: UIEvent?) {
         defer { onInteractionEnded?() }
-        guard rescuableTap?.index == sender.tag else {
+        guard !isHidden, rescuableTap?.index == sender.tag else {
+            rescuableTap = nil
             LokeyDiagnosticLogger.shared.recordCandidateBarEventFast(event: .expandedReleaseInvalidated(sender.tag))
             return
         }
@@ -3028,6 +3300,16 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
+        if let event {
+            if let touches = event.allTouches, !touches.isEmpty,
+               lastGridCommitUptime > 0,
+               touches.contains(where: { $0.timestamp > 0 && $0.timestamp <= lastGridCommitUptime + 0.002 }) {
+                return
+            }
+            if now - lastGridCommitUptime <= 0.06 {
+                return
+            }
+        }
         guard now - lastGridBrakeCommitUptime > 0.06 else {
             LokeyDiagnosticLogger.shared.recordCandidateBarEventFast(event: .staticText("展开面板抬手忽略 原因=惯性点选已处理"))
             return
