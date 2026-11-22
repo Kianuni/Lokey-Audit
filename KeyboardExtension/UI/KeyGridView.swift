@@ -1,6 +1,30 @@
 import AudioToolbox
 import UIKit
 
+/// Dedicated transparent control overlay aligned over the `.globe` keycap so UIKit receives genuine
+/// `.allTouchEvents` (`UITouch.view === button`) for both short-tap switching and long-press input-mode picker popups.
+internal final class GlobeSwitchOverlayButton: UIButton {
+    private static let expandedHitInsets = UIEdgeInsets(top: -4.0, left: -3.0, bottom: -10.0, right: -3.0)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = KeyboardTheme.hitTestableClearBacking
+        isExclusiveTouch = false
+        isMultipleTouchEnabled = true
+        accessibilityLabel = "切换输入法"
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard !isHidden, bounds.width > 1.0, bounds.height > 1.0 else { return false }
+        return bounds.inset(by: Self.expandedHitInsets).contains(point)
+    }
+}
+
 /// Renders the 4-row pixel-calibrated iOS 26 keyboard key grid with zero-dead-zone Voronoi hit testing,
 /// rollover multi-touch support, spacebar trackpad cursor control, accelerated backspace, and CoreHaptics feedback.
 final class KeyGridView: UIView, UIInputViewAudioFeedback {
@@ -395,6 +419,9 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private(set) var isCommittingMomentaryNumericSymbol = false
     private weak var momentaryNumericSlideTouch: UITouch?
 
+    internal let globeSwitchButton = GlobeSwitchOverlayButton(type: .custom)
+    private var isGlobeButtonPressed = false
+
     private lazy var selectionFeedback = UISelectionFeedbackGenerator()
 
     override init(frame: CGRect) {
@@ -404,6 +431,15 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         isExclusiveTouch = false
         clipsToBounds = false
         KeycapItemView.prewarmAllSymbols()
+        globeSwitchButton.isHidden = true
+        globeSwitchButton.addTarget(self, action: #selector(handleGlobeTouchDown(_:forEvent:)), for: .touchDown)
+        globeSwitchButton.addTarget(self, action: #selector(handleGlobeTouchDragEnter), for: .touchDragEnter)
+        globeSwitchButton.addTarget(
+            self,
+            action: #selector(handleGlobeTouchRelease),
+            for: [.touchDragExit, .touchUpInside, .touchUpOutside, .touchCancel]
+        )
+        addSubview(globeSwitchButton)
         rebuildKeys()
     }
 
@@ -418,6 +454,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     func resetTransientInteractions() {
         guard !activeTouches.isEmpty
+            || isGlobeButtonPressed
             || isTrackpadActive
             || isMomentaryNumericSlideActive
             || spaceLongPressTimer != nil
@@ -577,6 +614,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             }
         }
         for view in views.dropFirst(slot) { view.removeFromSuperview() }
+        bringSubviewToFront(globeSwitchButton)
 
         if isHidden {
             needsRelayoutWhenUnhidden = true
@@ -594,6 +632,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         } else {
             setNeedsLayout()
         }
+        syncGlobeOverlayFrame()
         // Rollover needs the new hit map within this event. UIKit draws the new labels in its layout pass.
         if isHandlingTouchDown {
             pageNeedsAppearanceRefresh = true
@@ -928,6 +967,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                     }
                 }
             }
+            syncGlobeOverlayFrame()
         }
 
         // Update 3-row alphabetic bounding region & report exact live key centers to SpatialTouchModel!
@@ -996,6 +1036,80 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
+    private func syncGlobeOverlayFrame() {
+        if rowItems.count > 3,
+           let item = rowItems[3].first(where: { $0.role == .globe }),
+           item.frame.width > 1.0,
+           item.frame.height > 1.0 {
+            if globeSwitchButton.frame != item.frame {
+                globeSwitchButton.frame = item.frame
+            }
+            if globeSwitchButton.isHidden {
+                globeSwitchButton.isHidden = false
+            }
+            if subviews.last !== globeSwitchButton {
+                bringSubviewToFront(globeSwitchButton)
+            }
+        } else {
+            if !globeSwitchButton.isHidden {
+                globeSwitchButton.isHidden = true
+            }
+            if globeSwitchButton.frame != .zero {
+                globeSwitchButton.frame = .zero
+            }
+        }
+    }
+
+    @objc private func handleGlobeTouchDown(_ sender: UIButton, forEvent event: UIEvent?) {
+        if let touch = event?.touches(for: sender)?.first {
+            let seq = touchSequence?(touch, event) ?? 0
+            if LokeyDiagnosticLogger.shared.canRecordInteractions {
+                let pt = touch.location(in: self)
+                let col = rowItems.count > 3 ? (rowItems[3].firstIndex(where: { $0.role == .globe }) ?? 1) : 1
+                LokeyDiagnosticLogger.shared.recordKeyHitFast(
+                    touchSeq: seq,
+                    roleToken: .staticLabel("地球键"),
+                    isLetter: false,
+                    isBackspace: false,
+                    row: 3,
+                    col: col,
+                    gridPoint: pt,
+                    borderRemapFrom: nil,
+                    actionStatic: "交由系统切换输入法"
+                )
+            }
+        }
+        isGlobeButtonPressed = true
+        updatePressedKeyStatesDiff()
+        triggerHaptic()
+        playKeySound(for: .globe)
+    }
+
+    @objc private func handleGlobeTouchDragEnter() {
+        guard !isGlobeButtonPressed else { return }
+        isGlobeButtonPressed = true
+        updatePressedKeyStatesDiff()
+    }
+
+    @objc private func handleGlobeTouchRelease() {
+        guard isGlobeButtonPressed else { return }
+        isGlobeButtonPressed = false
+        updatePressedKeyStatesDiff()
+    }
+
+    private func pressedKeyIndices() -> Set<Int> {
+        var nextPressed: Set<Int> = []
+        for s in activeTouches.values {
+            // Letters use the popup exclusively. Their keycaps have no pressed fill.
+            if case .letter = rowItems[s.rowIndex][s.colIndex].role { continue }
+            nextPressed.insert((s.rowIndex << 4) | s.colIndex)
+        }
+        if isGlobeButtonPressed, rowItems.count > 3, let globeCol = rowItems[3].firstIndex(where: { $0.role == .globe }) {
+            nextPressed.insert((3 << 4) | globeCol)
+        }
+        return nextPressed
+    }
+
     private func syncKeyViewFramesIfNeeded() {
         guard needsViewFrameSync else { return }
         needsViewFrameSync = false
@@ -1013,6 +1127,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 }
             }
         }
+        syncGlobeOverlayFrame()
     }
 
     private func flushDeferredAppearancesIfNeeded() {
@@ -1065,12 +1180,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         defer { CATransaction.commit() }
 
         let dark = traitCollection.userInterfaceStyle == .dark
-        var nextPressed: Set<Int> = []
-        for s in activeTouches.values {
-            // Letters use the popup exclusively. Their keycaps have no pressed fill.
-            if case .letter = rowItems[s.rowIndex][s.colIndex].role { continue }
-            nextPressed.insert((s.rowIndex << 4) | s.colIndex)
-        }
+        let nextPressed = pressedKeyIndices()
         currentlyPressedKeys = nextPressed
 
         for (rIdx, row) in rowItems.enumerated() {
@@ -1111,12 +1221,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     /// Updates ONLY the 0..2 keys whose `pressed` state actually changed instead of re-configuring all 29 keys at 120Hz.
     private func updatePressedKeyStatesDiff() {
-        var nextPressed: Set<Int> = []
-        for s in activeTouches.values {
-            // Letters use the popup exclusively. Their keycaps have no pressed fill.
-            if case .letter = rowItems[s.rowIndex][s.colIndex].role { continue }
-            nextPressed.insert((s.rowIndex << 4) | s.colIndex)
-        }
+        let nextPressed = pressedKeyIndices()
         guard nextPressed != currentlyPressedKeys else { return }
 
         CATransaction.begin()
@@ -1876,7 +1981,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             if !pendingLineBreakDeletion { onBackspaceTap?() }
         case .globe:
             if let event {
-                onGlobeEvent?(rowItems[hit.row][hit.col].view, event)
+                onGlobeEvent?(self, event)
             }
         default:
             break
@@ -1907,6 +2012,14 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             }
 
             guard var state = activeTouches[touch] else { continue }
+            if state.initialRole == .globe {
+                state.currentPoint = pt
+                activeTouches[touch] = state
+                if let event {
+                    onGlobeEvent?(self, event)
+                }
+                continue
+            }
             guard state.rowIndex < rowItems.count, state.colIndex < rowItems[state.rowIndex].count else {
                 activeTouches.removeValue(forKey: touch)
                 continue
@@ -2114,18 +2227,18 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         if touches.count == 1, let singleTouch = touches.first {
-            handleSingleTouchEnded(singleTouch)
+            handleSingleTouchEnded(singleTouch, event: event)
         } else if touches.count > 1 {
             let orderedTouches = touches.sorted { $0.timestamp < $1.timestamp }
             for touch in orderedTouches {
-                handleSingleTouchEnded(touch)
+                handleSingleTouchEnded(touch, event: event)
             }
         }
         flushDeferredPageIfNeeded()
         flushDeferredAppearancesIfNeeded()
     }
 
-    private func handleSingleTouchEnded(_ touch: UITouch) {
+    private func handleSingleTouchEnded(_ touch: UITouch, event: UIEvent?) {
         if isTrackpadActive && touch === trackpadTouch {
             endTrackpadMode()
             activeTouches.removeValue(forKey: touch)
@@ -2137,6 +2250,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         // Rollover already retired the older thumb. Its later lift must not
         // redraw the current thumb's bubble or alter its timers.
         guard let state = activeTouches.removeValue(forKey: touch) else { return }
+        if state.initialRole == .globe {
+            updateCalloutAndHighlights()
+            if let event {
+                onGlobeEvent?(self, event)
+            }
+            return
+        }
         let role: KeyRole? = state.rowIndex < rowItems.count && state.colIndex < rowItems[state.rowIndex].count
             ? rowItems[state.rowIndex][state.colIndex].role : nil
         var triggeredSettings = false
@@ -2247,14 +2367,20 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         let now = ProcessInfo.processInfo.systemUptime
         let triggeredSettings = didTriggerSettingsLongPress
         var rescuedCommits: [(Int, Int, CGPoint, UInt64)] = []
+        var hadCancelledGlobeTouch = false
 
         if touches.count == 1, let singleTouch = touches.first {
+            if activeTouches[singleTouch]?.initialRole == .globe { hadCancelledGlobeTouch = true }
             handleSingleTouchCancelled(singleTouch, now: now, triggeredSettings: triggeredSettings, rescuedCommits: &rescuedCommits)
         } else if touches.count > 1 {
             let orderedTouches = touches.sorted { $0.timestamp < $1.timestamp }
             for touch in orderedTouches {
+                if activeTouches[touch]?.initialRole == .globe { hadCancelledGlobeTouch = true }
                 handleSingleTouchCancelled(touch, now: now, triggeredSettings: triggeredSettings, rescuedCommits: &rescuedCommits)
             }
+        }
+        if hadCancelledGlobeTouch, let event {
+            onGlobeEvent?(self, event)
         }
         if activeTouches.isEmpty {
             stopSpaceTimer()
@@ -2554,6 +2680,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         stopSpaceTimer()
         stopBackspaceTimers()
         stopSettingsLongPressTimer()
+        isGlobeButtonPressed = false
         isTrackpadActive = false
         trackpadTouch = nil
         activeTouches.removeAll()

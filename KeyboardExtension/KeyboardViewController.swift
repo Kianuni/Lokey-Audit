@@ -887,6 +887,9 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        if hasAppearedInHost || view.window != nil {
+            syncNeedsGlobeKeyIfConnected()
+        }
         updateKeyboardHeightConstraint(forceHostLayoutNotify: false)
         disableSystemGestureTouchDelays()
         setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
@@ -1018,12 +1021,26 @@ public final class KeyboardViewController: UIInputViewController {
         }, completion: { [weak self] _ in
             guard let self else { return }
             _ = self.syncChildHostScreenSize()
+            if self.hasAppearedInHost || self.view.window != nil {
+                self.syncNeedsGlobeKeyIfConnected()
+            }
             self.updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
             self.candidateBar.setNeedsLayout()
             self.keyGrid.setNeedsLayout()
             self.emojiKeyboard?.setNeedsLayout()
             self.view.layoutIfNeeded()
         })
+    }
+
+    private func syncNeedsGlobeKeyIfConnected() {
+        let liveNeedsGlobe = needsInputModeSwitchKey
+        if !hasSyncedGlobeKey || cachedNeedsGlobeKey != liveNeedsGlobe {
+            cachedNeedsGlobeKey = liveNeedsGlobe
+            hasSyncedGlobeKey = true
+            if keyGrid.needsGlobeKey != liveNeedsGlobe {
+                keyGrid.needsGlobeKey = liveNeedsGlobe
+            }
+        }
     }
 
     public override func viewWillLayoutSubviews() {
@@ -1036,11 +1053,7 @@ public final class KeyboardViewController: UIInputViewController {
         let refWidth = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
         session?.decoder.spatialModel.isLandscapeLayout = (refWidth > 520.0)
         if !hasSyncedGlobeKey && (hasAppearedInHost || customTextDocumentProxyForTesting != nil) {
-            cachedNeedsGlobeKey = needsInputModeSwitchKey
-            hasSyncedGlobeKey = true
-            if keyGrid.needsGlobeKey != cachedNeedsGlobeKey {
-                keyGrid.needsGlobeKey = cachedNeedsGlobeKey
-            }
+            syncNeedsGlobeKeyIfConnected()
         }
     }
 
@@ -1963,6 +1976,11 @@ public final class KeyboardViewController: UIInputViewController {
         keyGrid.onGlobeEvent = { [weak self] sourceView, event in
             self?.handleInputModeList(from: sourceView, with: event)
         }
+        keyGrid.globeSwitchButton.addTarget(
+            self,
+            action: #selector(UIInputViewController.handleInputModeList(from:with:)),
+            for: .allTouchEvents
+        )
 
         // Long-press `123` (0.45s) toggles Chinese-mixed (`拼`) <-> Pure English (`space`)
         keyGrid.onOpenSettings = { [weak self] in
