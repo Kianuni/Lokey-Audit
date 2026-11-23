@@ -807,7 +807,9 @@ public final class KeyboardViewController: UIInputViewController {
         keyGrid.globeSwitchButton.removeTarget(self, action: nil, for: .allEvents)
         candidateRefreshWorkItem?.cancel()
         contextReconcileWorkItem?.cancel()
+        documentEditDelivery?.cancel()
         markedTextCoalescer.cancel()
+        session?.prepareForDeallocation()
         for tok in ipcTokens {
             NotificationCenter.default.removeObserver(tok)
         }
@@ -1702,10 +1704,24 @@ public final class KeyboardViewController: UIInputViewController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.pendingGlobeSwitchDeparture = false
-            self?.session?.resetTopicMemory()
-            self?.session?.notifyContextBreak()
-            self?.session?.purgeTransientCaches(releaseCapacity: false)
+            guard let self else { return }
+            self.pendingGlobeSwitchDeparture = false
+            self.session?.resetTopicMemory()
+            self.session?.notifyContextBreak()
+            self.session?.purgeTransientCaches(releaseCapacity: true)
+            SharedLexiconHolder.purgeTransientCaches(releaseCapacity: true)
+            self.calloutBubble.clearCachedPathStateIfHidden()
+            if !self.isCandidateGridExpanded && !self.expandedGrid.hasActiveInteraction {
+                self.expandedGrid.releasePoolIfHidden()
+            }
+            if !self.candidateBar.hasActiveTouch && self.session?.isComposing != true {
+                self.candidateBar.trimUnusedPoolIfIdle()
+            }
+            if !self.isEmojiKeyboardActive, let emoji = self.emojiKeyboard {
+                emoji.cancelActiveInteractions()
+                emoji.removeFromSuperview()
+                self.emojiKeyboard = nil
+            }
             LokeyDiagnosticLogger.shared.flushAsync()
             LokeySelectionFeedbackLogger.shared.flushAsync()
         }

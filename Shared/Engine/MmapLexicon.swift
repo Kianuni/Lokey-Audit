@@ -3351,11 +3351,15 @@ public final class MmapLexicon: @unchecked Sendable {
 
     @inline(__always)
     private func readPoolString(_ raw: UnsafeRawBufferPointer, offset: Int, length: Int) -> String? {
-        guard offset >= 0,
+        guard let base = raw.baseAddress,
+              stringPoolOffset >= 0,
+              stringPoolOffset <= raw.count,
+              stringPoolSize >= 0,
+              stringPoolSize <= raw.count - stringPoolOffset,
+              offset >= 0,
               length > 0,
               offset <= stringPoolSize,
-              length <= stringPoolSize - offset,
-              let base = raw.baseAddress else { return nil }
+              length <= stringPoolSize - offset else { return nil }
         let buf = UnsafeBufferPointer(
             start: base.advanced(by: stringPoolOffset + offset).assumingMemoryBound(to: UInt8.self),
             count: length
@@ -3366,6 +3370,10 @@ public final class MmapLexicon: @unchecked Sendable {
     @inline(__always)
     private func comparePoolBytes(_ raw: UnsafeRawBufferPointer, offset: Int, length: Int, against rhs: UnsafeBufferPointer<UInt8>) -> Int {
         guard let base = raw.baseAddress,
+              stringPoolOffset >= 0,
+              stringPoolOffset <= raw.count,
+              stringPoolSize >= 0,
+              stringPoolSize <= raw.count - stringPoolOffset,
               offset >= 0,
               length >= 0,
               offset <= stringPoolSize,
@@ -3384,6 +3392,10 @@ public final class MmapLexicon: @unchecked Sendable {
     @inline(__always)
     private func hasPoolPrefix(_ raw: UnsafeRawBufferPointer, offset: Int, length: Int, prefix: UnsafeBufferPointer<UInt8>) -> Bool {
         guard let base = raw.baseAddress,
+              stringPoolOffset >= 0,
+              stringPoolOffset <= raw.count,
+              stringPoolSize >= 0,
+              stringPoolSize <= raw.count - stringPoolOffset,
               offset >= 0,
               length >= prefix.count,
               offset <= stringPoolSize,
@@ -3541,6 +3553,7 @@ public enum LokeyLexiconPackManager {
     public static let maxPackBytes = 512 * 1024 * 1024
     public static let activePackFileName = "active_pack.json"
     public static let activeDefaultsKey = "com.kianuni.lokey.activeLexiconPack.v1"
+    private static let previewStagePrefix = "lokeypack-preview-"
 
     public struct ValidatedPackSummary: Sendable, Equatable {
         public let wordCount: Int
@@ -3551,6 +3564,32 @@ public enum LokeyLexiconPackManager {
         public let sha256: String
         public let lnlmWordCount: Int
         public let lnlmCharCount: Int
+        public let inspectedPath: String?
+        public let modificationTime: TimeInterval?
+
+        public init(
+            wordCount: Int,
+            syllableCount: Int,
+            englishCount: Int,
+            associationCount: Int,
+            fileSizeBytes: Int64,
+            sha256: String,
+            lnlmWordCount: Int,
+            lnlmCharCount: Int,
+            inspectedPath: String? = nil,
+            modificationTime: TimeInterval? = nil
+        ) {
+            self.wordCount = wordCount
+            self.syllableCount = syllableCount
+            self.englishCount = englishCount
+            self.associationCount = associationCount
+            self.fileSizeBytes = fileSizeBytes
+            self.sha256 = sha256
+            self.lnlmWordCount = lnlmWordCount
+            self.lnlmCharCount = lnlmCharCount
+            self.inspectedPath = inspectedPath
+            self.modificationTime = modificationTime
+        }
     }
 
     public enum ActiveSignature: Equatable, Sendable {
@@ -3908,7 +3947,33 @@ public enum LokeyLexiconPackManager {
             if scoped { sourceURL.stopAccessingSecurityScopedResource() }
         }
         let mapped = try mapFileWithCoordination(at: sourceURL)
-        return try validatePack(nsData: mapped, expectedSHA256: expectedSHA256, computeHash: true)
+        let validated = try validatePack(nsData: mapped, expectedSHA256: expectedSHA256, computeHash: true)
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.modificationDate] as? Date)?.timeIntervalSince1970
+        return ValidatedPackSummary(
+            wordCount: validated.wordCount,
+            syllableCount: validated.syllableCount,
+            englishCount: validated.englishCount,
+            associationCount: validated.associationCount,
+            fileSizeBytes: validated.fileSizeBytes,
+            sha256: validated.sha256,
+            lnlmWordCount: validated.lnlmWordCount,
+            lnlmCharCount: validated.lnlmCharCount,
+            inspectedPath: sourceURL.standardizedFileURL.path,
+            modificationTime: mtime
+        )
+    }
+
+    private static func stripPreviewStagePrefixIfPresent(_ name: String) -> String {
+        guard name.hasPrefix(previewStagePrefix) else { return name }
+        let afterPrefix = name.dropFirst(previewStagePrefix.count)
+        guard afterPrefix.count > 37 else { return name }
+        let uuidEnd = afterPrefix.index(afterPrefix.startIndex, offsetBy: 36)
+        guard afterPrefix[uuidEnd] == "-",
+              UUID(uuidString: String(afterPrefix[..<uuidEnd])) != nil else {
+            return name
+        }
+        let stripped = String(afterPrefix[afterPrefix.index(after: uuidEnd)...])
+        return stripped.isEmpty ? name : stripped
     }
 
     public static func sanitizedPackFileName(from rawName: String) -> String {
@@ -3920,7 +3985,8 @@ public enum LokeyLexiconPackManager {
         if rawLast.isEmpty || rawLast == "." || rawLast == ".." {
             return "external.lokeypack"
         }
-        let base = URL(fileURLWithPath: rawLast).lastPathComponent
+        let unprefixed = stripPreviewStagePrefixIfPresent(URL(fileURLWithPath: rawLast).lastPathComponent)
+        let base = unprefixed
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "..", with: "_")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3934,10 +4000,11 @@ public enum LokeyLexiconPackManager {
     }
 
     public static func displayPackName(fromFileName fileName: String) -> String {
-        if fileName.lowercased().hasSuffix(".lokeypack") {
-            return String(fileName.dropLast(".lokeypack".count))
+        let canonical = stripPreviewStagePrefixIfPresent(fileName)
+        if canonical.lowercased().hasSuffix(".lokeypack") {
+            return String(canonical.dropLast(".lokeypack".count))
         }
-        return fileName
+        return canonical
     }
 
     private static func resolveLexiconsDirectory(_ overrideDir: URL?) -> URL {
@@ -3955,6 +4022,7 @@ public enum LokeyLexiconPackManager {
     @discardableResult
     public static func installPack(
         from sourceURL: URL,
+        preferredFileName: String? = nil,
         packName: String? = nil,
         sourceLabel: String = "用户导入 (.lokeypack)",
         expectedSHA256: String? = nil,
@@ -3980,23 +4048,37 @@ public enum LokeyLexiconPackManager {
             }
         }
 
+        let fm = FileManager.default
         let mapped = try mapFileWithCoordination(at: sourceURL)
+        let currentMTime = (try? fm.attributesOfItem(atPath: sourceURL.path)[.modificationDate] as? Date)?.timeIntervalSince1970
         let summary: ValidatedPackSummary
         if let pre = prevalidatedSummary,
            !pre.sha256.isEmpty,
-           pre.fileSizeBytes == Int64(mapped.length) {
+           pre.fileSizeBytes == Int64(mapped.length),
+           (pre.inspectedPath == nil || pre.inspectedPath == sourceURL.standardizedFileURL.path),
+           (pre.modificationTime == nil || currentMTime == pre.modificationTime) {
             if let exp = effectiveExpected, !exp.isEmpty, exp.lowercased() != pre.sha256.lowercased() {
                 throw LokeyLexiconPackError.sha256Mismatch(expected: exp.lowercased(), actual: pre.sha256.lowercased())
             }
-            _ = try validatePack(nsData: mapped, computeHash: false, validateRecords: false)
-            summary = pre
+            let headerSummary = try validatePack(nsData: mapped, computeHash: false, validateRecords: false)
+            if headerSummary.wordCount == pre.wordCount
+                && headerSummary.syllableCount == pre.syllableCount
+                && headerSummary.englishCount == pre.englishCount
+                && headerSummary.associationCount == pre.associationCount
+                && headerSummary.lnlmWordCount == pre.lnlmWordCount
+                && headerSummary.lnlmCharCount == pre.lnlmCharCount {
+                summary = pre
+            } else {
+                summary = try validatePack(nsData: mapped, expectedSHA256: effectiveExpected, computeHash: true)
+            }
         } else {
             summary = try validatePack(nsData: mapped, expectedSHA256: effectiveExpected, computeHash: true)
         }
 
-        let fm = FileManager.default
         let targetDir = resolveLexiconsDirectory(lexiconsDirectory)
-        let fileName = sanitizedPackFileName(from: sourceURL.lastPathComponent)
+        let rawTargetName = (preferredFileName?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? sourceURL.lastPathComponent
+        let fileName = sanitizedPackFileName(from: rawTargetName)
         let destPackURL = targetDir.appendingPathComponent(fileName)
         let destMetaURL = targetDir.appendingPathComponent(fileName + ".json")
         let stagingPackURL = targetDir.appendingPathComponent(".staging-\(UUID().uuidString)-\(fileName)")

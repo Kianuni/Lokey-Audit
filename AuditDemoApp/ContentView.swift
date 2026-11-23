@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
+    private static let statusRefreshQueue = DispatchQueue(label: "com.kianuni.lokey.audit.statusRefresh", qos: .utility)
+
     @Environment(\.scenePhase) private var scenePhase
     @State private var sandboxText: String = ""
     @State private var isKeyboardEnabled: Bool = false
@@ -16,7 +18,7 @@ struct ContentView: View {
     @FocusState private var isSandboxFocused: Bool
 
     private let appVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
-    private let buildVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "87"
+    private let buildVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "88"
 
     var body: some View {
         NavigationStack {
@@ -151,9 +153,9 @@ struct ContentView: View {
                     .padding(.vertical, 2)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("示范词库开放许可致谢")
+                        Text("第三方开源许可声明")
                             .font(.subheadline.weight(.semibold))
-                        Text("• rime/rime-pinyin-simp（Apache-2.0）\n• BYVoid/OpenCC（Apache-2.0）\n• Unicode Unihan & CLDR（Unicode-3.0）")
+                        Text("示范词库、简繁转换与字符映射资源的第三方开源许可证文本详见仓库 LICENSES/ 目录。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -168,7 +170,7 @@ struct ContentView: View {
                     }
                     .padding(.vertical, 2)
                 } header: {
-                    Text("隐私承诺（100% 物理零联网）与开源致谢")
+                    Text("隐私承诺（100% 物理零联网）与许可声明")
                 }
             }
             .navigationTitle("Lokey Audit")
@@ -192,17 +194,19 @@ struct ContentView: View {
     }
 
     private func refreshStatus() {
-        let status = LokeyAppGroup.inspectBridgeStatus()
-        let hasActiveChineseInputMode = UITextInputMode.activeInputModes.contains { mode in
-            guard let lang = mode.primaryLanguage?.lowercased() else { return false }
-            return lang.hasPrefix("zh")
+        Self.statusRefreshQueue.async {
+            let status = LokeyAppGroup.inspectBridgeStatus()
+            let marker = LokeyAppGroup.hasExtensionActivationMarker()
+            DispatchQueue.main.async {
+                let hasActiveChineseInputMode = UITextInputMode.activeInputModes.contains { mode in
+                    guard let lang = mode.primaryLanguage?.lowercased() else { return false }
+                    return lang.hasPrefix("zh")
+                }
+                let hasActivationMarker = marker || status.extensionHeartbeat != nil
+                bridgeStatus = status
+                isKeyboardEnabled = hasActiveChineseInputMode && hasActivationMarker
+                hasLoadedStatus = true
+            }
         }
-        let hasActivationMarker =
-            LokeyAppGroup.hasExtensionActivationMarker()
-            || status.extensionHeartbeat != nil
-
-        bridgeStatus = status
-        isKeyboardEnabled = hasActiveChineseInputMode && hasActivationMarker
-        hasLoadedStatus = true
     }
 }

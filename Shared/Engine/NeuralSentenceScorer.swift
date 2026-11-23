@@ -2554,7 +2554,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     }
 
     @inline(__always)
-    private static func compareArbitraryPoolBytes(
+    internal static func compareArbitraryPoolBytes(
         _ raw: UnsafeRawBufferPointer,
         poolOffset: Int,
         poolSize: Int,
@@ -2563,7 +2563,14 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         against rhs: UnsafeBufferPointer<UInt8>
     ) -> Int {
         guard let base = raw.baseAddress,
-              offset >= 0 && length > 0 && offset <= poolSize && length <= poolSize - offset else { return -1 }
+              poolOffset >= 0,
+              poolOffset <= raw.count,
+              poolSize >= 0,
+              poolSize <= raw.count - poolOffset,
+              offset >= 0,
+              length > 0,
+              offset <= poolSize,
+              length <= poolSize - offset else { return -1 }
         let ptr = base.advanced(by: poolOffset + offset).assumingMemoryBound(to: UInt8.self)
         let n = min(length, rhs.count)
         for i in 0..<n {

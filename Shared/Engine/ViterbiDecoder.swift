@@ -5096,6 +5096,11 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                                 }
                                             }
                                             if endPos < n {
+                                                let transUserPrefix = start == 0
+                                                    && checkUserPhrases
+                                                    && state.initialCount == 0
+                                                    && !state.hasSoftClipped
+                                                    && userSnapshot.hasStrictSyllablePrefix(pairSyls.joined(separator: " "))
                                                 nextFrontier.append(
                                                     WalkState(
                                                         pos: endPos,
@@ -5103,7 +5108,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                                         syllables: pairSyls,
                                                         penaltyQ8: crossPen,
                                                         initialCount: 0,
-                                                        subtreeScore: lexicon.maxSubtreeScore(at: n2)
+                                                        subtreeScore: lexicon.maxSubtreeScore(at: n2),
+                                                        userPrefixMatched: transUserPrefix
                                                     )
                                                 )
                                             }
@@ -5242,14 +5248,19 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                         for sid1 in rimeSIDs {
                                             guard let n1 = lexicon.step(from: lexicon.rootNodeIndex, syllableID: sid1) else { continue }
                                             if validNextSIDs.contains(where: { lexicon.step(from: n1, syllableID: $0) != nil }) {
+                                                let initSyl = lexicon.idToSyllable[Int(sid1)]
+                                                let initUserPrefix = start == 0
+                                                    && checkUserPhrases
+                                                    && userSnapshot.hasStrictSyllablePrefix(initSyl)
                                                 nextFrontier.append(
                                                     WalkState(
                                                         pos: rimeEnd,
                                                         trieNode: n1,
-                                                        syllables: [lexicon.idToSyllable[Int(sid1)]],
+                                                        syllables: [initSyl],
                                                         penaltyQ8: dropInitPen,
                                                         initialCount: 0,
-                                                        subtreeScore: lexicon.maxSubtreeScore(at: n1)
+                                                        subtreeScore: lexicon.maxSubtreeScore(at: n1),
+                                                        userPrefixMatched: initUserPrefix
                                                     )
                                                 )
                                             }
@@ -5349,10 +5360,14 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                 nextNode = stepped
                             } else if state.userPrefixMatched
                                 && state.initialCount == 0
+                                && !state.hasSoftClipped
                                 && !arc.isSoftClipped
                                 && !arc.isPrefixCompletion
-                                && (newPen <= 85 || (start == 0 && arc.end == n))
+                                && (newPen <= 85 || start == 0)
                                 && userSnapshot.hasSyllablePrefix(state.syllables.isEmpty ? arc.canonical : getNewSyls().joined(separator: " ")) {
+                                if newPen > 85 {
+                                    deps.maxSpanEnd = max(deps.maxSpanEnd, arc.end)
+                                }
                                 nextNode = virtualUserTrieNode
                             } else {
                                 continue
@@ -5542,33 +5557,38 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                 }
                                 // O(1) RAM user phrase lookup (zero SQLite I/O, skipped completely when user phrase table is empty).
                                 // Mid-sentence spans require exact/fuzzy match (`recordPen <= 85`) and `>= 2` chars so single-char or
-                                // noisy soft-phonetic arcs (`chi -> ci`) never hijack coherent multi-word sentences.
+                                // noisy soft-phonetic arcs (`chi -> ci`) never hijack coherent multi-word sentences, while full-utterance
+                                // (`start == 0 && arc.end == n`) allows blind-typing repairs symmetrically across any syllable position.
                                 if checkUserPhrases
                                     && !state.syllables.isEmpty
-                                    && state.initialCount == 0
-                                    && (state.userPrefixMatched || (start == 0 && arc.end == n && (recordPen > 85 || combinedSoftClip || arc.isPrefixCompletion)))
-                                    && (recordPen <= 85 || (start == 0 && arc.end == n)) {
-                                    let sylsForUser = getNewSyls()
-                                    let exactUserHits = userSnapshot.exactSyllablePhrases(compactPinyin: sylsForUser.joined())
-                                    if !exactUserHits.isEmpty {
-                                        for up in exactUserHits where up.surface.count >= 2 {
-                                            guard let score = up.embeddedScore(
-                                                syllables: sylsForUser,
-                                                dictionary: nextNode == virtualUserTrieNode ? [] : lexicon.words(at: nextNode, limit: 24)
-                                            ) else { continue }
-                                            recordSpan(
-                                                WordSpan(
-                                                    start: start,
-                                                    end: arc.end,
-                                                    text: up.surface,
+                                    && state.userPrefixMatched
+                                    && state.initialCount == 0 {
+                                    if recordPen > 85 && start == 0 {
+                                        deps.maxSpanEnd = max(deps.maxSpanEnd, arc.end)
+                                    }
+                                    if recordPen <= 85 || (start == 0 && arc.end == n) {
+                                        let sylsForUser = getNewSyls()
+                                        let exactUserHits = userSnapshot.exactSyllablePhrases(compactPinyin: sylsForUser.joined())
+                                        if !exactUserHits.isEmpty {
+                                            for up in exactUserHits where up.surface.count >= 2 {
+                                                guard let score = up.embeddedScore(
                                                     syllables: sylsForUser,
-                                                    scoreQ8: score - recordPen,
-                                                    penaltyQ8: recordPen,
-                                                    isUserPhrase: true,
-                                                    hasKeySubstitution: combinedHasKeySub,
-                                                    keySubstitutionCount: combinedKeySubCount
+                                                    dictionary: nextNode == virtualUserTrieNode ? [] : lexicon.words(at: nextNode, limit: 24)
+                                                ) else { continue }
+                                                recordSpan(
+                                                    WordSpan(
+                                                        start: start,
+                                                        end: arc.end,
+                                                        text: up.surface,
+                                                        syllables: sylsForUser,
+                                                        scoreQ8: score - recordPen,
+                                                        penaltyQ8: recordPen,
+                                                        isUserPhrase: true,
+                                                        hasKeySubstitution: combinedHasKeySub,
+                                                        keySubstitutionCount: combinedKeySubCount
+                                                    )
                                                 )
-                                            )
+                                            }
                                         }
                                     }
                                 }
@@ -5918,6 +5938,11 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                                 }
                                                 if end2 < n && depth < 3 {
                                                     let syls = edgeDropSyls ?? (getNewSyls() + [edge.canonical])
+                                                    let dropUserPrefix = start == 0
+                                                        && checkUserPhrases
+                                                        && state.initialCount == 0
+                                                        && !combinedSoftClip
+                                                        && userSnapshot.hasStrictSyllablePrefix(syls.joined(separator: " "))
                                                     nextFrontier.append(
                                                         WalkState(
                                                             pos: end2,
@@ -5928,7 +5953,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                                             subtreeScore: edge.subtreeScore,
                                                             hasKeySubstitution: combinedHasKeySub,
                                                             keySubstitutionCount: combinedKeySubCount,
-                                                            hasSoftClipped: combinedSoftClip
+                                                            hasSoftClipped: combinedSoftClip,
+                                                            userPrefixMatched: dropUserPrefix
                                                         )
                                                     )
                                                 }
@@ -5943,7 +5969,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                 && state.initialCount == 0
                                 && !combinedSoftClip
                                 && !arc.isPrefixCompletion
-                                && spanPen <= 85
+                                && (spanPen <= 85 || start == 0)
                                 && userSnapshot.hasStrictSyllablePrefix(state.syllables.isEmpty ? arc.canonical : getNewSyls().joined(separator: " "))
                             if arc.end < n && (nextNode != virtualUserTrieNode || nextUserPrefixMatched) {
                                 if depth < 7 {
@@ -6174,6 +6200,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         let aExact = (a.penaltyQ8 == 0 && a.initialCount == 0)
                         let bExact = (b.penaltyQ8 == 0 && b.initialCount == 0)
                         if aExact != bExact { return aExact && !bExact }
+                        if a.userPrefixMatched != b.userPrefixMatched { return a.userPrefixMatched && !b.userPrefixMatched }
                         let sa = a.subtreeScore - a.penaltyQ8
                         let sb = b.subtreeScore - b.penaltyQ8
                         if sa != sb { return sa > sb }

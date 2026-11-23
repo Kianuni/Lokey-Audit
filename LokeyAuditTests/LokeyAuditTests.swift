@@ -248,7 +248,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(hostBundle.bundleIdentifier, "com.kianuni.lokey.audit")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "87")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "88")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool, false)
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool, false)
         XCTAssertNil(hostBundle.object(forInfoDictionaryKey: "CFBundleDocumentTypes"))
@@ -259,7 +259,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(extBundle.bundleIdentifier, "com.kianuni.lokey.audit.keyboard")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "87")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "88")
 
         XCTAssertEqual(Bundle(for: LokeyAuditTests.self).bundleIdentifier, "com.kianuni.lokey.audit.tests")
 
@@ -585,7 +585,33 @@ final class LokeyAuditTests: XCTestCase {
             XCTAssertEqual(OpenCCConverter.loadU32(raw, at: 7), 0)
             XCTAssertEqual(NeuralSentenceScorer.loadU32(raw, at: 6), 0xA0908070)
             XCTAssertEqual(NeuralSentenceScorer.loadU32(raw, at: 7), 0)
+            sampleBytes.withUnsafeBufferPointer { rhs in
+                XCTAssertEqual(NeuralSentenceScorer.compareArbitraryPoolBytes(raw, poolOffset: -1, poolSize: 4, offset: 0, length: 2, against: rhs), -1)
+                XCTAssertEqual(NeuralSentenceScorer.compareArbitraryPoolBytes(raw, poolOffset: 8, poolSize: 4, offset: 0, length: 2, against: rhs), -1)
+                XCTAssertEqual(NeuralSentenceScorer.compareArbitraryPoolBytes(raw, poolOffset: 0, poolSize: 10, offset: 0, length: 10, against: rhs), 0)
+            }
         }
+        XCTAssertEqual(
+            LokeyLexiconPackManager.sanitizedPackFileName(from: "lokeypack-preview-12345678-1234-1234-1234-123456789abc-rime-frost.lokeypack"),
+            "rime-frost.lokeypack"
+        )
+        XCTAssertEqual(
+            LokeyLexiconPackManager.displayPackName(fromFileName: "lokeypack-preview-12345678-1234-1234-1234-123456789abc-rime-frost.lokeypack"),
+            "rime-frost"
+        )
+
+        let env = try makeIsolatedSession()
+        defer {
+            env.store.close()
+            try? FileManager.default.removeItem(at: env.tempDir)
+        }
+        _ = env.store.importCustomPhrases(
+            [UserLexiconStore.ImportedPhraseSeed(surface: "怎噶", syllables: ["zen", "ga"], useCount: 5)],
+            conflictPolicy: .mergeHigherWeight
+        )
+        var corrSettings = LokeySettings()
+        corrSettings.enableSpatialCorrection = true
+        XCTAssertTrue(env.decoder.decode("zwnga", settings: corrSettings).candidates.prefix(5).contains(where: { $0.text == "怎噶" }))
 
         // Verify `CandidateBarView.trimUnusedPoolIfIdle()` shrinks expanded pool while idle candidates remain visible
         let bar = CandidateBarView(frame: CGRect(x: 0, y: 0, width: 1200, height: 44))
