@@ -223,6 +223,11 @@ public final class ViterbiDecoder: @unchecked Sendable {
     private var cachedHasApostrophe: Bool = false
     private var cachedIsPureEnglishCompound: Bool = false
     private var cachedWasUrgentCommit: Bool = false
+    private var dpCountsByEndScratch: [Int] = []
+    private var dpExactCountsByEndScratch: [Int] = []
+    private var dpCleanSingleSylBestByEndScratch: [Int] = []
+    private var dpBestEffScoreByEndScratch: [Int] = []
+    private var dpCloseHomophoneScratch: [Bool] = []
 
     private struct CachedDecodeHistoryEntry {
         let samples: [TouchSample]
@@ -306,6 +311,13 @@ public final class ViterbiDecoder: @unchecked Sendable {
         cachedDPTopicMemory = .zero
         cachedDPBeamK = 0
         recentDecodeHistory.removeAll(keepingCapacity: !releaseCapacity)
+        if releaseCapacity {
+            dpCountsByEndScratch.removeAll(keepingCapacity: false)
+            dpExactCountsByEndScratch.removeAll(keepingCapacity: false)
+            dpCleanSingleSylBestByEndScratch.removeAll(keepingCapacity: false)
+            dpBestEffScoreByEndScratch.removeAll(keepingCapacity: false)
+            dpCloseHomophoneScratch.removeAll(keepingCapacity: false)
+        }
     }
 
     public func setSupplementaryEntries(_ entries: [(shortcut: String, phrase: String)]) {
@@ -6480,10 +6492,13 @@ public final class ViterbiDecoder: @unchecked Sendable {
 
         let trailingTwoHorizAdjacent = (n >= 3) && spatialModel.areKeysHorizontallyAdjacentASCII(lowerASCII[n - 1], lowerASCII[n - 2])
         let trailingM = (n >= 3) && lowerASCII[n - 1] == 0x6D /* 'm' */
-        var countsByEndScratch = [Int](repeating: 0, count: n + 1)
-        var exactCountsByEndScratch = [Int](repeating: 0, count: n + 1)
-        var cleanSingleSylBestScoreByEnd = [Int](repeating: Int.min, count: n + 1)
-        var bestEffScoreByEnd = [Int](repeating: Int.min, count: n + 1)
+        let scratchCount = n + 1
+        if dpCountsByEndScratch.count < scratchCount {
+            dpCountsByEndScratch = [Int](repeating: 0, count: scratchCount)
+            dpExactCountsByEndScratch = [Int](repeating: 0, count: scratchCount)
+            dpCleanSingleSylBestByEndScratch = [Int](repeating: Int.min, count: scratchCount)
+            dpBestEffScoreByEndScratch = [Int](repeating: Int.min, count: scratchCount)
+        }
 
         for i in firstStart..<n {
             if ((fastCleanSentenceOnly && (i & 1) == 0) || (i & 3) == 0) && isCancelled() {
@@ -6501,16 +6516,16 @@ public final class ViterbiDecoder: @unchecked Sendable {
             let candidateSpans: [WordSpan]
             if i == firstStart {
                 for endIdx in i...n {
-                    countsByEndScratch[endIdx] = 0
-                    exactCountsByEndScratch[endIdx] = 0
+                    dpCountsByEndScratch[endIdx] = 0
+                    dpExactCountsByEndScratch[endIdx] = 0
                 }
                 candidateSpans = rawSpans.filter { sp in
-                    let c = countsByEndScratch[sp.end]
-                    let ec = exactCountsByEndScratch[sp.end]
+                    let c = dpCountsByEndScratch[sp.end]
+                    let ec = dpExactCountsByEndScratch[sp.end]
                     if c < perEndCap0 || (sp.penaltyQ8 == 0 && ec < 4) {
-                        countsByEndScratch[sp.end] = c + 1
+                        dpCountsByEndScratch[sp.end] = c + 1
                         if sp.penaltyQ8 == 0 {
-                            exactCountsByEndScratch[sp.end] = ec + 1
+                            dpExactCountsByEndScratch[sp.end] = ec + 1
                         }
                         return true
                     }
@@ -6523,16 +6538,16 @@ public final class ViterbiDecoder: @unchecked Sendable {
             if spans.isEmpty { continue }
 
             for endIdx in i...n {
-                cleanSingleSylBestScoreByEnd[endIdx] = Int.min
-                bestEffScoreByEnd[endIdx] = Int.min
+                dpCleanSingleSylBestByEndScratch[endIdx] = Int.min
+                dpBestEffScoreByEndScratch[endIdx] = Int.min
             }
             for sp in spans {
                 let eff = sp.scoreQ8
-                if eff > bestEffScoreByEnd[sp.end] {
-                    bestEffScoreByEnd[sp.end] = eff
+                if eff > dpBestEffScoreByEndScratch[sp.end] {
+                    dpBestEffScoreByEndScratch[sp.end] = eff
                 }
-                if sp.penaltyQ8 == 0 && sp.syllables.count == 1 && sp.scoreQ8 > cleanSingleSylBestScoreByEnd[sp.end] {
-                    cleanSingleSylBestScoreByEnd[sp.end] = sp.scoreQ8
+                if sp.penaltyQ8 == 0 && sp.syllables.count == 1 && sp.scoreQ8 > dpCleanSingleSylBestByEndScratch[sp.end] {
+                    dpCleanSingleSylBestByEndScratch[sp.end] = sp.scoreQ8
                 }
             }
 
@@ -6550,8 +6565,15 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 let flags: UInt32
                 let hasCloseHomophoneCompetition: Bool
             }
-            var hasCloseHomophone = [Bool](repeating: false, count: spans.count)
-            if n >= 6 && spans.count >= 2 {
+            let checkCloseHomophone = n >= 6 && spans.count >= 2
+            if checkCloseHomophone {
+                if dpCloseHomophoneScratch.count < spans.count {
+                    dpCloseHomophoneScratch = [Bool](repeating: false, count: spans.count)
+                } else {
+                    for k in 0..<spans.count {
+                        dpCloseHomophoneScratch[k] = false
+                    }
+                }
                 var groupStart = 0
                 while groupStart < spans.count {
                     let gEnd = spans[groupStart].end
@@ -6570,8 +6592,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                     && sb.syllables.count == sa.syllables.count
                                     && sb.text != sa.text
                                     && sb.syllables == sa.syllables {
-                                    hasCloseHomophone[a] = true
-                                    hasCloseHomophone[b] = true
+                                    dpCloseHomophoneScratch[a] = true
+                                    dpCloseHomophoneScratch[b] = true
                                 }
                             }
                         }
@@ -6582,14 +6604,14 @@ public final class ViterbiDecoder: @unchecked Sendable {
             var spanMetas: [SpanMeta] = []
             spanMetas.reserveCapacity(spans.count)
             for (spIdx, sp) in spans.enumerated() {
-                let closeHomophone = hasCloseHomophone[spIdx]
+                let closeHomophone = checkCloseHomophone ? dpCloseHomophoneScratch[spIdx] : false
                 let trait = wordTrait(for: sp.text)
                 let uCount = trait.utf8Count
                 let oneCh = sp.isEnglishSpan ? false : trait.isOneChar
                 let cleanSingle = sp.syllables.count == 1
                     && !sp.isEnglishSpan
                     && sp.penaltyQ8 >= 240
-                    && cleanSingleSylBestScoreByEnd[sp.end] >= -2550
+                    && dpCleanSingleSylBestByEndScratch[sp.end] >= -2550
                 let hijackPen = cleanSingle ? (sp.penaltyQ8 >= 420 ? 240 : 120) : 0
                 let aeo: Bool
                 if !sp.isEnglishSpan, let b0 = sp.syllables.first?.utf8.first {
@@ -6618,7 +6640,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     }
                     maxExtra = cap
                 }
-                let bestAtEnd = bestEffScoreByEnd[sp.end]
+                let bestAtEnd = dpBestEffScoreByEndScratch[sp.end]
                 spanMetas.append(
                     SpanMeta(
                         utf8Count: uCount,

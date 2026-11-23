@@ -902,11 +902,28 @@ public final class LokeySessionController {
             displayToCanonicalSurface.removeAll(keepingCapacity: !releaseCapacity)
         }
         if let worker = candidateWorker {
-            worker.queue.addOperation {
+            worker.queue.addOperation { [weak worker] in
+                guard let worker else { return }
                 worker.decoder.purgeTransientCaches(releaseCapacity: releaseCapacity)
                 worker.refiner.purgeTransientCaches(releaseCapacity: releaseCapacity)
             }
         }
+    }
+
+    /// Cancels background worker operations and releases transient caches immediately without retaining worker closures.
+    public func prepareForDeallocation() {
+        pendingDecode?.cancel()
+        pendingDecode = nil
+        _commitRefiner = nil
+        if let worker = candidateWorker {
+            _ = worker.advanceGeneration()
+            worker.queue.cancelAllOperations()
+            candidateWorker = nil
+        }
+        completedPrefixSnapshots.removeAll(keepingCapacity: false)
+        displayToCanonicalSurface.removeAll(keepingCapacity: false)
+        decoder.purgeTransientCaches(releaseCapacity: true)
+        decoder.lexicon.purgeTransientCaches(releaseCapacity: true)
     }
 
     // MARK: - Internal Helpers

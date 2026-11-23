@@ -243,7 +243,7 @@ enum KeyboardTheme {
     /// - Max/Plus/Pro portrait (`>= 390pt`): `44.0pt` (`8.0pt` top breathing + `32.5pt` pill + `3.5pt` bottom breathing)
     /// - Mini/SE portrait (`< 390pt`): `41.0pt` (`5.5pt` top breathing + `32.0pt` pill + `3.5pt` bottom breathing)
     /// - Landscape (`> 520pt`): `36.0pt`
-    /// - iPhone Duo unfolded portrait (`669x951`): `50.0pt`; unfolded book/landscape (`951x669`): `48.0pt`
+    /// - Foldable unfolded portrait (`669x951`): `50.0pt`; unfolded book/landscape (`951x669`): `48.0pt`
     static let candidateBarHeight: CGFloat = 44.0
     static let compactCandidateBarHeight: CGFloat = 41.0
     static let duoUnfoldedPortraitCandidateBarHeight: CGFloat = 50.0
@@ -273,7 +273,7 @@ enum KeyboardTheme {
     static let standardLandscapeKeyboardHeight: CGFloat = 197.5
     static let duoUnfoldedPortraitKeyboardHeight: CGFloat = 300.0
     static let duoUnfoldedLandscapeKeyboardHeight: CGFloat = 265.0
-    /// Screen-adaptive Emoji keyboard heights (`290.0pt` Max/Plus, `276.0pt` Pro/Standard, `266.0pt` Mini/SE, `216.0pt` landscape, Duo unfolded `308.0pt` / `274.0pt`).
+    /// Screen-adaptive Emoji keyboard heights (`290.0pt` Max/Plus, `276.0pt` Pro/Standard, `266.0pt` Mini/SE, `216.0pt` landscape, foldable unfolded `308.0pt` / `274.0pt`).
     static let emojiPortraitKeyboardHeight: CGFloat = 290.0
     static let emojiCompactPortraitKeyboardHeight: CGFloat = 276.0
     static let emojiMiniPortraitKeyboardHeight: CGFloat = 266.0
@@ -304,7 +304,7 @@ enum KeyboardTheme {
         }
     }
 
-    /// Screen-adaptive `CandidateBarView` height (`50.0pt` Duo unfolded portrait, `48.0pt` Duo unfolded book, `44.0pt` >=390pt, `41.0pt` <390pt, `36.0pt` landscape; optional `hostTopPadding` clamped >= 31.0pt).
+    /// Screen-adaptive `CandidateBarView` height (`50.0pt` foldable unfolded portrait, `48.0pt` foldable unfolded book, `44.0pt` >=390pt, `41.0pt` <390pt, `36.0pt` landscape; optional `hostTopPadding` clamped >= 31.0pt).
     static func portraitCandidateBarHeight(
         forWidth width: CGFloat = 440.0,
         hostTopPadding: CGFloat = 0.0,

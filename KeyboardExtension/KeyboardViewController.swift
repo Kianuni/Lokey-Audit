@@ -210,6 +210,19 @@ private enum SharedLexiconHolder {
         return resolved
     }
 
+    static func matchesActiveLexicon(
+        objectID: ObjectIdentifier?,
+        lexiconsDirectory: URL? = nil,
+        defaults: UserDefaults? = nil
+    ) -> Bool {
+        guard let objectID else { return false }
+        let sig = LokeyLexiconPackManager.currentActiveSignature(in: lexiconsDirectory, defaults: defaults)
+        lexiconLock.lock()
+        let matches = (cachedSignature == sig) && (cachedLexicon.map(ObjectIdentifier.init) == objectID)
+        lexiconLock.unlock()
+        return matches
+    }
+
     static func purgeTransientCaches(releaseCapacity: Bool) {
         lexiconLock.lock()
         let current = cachedLexicon
@@ -1731,6 +1744,13 @@ public final class KeyboardViewController: UIInputViewController {
         pendingBaseLexiconReloadDefaults = nil
         let currentID = activeLexiconObjectID
         Self.extensionStateIOQueue.async { [weak self] in
+            if SharedLexiconHolder.matchesActiveLexicon(
+                objectID: currentID,
+                lexiconsDirectory: lexiconsDirectory,
+                defaults: defaults
+            ) {
+                return
+            }
             guard let newLexicon = SharedLexiconHolder.currentLexicon(
                 lexiconsDirectory: lexiconsDirectory,
                 defaults: defaults
@@ -1749,7 +1769,7 @@ public final class KeyboardViewController: UIInputViewController {
                     return
                 }
                 self.session?.resetTopicMemory()
-                self.session?.purgeTransientCaches(releaseCapacity: true)
+                self.session?.prepareForDeallocation()
                 self.session = nil
                 let latestSettings = self.setupEngine(lexiconOverride: newLexicon)
                 self.applyPreferences(latestSettings ?? LokeySettings.load())

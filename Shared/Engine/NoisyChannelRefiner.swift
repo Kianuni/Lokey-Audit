@@ -715,7 +715,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         var incumbentTotal = referenceTotal
         var rawIncumbentTotal = referenceTotal
         var classical: (candidate: LokeyCandidate, total: Int, rawTotal: Int, cost: Int)?
-        var surfaces: [String: (candidate: LokeyCandidate, score: Int, cost: Int)] = [:]
+        var surfaces: [String: (candidate: LokeyCandidate, score: Int, cost: Int, usesFar: Bool)] = [:]
         let allowedSylSlack = (cleanReferenceScore == nil || (lntrActive && isFracturedVowelIslandLiteral)) ? 1 : 0
         var typoFeatCache: [String: [Float]] = [:]
 
@@ -742,25 +742,27 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             ? typoFeatures(for: reference, readingBytes: decoderPinyin, cost: decoderCost)
             : []
 
-        func collect(_ c: LokeyCandidate, score: Int, cost: Int) {
+        func collect(_ c: LokeyCandidate, score: Int, cost: Int, usesFar: Bool) {
             guard inspectSpelling, c.kind == .sentence || c.kind == .lexiconPhrase,
                   c.matchedSyllables.allSatisfy({ lexicon.syllableToID[$0] != nil }),
                   c.matchedSyllables.count >= reference.matchedSyllables.count - allowedSylSlack,
                   score > (surfaces[c.text]?.score ?? Int.min) else { return }
-            surfaces[c.text] = (c, score, cost)
+            surfaces[c.text] = (c, score, cost, usesFar)
         }
 
         if inspectSpelling {
             for c in base.candidates.prefix(8) where c.consumedInputCount == n {
                 let reading = Array(c.matchedSyllables.joined().utf8)
-                collect(c, score: c.scoreQ8, cost: alignmentCostFast(typed: typed, intended: reading, hypsCount: hyps.count))
+                let align = alignmentCostAndFarFlag(typed: typed, intended: reading, hypsCount: hyps.count)
+                collect(c, score: c.scoreQ8, cost: align.cost, usesFar: align.usesFar)
             }
         }
         let confirmedPrimary = renderedReference?.text == top.text && decoderCost >= costs.transposition
         for (index, item) in ranked.enumerated() {
             guard let reading = renderedByRank[index] else { continue }
             let alt = item.key.toBytes()
-            let cost = alignmentCostFast(typed: typed, intended: alt, hypsCount: hyps.count)
+            let align = alignmentCostAndFarFlag(typed: typed, intended: alt, hypsCount: hyps.count)
+            let cost = align.cost
             let spelling = String(decoding: alt, as: UTF8.self)
             if let first = reading.candidates.first, index < costs.verifyCount,
                item.value.total > classicalFloor,
@@ -807,7 +809,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                     continue
                 }
                 for c in reading.candidates.prefix(6) where c.consumedInputCount == alt.count && c.matchedSyllables.joined() == spelling {
-                    collect(c, score: c.scoreQ8 - cost, cost: cost)
+                    collect(c, score: c.scoreQ8 - cost, cost: cost, usesFar: align.usesFar)
                 }
             }
         }
@@ -845,7 +847,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             let incTypoFeat: [Float] = lntrActive
                 ? typoFeatures(for: incumbent, readingBytes: incReadingBytes, cost: cost)
                 : []
-            var alternatives: [(candidate: LokeyCandidate, gain: Int, cost: Int, boundaryGain: Int)] = []
+            var alternatives: [(candidate: LokeyCandidate, gain: Int, cost: Int, boundaryGain: Int, usesFar: Bool)] = []
             for (text, other) in surfaces where text != incumbent.text {
                 if other.score <= score - 5200 { continue }
                 guard let ll = lexicon.spellingLikelihood(text) else { continue }
@@ -880,11 +882,12 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                     lntrDelta = 0
                 }
                 let gain = other.score - score + clampedDelta + min(1800, max(-1800, boundaryDelta)) + lntrDelta
-                if gain > -1200 { alternatives.append((other.candidate, gain, other.cost, evidence - boundary)) }
+                if gain > -1200 { alternatives.append((other.candidate, gain, other.cost, evidence - boundary, other.usesFar)) }
             }
             alternatives.sort { $0.gain != $1.gain ? $0.gain > $1.gain : $0.candidate.text < $1.candidate.text }
             trace?("incumbent \(incumbent.text) cost \(cost) prior \(prior) boundary \(boundary) candidates " +
                 alternatives.prefix(12).map { "\($0.candidate.text):\($0.gain)/\($0.cost)/\($0.candidate.trailingWord ?? "-")" }.joined(separator: " "))
+            var cachedIncUsesFar: Bool?
             for (altIdx, first) in alternatives.prefix(2).enumerated() {
                 if altIdx == 1 {
                     guard out.isEmpty,
@@ -901,10 +904,20 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                 // When a second edit would alter a different part of the sentence,
                 // require independent word-boundary support (or overwhelming >= 1800 gain
                 // with strictly adjacent edits) before displacing #0.
-                let firstReading = Array(first.candidate.matchedSyllables.joined().utf8)
-                let incReading = Array(incumbent.matchedSyllables.joined().utf8)
-                let introducesFarSub = alignmentUsesFarSubstitution(typed: typed, intended: firstReading, hypsCount: hyps.count)
-                    && !alignmentUsesFarSubstitution(typed: typed, intended: incReading, hypsCount: hyps.count)
+                let introducesFarSub: Bool
+                if first.usesFar {
+                    let incFar: Bool
+                    if let existing = cachedIncUsesFar {
+                        incFar = existing
+                    } else {
+                        let computed = alignmentCostAndFarFlag(typed: typed, intended: incReadingBytes, hypsCount: hyps.count).usesFar
+                        cachedIncUsesFar = computed
+                        incFar = computed
+                    }
+                    introducesFarSub = !incFar
+                } else {
+                    introducesFarSub = false
+                }
                 let extraEdit = first.cost >= cost + costs.transposition
                 let supportedBoundary = first.boundaryGain > costs.acceptMargin
                 let strongAdjacentGain = !introducesFarSub && first.gain >= 1380
@@ -1714,11 +1727,6 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
     @inline(__always)
     private func alignmentCostFast(typed: [UInt8], intended: [UInt8], hypsCount: Int) -> Int {
         alignmentCostAndFarFlag(typed: typed, intended: intended, hypsCount: hypsCount).cost
-    }
-
-    @inline(__always)
-    private func alignmentUsesFarSubstitution(typed: [UInt8], intended: [UInt8], hypsCount: Int) -> Bool {
-        alignmentCostAndFarFlag(typed: typed, intended: intended, hypsCount: hypsCount).usesFar
     }
 
     /// Weighted Damerau-Levenshtein cost of producing `typed` when the user meant `intended`.

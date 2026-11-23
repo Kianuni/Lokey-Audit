@@ -192,6 +192,10 @@ public final class MmapLexicon: @unchecked Sendable {
 
     public convenience init(contentsOf url: URL) throws {
         let mapped = try NSData(contentsOf: url, options: [.mappedIfSafe])
+        try self.init(mappedData: mapped, sourceURL: url)
+    }
+
+    fileprivate convenience init(mappedData mapped: NSData, sourceURL url: URL) throws {
         let dir = url.deletingLastPathComponent()
         let isPackFile = url.pathExtension.lowercased() == "lokeypack"
         let siblingEmojiURL = dir.appendingPathComponent("lokey_emoji.bin")
@@ -332,16 +336,26 @@ public final class MmapLexicon: @unchecked Sendable {
         self.stringPoolOffset = headerVals.15
         self.assocCount = headerVals.16
         self.assocOffset = headerVals.17
-        guard version != 2 || raw.count >= 72,
+        let minSectionOffset = (version >= 2) ? 72 : 64
+        func inSectionBounds(_ offset: Int, count: Int, stride: Int, allowEmptyZero: Bool) -> Bool {
+            if count == 0 && allowEmptyZero {
+                return offset >= 0 && offset <= raw.count
+            }
+            guard count >= 0, stride > 0, offset >= minSectionOffset, offset <= raw.count else {
+                return false
+            }
+            return count <= (raw.count - offset) / stride
+        }
+        guard raw.count >= minSectionOffset,
               syllableCount > 0, syllableCount <= Int(UInt16.max), nodeCount > 0,
-              syllableOffset + (syllableCount + 1) * 16 <= raw.count,
-              nodeOffset + nodeCount * 16 <= raw.count,
-              edgeOffset + edgeCount * 8 <= raw.count,
-              wordOffset + wordCount * 8 <= raw.count,
-              jianpinOffset + jianpinCount * 16 <= raw.count,
-              englishOffset + englishCount * 16 <= raw.count,
-              (assocCount == 0 || assocOffset + assocCount * 16 <= raw.count),
-              stringPoolOffset + stringPoolSize <= raw.count else {
+              inSectionBounds(syllableOffset, count: syllableCount + 1, stride: 16, allowEmptyZero: false),
+              inSectionBounds(nodeOffset, count: nodeCount, stride: 16, allowEmptyZero: false),
+              inSectionBounds(edgeOffset, count: edgeCount, stride: 8, allowEmptyZero: true),
+              inSectionBounds(wordOffset, count: wordCount, stride: 8, allowEmptyZero: true),
+              inSectionBounds(jianpinOffset, count: jianpinCount, stride: 16, allowEmptyZero: true),
+              inSectionBounds(englishOffset, count: englishCount, stride: 16, allowEmptyZero: true),
+              inSectionBounds(assocOffset, count: assocCount, stride: 16, allowEmptyZero: true),
+              inSectionBounds(stringPoolOffset, count: stringPoolSize, stride: 1, allowEmptyZero: true) else {
             throw LexiconError.outOfBoundsSection
         }
 
@@ -1061,8 +1075,6 @@ public final class MmapLexicon: @unchecked Sendable {
                 self._prewarmPageChecksum = sink
                 self._isMappedMemoryWarm = true
                 os_unfair_lock_unlock(&self.prewarmLock)
-
-                self.ensureSpokenDrop2Index()
 
                 if let base = self.rawBuffer.baseAddress, self.rawBuffer.count > 0 {
                     let count = self.rawBuffer.count
@@ -2500,14 +2512,6 @@ public final class MmapLexicon: @unchecked Sendable {
         spokenDrop2ByLength[length] = recs
     }
 
-    private func ensureSpokenDrop2Index() {
-        for length in 4..<spokenRecordsByLength.count {
-            os_unfair_lock_lock(&spokenDrop2Lock)
-            buildSpokenDrop2IndexLocked(forLength: length)
-            os_unfair_lock_unlock(&spokenDrop2Lock)
-        }
-    }
-
     /// Visits spoken readings of `length` whose `reading[2..<length]` equals `typed[0..<(length - 2)]` (lossless O(log N) `(0, 1)` drop coverage).
     func visitSpokenDrop2Suffix(
         length: Int,
@@ -3392,22 +3396,26 @@ public final class MmapLexicon: @unchecked Sendable {
 
     @inline(__always)
     private static func loadU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
-        UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+        return UInt16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
     private static func loadI16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Int16 {
-        Int16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: Int16.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+        return Int16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: Int16.self))
     }
 
     @inline(__always)
     private static func loadU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
-        UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 4 <= UInt(bitPattern: raw.count) else { return 0 }
+        return UInt32(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 
     @inline(__always)
     private static func loadU64BE(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt64 {
-        UInt64(bigEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 8 <= UInt(bitPattern: raw.count) else { return 0 }
+        return UInt64(bigEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
     }
 }
 
@@ -3535,12 +3543,14 @@ public enum LokeyLexiconPackManager {
 
     @inline(__always)
     private static func readU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
-        UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+        return UInt16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
     private static func readU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
-        UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 4 <= UInt(bitPattern: raw.count) else { return 0 }
+        return UInt32(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 
     public static func computeSHA256(raw: UnsafeRawBufferPointer) -> String {
@@ -4060,6 +4070,32 @@ public enum LokeyLexiconPackManager {
         return nil
     }
 
+    private static func metadataForValidatedPack(
+        fileName: String,
+        packURL: URL,
+        in dir: URL,
+        summary: ValidatedPackSummary
+    ) -> LokeyLexiconPackMetadata {
+        let metaURL = dir.appendingPathComponent(fileName + ".json")
+        if let metaData = try? Data(contentsOf: metaURL),
+           let meta = try? JSONDecoder().decode(LokeyLexiconPackMetadata.self, from: metaData) {
+            return meta
+        }
+        let sz = ((try? FileManager.default.attributesOfItem(atPath: packURL.path))?[.size] as? NSNumber)?.int64Value ?? summary.fileSizeBytes
+        return LokeyLexiconPackMetadata(
+            packId: fileName,
+            packName: displayPackName(fromFileName: fileName),
+            fileName: fileName,
+            wordCount: summary.wordCount,
+            syllableCount: summary.syllableCount,
+            englishCount: summary.englishCount,
+            associationCount: summary.associationCount,
+            fileSizeBytes: sz,
+            source: "外部词库包 (.lokeypack)",
+            sha256: ""
+        )
+    }
+
     public static func activePackMetadata(
         in lexiconsDirectory: URL? = nil,
         defaults: UserDefaults? = nil
@@ -4073,24 +4109,7 @@ public enum LokeyLexiconPackManager {
               let summary = try? validatePack(nsData: mapped, computeHash: false, validateRecords: false) else {
             return nil
         }
-        let metaURL = dir.appendingPathComponent(fileName + ".json")
-        if let metaData = try? Data(contentsOf: metaURL),
-           let meta = try? JSONDecoder().decode(LokeyLexiconPackMetadata.self, from: metaData) {
-            return meta
-        }
-        let sz = ((try? fm.attributesOfItem(atPath: packURL.path))?[.size] as? NSNumber)?.int64Value ?? summary.fileSizeBytes
-        return LokeyLexiconPackMetadata(
-            packId: fileName,
-            packName: displayPackName(fromFileName: fileName),
-            fileName: fileName,
-            wordCount: summary.wordCount,
-            syllableCount: summary.syllableCount,
-            englishCount: summary.englishCount,
-            associationCount: summary.associationCount,
-            fileSizeBytes: sz,
-            source: "外部词库包 (.lokeypack)",
-            sha256: ""
-        )
+        return metadataForValidatedPack(fileName: fileName, packURL: packURL, in: dir, summary: summary)
     }
 
     public static func activatePack(
@@ -4208,9 +4227,9 @@ public enum LokeyLexiconPackManager {
             let packURL = dir.appendingPathComponent(fileName)
             if FileManager.default.isReadableFile(atPath: packURL.path),
                let mapped = try? NSData(contentsOf: packURL, options: [.mappedIfSafe]),
-               (try? validatePack(nsData: mapped, computeHash: false, validateRecords: false)) != nil,
-               let externalLexicon = try? MmapLexicon(contentsOf: packURL) {
-                let meta = activePackMetadata(in: lexiconsDirectory, defaults: defaults)
+               let summary = try? validatePack(nsData: mapped, computeHash: false, validateRecords: false),
+               let externalLexicon = try? MmapLexicon(mappedData: mapped, sourceURL: packURL) {
+                let meta = metadataForValidatedPack(fileName: fileName, packURL: packURL, in: dir, summary: summary)
                 return (externalLexicon, meta, false)
             }
             didFallback = true

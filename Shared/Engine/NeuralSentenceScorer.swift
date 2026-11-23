@@ -2236,14 +2236,16 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             guard cols.count >= 32, let p = cols.baseAddress else { return }
             @inline(__always)
             func accum(_ vec: SIMD8<Float>, base: Int) {
-                let c0 = p[base];     r0.addProduct(vec[0], c0.v0); r1.addProduct(vec[0], c0.v1); r2.addProduct(vec[0], c0.v2); r3.addProduct(vec[0], c0.v3)
-                let c1 = p[base + 1]; r0.addProduct(vec[1], c1.v0); r1.addProduct(vec[1], c1.v1); r2.addProduct(vec[1], c1.v2); r3.addProduct(vec[1], c1.v3)
-                let c2 = p[base + 2]; r0.addProduct(vec[2], c2.v0); r1.addProduct(vec[2], c2.v1); r2.addProduct(vec[2], c2.v2); r3.addProduct(vec[2], c2.v3)
-                let c3 = p[base + 3]; r0.addProduct(vec[3], c3.v0); r1.addProduct(vec[3], c3.v1); r2.addProduct(vec[3], c3.v2); r3.addProduct(vec[3], c3.v3)
-                let c4 = p[base + 4]; r0.addProduct(vec[4], c4.v0); r1.addProduct(vec[4], c4.v1); r2.addProduct(vec[4], c4.v2); r3.addProduct(vec[4], c4.v3)
-                let c5 = p[base + 5]; r0.addProduct(vec[5], c5.v0); r1.addProduct(vec[5], c5.v1); r2.addProduct(vec[5], c5.v2); r3.addProduct(vec[5], c5.v3)
-                let c6 = p[base + 6]; r0.addProduct(vec[6], c6.v0); r1.addProduct(vec[6], c6.v1); r2.addProduct(vec[6], c6.v2); r3.addProduct(vec[6], c6.v3)
-                let c7 = p[base + 7]; r0.addProduct(vec[7], c7.v0); r1.addProduct(vec[7], c7.v1); r2.addProduct(vec[7], c7.v2); r3.addProduct(vec[7], c7.v3)
+                let s0 = vec[0], s1 = vec[1], s2 = vec[2], s3 = vec[3]
+                let s4 = vec[4], s5 = vec[5], s6 = vec[6], s7 = vec[7]
+                let c0 = p[base];     r0.addProduct(s0, c0.v0); r1.addProduct(s0, c0.v1); r2.addProduct(s0, c0.v2); r3.addProduct(s0, c0.v3)
+                let c1 = p[base + 1]; r0.addProduct(s1, c1.v0); r1.addProduct(s1, c1.v1); r2.addProduct(s1, c1.v2); r3.addProduct(s1, c1.v3)
+                let c2 = p[base + 2]; r0.addProduct(s2, c2.v0); r1.addProduct(s2, c2.v1); r2.addProduct(s2, c2.v2); r3.addProduct(s2, c2.v3)
+                let c3 = p[base + 3]; r0.addProduct(s3, c3.v0); r1.addProduct(s3, c3.v1); r2.addProduct(s3, c3.v2); r3.addProduct(s3, c3.v3)
+                let c4 = p[base + 4]; r0.addProduct(s4, c4.v0); r1.addProduct(s4, c4.v1); r2.addProduct(s4, c4.v2); r3.addProduct(s4, c4.v3)
+                let c5 = p[base + 5]; r0.addProduct(s5, c5.v0); r1.addProduct(s5, c5.v1); r2.addProduct(s5, c5.v2); r3.addProduct(s5, c5.v3)
+                let c6 = p[base + 6]; r0.addProduct(s6, c6.v0); r1.addProduct(s6, c6.v1); r2.addProduct(s6, c6.v2); r3.addProduct(s6, c6.v3)
+                let c7 = p[base + 7]; r0.addProduct(s7, c7.v0); r1.addProduct(s7, c7.v1); r2.addProduct(s7, c7.v2); r3.addProduct(s7, c7.v3)
             }
             accum(x.v0, base: 0)
             accum(x.v1, base: 8)
@@ -2404,14 +2406,14 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     @inline(__always)
     private static func loadU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
-        guard offset >= 0, offset <= raw.count - 2 else { return 0 }
-        return UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+        return UInt16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
     private static func loadU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
-        guard offset >= 0, offset <= raw.count - 4 else { return 0 }
-        return UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 4 <= UInt(bitPattern: raw.count) else { return 0 }
+        return UInt32(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 
     @inline(__always)

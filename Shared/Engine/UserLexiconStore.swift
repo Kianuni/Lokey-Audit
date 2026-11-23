@@ -235,8 +235,40 @@ public final class UserLexiconStore: @unchecked Sendable {
 
         @inline(__always)
         public func exactSyllablePhrases(compactPinyin: String) -> [UserPhrase] {
-            guard hasAnyExactPhrases, !compactPinyin.isEmpty else { return [] }
-            return exactCache[compactPinyin] ?? []
+            guard hasAnyExactPhrases, !compactPinyin.isEmpty,
+                  let bucket = exactCache[compactPinyin] else { return [] }
+            return bucket.count <= 4 ? bucket : Array(bucket.prefix(4))
+        }
+
+        @inline(__always)
+        private static func normalizeShuangpinJQXVAlias(_ cleanLower: String) -> String? {
+            var q = cleanLower
+            return q.withUTF8 { utf8 -> String? in
+                let count = utf8.count
+                guard count >= 2, count.isMultiple(of: 2) else { return nil }
+                var hasAlias = false
+                var idx = 0
+                while idx < count {
+                    let b0 = utf8[idx]
+                    let b1 = utf8[idx &+ 1]
+                    if b1 == 0x76 && (b0 == 0x6A || b0 == 0x71 || b0 == 0x78 || b0 == 0x79) {
+                        hasAlias = true
+                        break
+                    }
+                    idx &+= 2
+                }
+                guard hasAlias else { return nil }
+                var copy = Array(utf8)
+                idx = 0
+                while idx < count {
+                    let b0 = copy[idx]
+                    if copy[idx &+ 1] == 0x76 && (b0 == 0x6A || b0 == 0x71 || b0 == 0x78 || b0 == 0x79) {
+                        copy[idx &+ 1] = 0x75
+                    }
+                    idx &+= 2
+                }
+                return String(decoding: copy, as: UTF8.self)
+            }
         }
 
         /// Lock-free O(1) lookup for full-buffer exact, Jianpin, and Shuangpin user phrases.
@@ -245,7 +277,7 @@ public final class UserLexiconStore: @unchecked Sendable {
             scheme: PinyinScheme,
             limit: Int = 6
         ) -> [UserPhrase] {
-            guard hasAnyExactPhrases, !cleanLower.isEmpty else { return [] }
+            guard hasAnyExactPhrases, !cleanLower.isEmpty, limit > 0 else { return [] }
             var out: [UserPhrase] = []
             var seen = Set<String>()
 
@@ -254,19 +286,30 @@ public final class UserLexiconStore: @unchecked Sendable {
                     out.append(p)
                 }
             }
-            if scheme == .quanpin, cleanLower.count >= 2, let jpHits = jianpinCache[cleanLower] {
-                for p in jpHits where seen.insert(p.id).inserted {
-                    out.append(p)
+            if scheme == .quanpin {
+                if cleanLower.count >= 2, let jpHits = jianpinCache[cleanLower] {
+                    for p in jpHits where seen.insert(p.id).inserted {
+                        out.append(p)
+                    }
+                }
+            } else {
+                if let spHits = shuangpinCache[cleanLower] {
+                    for p in spHits where seen.insert(p.id).inserted {
+                        out.append(p)
+                    }
+                }
+                if let normalized = Self.normalizeShuangpinJQXVAlias(cleanLower),
+                   let aliasHits = shuangpinCache[normalized] {
+                    for p in aliasHits where seen.insert(p.id).inserted {
+                        out.append(p)
+                    }
                 }
             }
-            out.sort { $0.dynamicBoostQ8 > $1.dynamicBoostQ8 }
+            if out.count > 1 {
+                out.sort { $0.dynamicBoostQ8 > $1.dynamicBoostQ8 }
+            }
             if out.count > limit {
                 out.removeSubrange(limit..<out.count)
-            }
-            if scheme != .quanpin, let spHits = shuangpinCache[cleanLower] {
-                for p in spHits where seen.insert(p.id).inserted {
-                    out.append(p)
-                }
             }
             return out
         }
@@ -345,13 +388,29 @@ public final class UserLexiconStore: @unchecked Sendable {
         }
     }
 
+    private static let maxPhraseBucketCount = 8
+
+    @inline(__always)
+    private static func insertRankedPhrase(_ phrase: UserPhrase, into bucket: inout [UserPhrase]) {
+        if bucket.count >= maxPhraseBucketCount,
+           let worst = bucket.last,
+           phrase.dynamicBoostQ8 <= worst.dynamicBoostQ8 {
+            return
+        }
+        let insIdx = bucket.firstIndex(where: { phrase.dynamicBoostQ8 > $0.dynamicBoostQ8 }) ?? bucket.endIndex
+        bucket.insert(phrase, at: insIdx)
+        if bucket.count > maxPhraseBucketCount {
+            bucket.removeLast()
+        }
+    }
+
     private func buildShuangpinPhraseIndexLocked(for scheme: PinyinScheme) -> [String: [UserPhrase]] {
         guard scheme != .quanpin, !orderedPhrasesCache.isEmpty else { return [:] }
         if scheme == .xiaohe, let existing = cachedXiaohePhrases { return existing }
         if scheme == .ziranma, let existing = cachedZiranmaPhrases { return existing }
 
         var built: [String: [UserPhrase]] = [:]
-        for up in orderedPhrasesCache.prefix(256) {
+        for up in orderedPhrasesCache {
             let syls = up.pinyinNormalized.split(separator: " ")
             guard !syls.isEmpty else { continue }
             var encoded = ""
@@ -368,7 +427,7 @@ public final class UserLexiconStore: @unchecked Sendable {
                 encoded.append(spCode)
             }
             if valid, !encoded.isEmpty {
-                built[encoded, default: []].append(up)
+                Self.insertRankedPhrase(up, into: &built[encoded, default: []])
             }
         }
         if scheme == .xiaohe {
@@ -828,11 +887,9 @@ public final class UserLexiconStore: @unchecked Sendable {
         jianpinCache.removeAll(keepingCapacity: true)
         _hasAnyExactPhrases = !orderedPhrasesCache.isEmpty
         for phrase in orderedPhrasesCache {
-            if exactCache[phrase.compactPinyin, default: []].count < 4 {
-                exactCache[phrase.compactPinyin, default: []].append(phrase)
-            }
-            if phrase.jianpin.count >= 2 && jianpinCache[phrase.jianpin, default: []].count < 4 {
-                jianpinCache[phrase.jianpin, default: []].append(phrase)
+            Self.insertRankedPhrase(phrase, into: &exactCache[phrase.compactPinyin, default: []])
+            if phrase.jianpin.count >= 2 {
+                Self.insertRankedPhrase(phrase, into: &jianpinCache[phrase.jianpin, default: []])
             }
         }
         let prefixes = Self.buildSyllablePrefixSets(from: orderedPhrasesCache)
@@ -913,11 +970,9 @@ public final class UserLexiconStore: @unchecked Sendable {
                     )
                     nextOrdered.append(phrase)
                     nextHasExact = true
-                    if nextExact[compact, default: []].count < 4 {
-                        nextExact[compact, default: []].append(phrase)
-                    }
-                    if jp.count >= 2 && nextJianpin[jp, default: []].count < 4 {
-                        nextJianpin[jp, default: []].append(phrase)
+                    Self.insertRankedPhrase(phrase, into: &nextExact[compact, default: []])
+                    if jp.count >= 2 {
+                        Self.insertRankedPhrase(phrase, into: &nextJianpin[jp, default: []])
                     }
                 }
                 sqlite3_finalize(stmt)
@@ -1162,18 +1217,16 @@ public final class UserLexiconStore: @unchecked Sendable {
         } else {
             _hasAnyExactPhrases = !orderedPhrasesCache.isEmpty
             var exactBucket: [UserPhrase] = []
-            exactBucket.reserveCapacity(4)
+            exactBucket.reserveCapacity(Self.maxPhraseBucketCount)
             for item in orderedPhrasesCache where item.compactPinyin == compact {
-                exactBucket.append(item)
-                if exactBucket.count == 4 { break }
+                Self.insertRankedPhrase(item, into: &exactBucket)
             }
             exactCache[compact] = exactBucket
             if jianpin.count >= 2 {
                 var jpBucket: [UserPhrase] = []
-                jpBucket.reserveCapacity(4)
+                jpBucket.reserveCapacity(Self.maxPhraseBucketCount)
                 for item in orderedPhrasesCache where item.jianpin == jianpin {
-                    jpBucket.append(item)
-                    if jpBucket.count == 4 { break }
+                    Self.insertRankedPhrase(item, into: &jpBucket)
                 }
                 jianpinCache[jianpin] = jpBucket
             }
@@ -1350,9 +1403,10 @@ public final class UserLexiconStore: @unchecked Sendable {
     public func exactSyllablePhrases(compactPinyin: String) -> [UserPhrase] {
         guard !compactPinyin.isEmpty else { return [] }
         lock.lock()
-        let res = _hasAnyExactPhrases ? (exactCache[compactPinyin] ?? []) : []
+        let bucket = _hasAnyExactPhrases ? exactCache[compactPinyin] : nil
         lock.unlock()
-        return res
+        guard let bucket else { return [] }
+        return bucket.count <= 4 ? bucket : Array(bucket.prefix(4))
     }
 
     /// Lists learned/custom phrases in O(1) from write-through memory cache.
