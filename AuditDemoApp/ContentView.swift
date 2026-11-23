@@ -16,7 +16,7 @@ struct ContentView: View {
     @FocusState private var isSandboxFocused: Bool
 
     private let appVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
-    private let buildVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "86"
+    private let buildVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "87"
 
     var body: some View {
         NavigationStack {

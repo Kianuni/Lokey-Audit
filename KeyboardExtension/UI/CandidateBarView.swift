@@ -1732,15 +1732,64 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     }
 
     func trimUnusedPoolIfIdle() {
-        guard !hasActiveTouch, currentCandidates.isEmpty, buttonPool.count > Self.initialPoolSize else { return }
-        for slot in Self.initialPoolSize..<buttonPool.count {
+        guard !hasActiveTouch, !isScrollPanActive, pressedCandidateBySlot.isEmpty else { return }
+        let keepCount = max(Self.initialPoolSize, currentCandidates.isEmpty ? 0 : (renderedWindowRange.count + 2))
+        guard buttonPool.count > keepCount else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        for slot in buttonPool.indices {
+            let c = slotBoundCand[slot]
+            if c >= 0 && (currentCandidates.isEmpty || !renderedWindowRange.contains(c)) {
+                unbindPoolSlot(slot)
+            }
+        }
+
+        if !currentCandidates.isEmpty {
+            let vMetrics = syncVerticalMetricsIfNeeded()
+            let dark = traitCollection.userInterfaceStyle == .dark
+            let primaryText = KeyboardTheme.dynamicPrimaryText
+            let highlightText: UIColor = dark ? .white : .black
+            var lowCursor = 0
+            for highSlot in keepCount..<buttonPool.count {
+                let candIdx = slotBoundCand[highSlot]
+                guard candIdx >= 0 else { continue }
+                while lowCursor < keepCount && slotBoundCand[lowCursor] >= 0 {
+                    lowCursor += 1
+                }
+                guard lowCursor < keepCount else { return }
+                unbindPoolSlot(highSlot)
+                slotBoundCand[lowCursor] = candIdx
+                if candIdx < candToSlot.count {
+                    candToSlot[candIdx] = lowCursor
+                }
+                applyCandidateToSlot(
+                    slot: lowCursor,
+                    candIdx: candIdx,
+                    dark: dark,
+                    vMetrics: vMetrics,
+                    primaryText: primaryText,
+                    highlightText: highlightText
+                )
+                lowCursor += 1
+            }
+        }
+
+        for slot in keepCount..<buttonPool.count where slotBoundCand[slot] >= 0 {
+            return
+        }
+        for slot in keepCount..<buttonPool.count {
             buttonPool[slot].removeFromSuperview()
         }
-        buttonPool.removeSubrange(Self.initialPoolSize..<buttonPool.count)
-        longPressPool.removeSubrange(Self.initialPoolSize..<longPressPool.count)
-        slotBoundCand.removeSubrange(Self.initialPoolSize..<slotBoundCand.count)
-        buttonRenderStates.removeSubrange(Self.initialPoolSize..<buttonRenderStates.count)
+        buttonPool.removeSubrange(keepCount..<buttonPool.count)
+        longPressPool.removeSubrange(keepCount..<longPressPool.count)
+        slotBoundCand.removeSubrange(keepCount..<slotBoundCand.count)
+        buttonRenderStates.removeSubrange(keepCount..<buttonRenderStates.count)
     }
+
+    internal var poolCapacityForTesting: Int { buttonPool.count }
 
     private func updateExpandChevron() {
         if lastRenderedChevronExpanded != isGridExpanded {
@@ -2467,8 +2516,28 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         }
     }
 
+    private final class WeakDisplayLinkProxy {
+        weak var owner: ExpandedCandidateGridView?
+
+        init(_ owner: ExpandedCandidateGridView) {
+            self.owner = owner
+        }
+
+        @objc func handleRefresh(_ link: CADisplayLink) {
+            if let owner {
+                owner.firstPanelRefresh(link)
+            } else {
+                link.invalidate()
+            }
+        }
+    }
+
     private var openTrace: (touch: UInt64, start: CFTimeInterval)?
     private var firstRefresh: CADisplayLink?
+
+    deinit {
+        firstRefresh?.invalidate()
+    }
 
     func beginOpenTrace(start: CFTimeInterval?) {
         let logger = LokeyDiagnosticLogger.shared
@@ -2507,7 +2576,7 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
                 visibleCount: visibleButtonCount
             )
         )
-        let link = CADisplayLink(target: self, selector: #selector(firstPanelRefresh(_:)))
+        let link = CADisplayLink(target: WeakDisplayLinkProxy(self), selector: #selector(WeakDisplayLinkProxy.handleRefresh(_:)))
         firstRefresh = link
         link.add(to: .main, forMode: .common)
     }

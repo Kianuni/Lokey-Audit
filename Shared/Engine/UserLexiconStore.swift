@@ -860,7 +860,6 @@ public final class UserLexiconStore: @unchecked Sendable {
     private static func buildSyllablePrefixSets(from ordered: [UserPhrase]) -> (all: Set<String>, strict: Set<String>) {
         var all = Set<String>()
         var strict = Set<String>()
-        var phraseCount = 0
         for phrase in ordered where phrase.surface.count >= 2 && !phrase.pinyinNormalized.isEmpty {
             let parts = phrase.pinyinNormalized.split(separator: " ")
             guard parts.count >= 2 else { continue }
@@ -876,8 +875,6 @@ public final class UserLexiconStore: @unchecked Sendable {
                     strict.insert(running)
                 }
             }
-            phraseCount += 1
-            if phraseCount >= 256 || all.count >= 512 { break }
         }
         return (all, strict)
     }
@@ -1842,6 +1839,24 @@ public final class UserLexiconStore: @unchecked Sendable {
         }
 
         return (phrases, bigrams, unigrams)
+    }
+
+    /// Lightweight `O(1)` SQLite row-count query avoiding full backup materialization for UI summaries.
+    public func storedRecordCounts() -> (phrases: Int, bigrams: Int, unigrams: Int) {
+        dbQueue.sync {
+            guard let sqliteDB = db else { return (0, 0, 0) }
+            func countRows(_ sql: String) -> Int {
+                var stmt: OpaquePointer?
+                guard sqlite3_prepare_v2(sqliteDB, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+                defer { sqlite3_finalize(stmt) }
+                return sqlite3_step(stmt) == SQLITE_ROW ? max(0, Int(sqlite3_column_int64(stmt, 0))) : 0
+            }
+            return (
+                phrases: countRows("SELECT COUNT(*) FROM user_phrases;"),
+                bigrams: countRows("SELECT COUNT(*) FROM user_bigrams;"),
+                unigrams: countRows("SELECT COUNT(*) FROM user_unigrams;")
+            )
+        }
     }
 
     public func exportPersonalBackup(

@@ -274,7 +274,12 @@ public final class MmapLexicon: @unchecked Sendable {
             let emVer = Self.loadU32(emRaw, at: 4)
             let emCount = Int(Self.loadU32(emRaw, at: 8))
             let emPool = Int(Self.loadU32(emRaw, at: 12))
-            if emMagic == 0x4A4D454C && emVer == 1 && emCount >= 0 && 16 + emCount * 12 <= emPool && emPool <= emRaw.count {
+            if emMagic == 0x4A4D454C
+                && emVer == 1
+                && emCount >= 0
+                && emPool >= 16
+                && emPool <= emRaw.count
+                && emCount <= (emPool - 16) / 12 {
                 self.emojiBackingData = emData
                 self.emojiRawBuffer = emRaw
                 self.emojiRecordCount = emCount
@@ -1562,7 +1567,7 @@ public final class MmapLexicon: @unchecked Sendable {
 
     @inline(__always)
     private static func containsNonBMPUTF8(_ raw: UnsafeRawBufferPointer, offset: Int, length: Int) -> Bool {
-        guard offset >= 0, length > 0, offset + length <= raw.count else { return false }
+        guard offset >= 0, length > 0, offset <= raw.count, length <= raw.count - offset else { return false }
         for i in offset..<(offset + length) {
             if raw[i] >= 0xF0 {
                 return true
@@ -3122,9 +3127,11 @@ public final class MmapLexicon: @unchecked Sendable {
             while lo <= hi {
                 let mid = (lo + hi) >> 1
                 let recOff = 16 + mid * 12
-                let kOff = emojiPoolOffset + Int(Self.loadU32(emojiRawBuffer, at: recOff))
+                let relKOff = Int(Self.loadU32(emojiRawBuffer, at: recOff))
                 let kLen = Int(Self.loadU16(emojiRawBuffer, at: recOff + 4))
-                guard kOff >= emojiPoolOffset, kOff + kLen <= emojiRawBuffer.count else { return [] }
+                let poolAvail = emojiRawBuffer.count - emojiPoolOffset
+                guard relKOff >= 0, kLen >= 0, relKOff <= poolAvail, kLen <= poolAvail - relKOff else { return [] }
+                let kOff = emojiPoolOffset + relKOff
 
                 let ptr = base.advanced(by: kOff).assumingMemoryBound(to: UInt8.self)
                 let common = min(kLen, queryUTF8.count)
@@ -3144,14 +3151,16 @@ public final class MmapLexicon: @unchecked Sendable {
                 if cmp == 0 {
                     let eCount = min(limit, Int(Self.loadU16(emojiRawBuffer, at: recOff + 6)))
                     guard eCount > 0 else { return [] }
-                    var cursor = emojiPoolOffset + Int(Self.loadU32(emojiRawBuffer, at: recOff + 8))
+                    let relCursor = Int(Self.loadU32(emojiRawBuffer, at: recOff + 8))
+                    guard relCursor >= 0, relCursor < poolAvail else { return [] }
+                    var cursor = emojiPoolOffset + relCursor
                     var out: [String] = []
                     out.reserveCapacity(eCount)
                     for _ in 0..<eCount {
                         guard cursor >= emojiPoolOffset, cursor < emojiRawBuffer.count else { break }
                         let byteLen = Int(emojiRawBuffer[cursor])
                         cursor += 1
-                        guard byteLen > 0, cursor + byteLen <= emojiRawBuffer.count else { break }
+                        guard byteLen > 0, byteLen <= emojiRawBuffer.count - cursor else { break }
                         let emBuf = UnsafeBufferPointer(
                             start: base.advanced(by: cursor).assumingMemoryBound(to: UInt8.self),
                             count: byteLen
@@ -3395,26 +3404,34 @@ public final class MmapLexicon: @unchecked Sendable {
     }
 
     @inline(__always)
-    private static func loadU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func loadU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
+        guard let base = raw.baseAddress,
+              raw.count >= 2,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 2) else { return 0 }
         return UInt16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
-    private static func loadI16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Int16 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func loadI16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Int16 {
+        guard let base = raw.baseAddress,
+              raw.count >= 2,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 2) else { return 0 }
         return Int16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: Int16.self))
     }
 
     @inline(__always)
-    private static func loadU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 4 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func loadU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
+        guard let base = raw.baseAddress,
+              raw.count >= 4,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 4) else { return 0 }
         return UInt32(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 
     @inline(__always)
-    private static func loadU64BE(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt64 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 8 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func loadU64BE(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt64 {
+        guard let base = raw.baseAddress,
+              raw.count >= 8,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 8) else { return 0 }
         return UInt64(bigEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
     }
 }
@@ -3542,14 +3559,18 @@ public enum LokeyLexiconPackManager {
     }
 
     @inline(__always)
-    private static func readU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func readU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
+        guard let base = raw.baseAddress,
+              raw.count >= 2,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 2) else { return 0 }
         return UInt16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
-    private static func readU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 4 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func readU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
+        guard let base = raw.baseAddress,
+              raw.count >= 4,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 4) else { return 0 }
         return UInt32(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 
@@ -3615,7 +3636,7 @@ public enum LokeyLexiconPackManager {
         return path.contains("-Inbox/") || path.contains("/Documents/Inbox/")
     }
 
-    /// Copies a transient `-Inbox` or `/Documents/Inbox` file into `NSTemporaryDirectory()` and removes the Inbox original.
+    /// Moves or copies a transient `-Inbox` or `/Documents/Inbox` file into `NSTemporaryDirectory()` and removes the Inbox original.
     /// Non-Inbox URLs are returned unchanged.
     public static func stageInboxFileIfNeeded(at url: URL) throws -> (url: URL, isTemporaryCopy: Bool) {
         guard isInboxURL(url) else {
@@ -3626,8 +3647,12 @@ public enum LokeyLexiconPackManager {
         let stagedURL = fm.temporaryDirectory
             .appendingPathComponent("lokeypack-preview-\(UUID().uuidString)-\(safeName)")
         try? fm.removeItem(at: stagedURL)
-        try fm.copyItem(at: url, to: stagedURL)
-        try? fm.removeItem(at: url)
+        do {
+            try fm.moveItem(at: url, to: stagedURL)
+        } catch {
+            try fm.copyItem(at: url, to: stagedURL)
+            try? fm.removeItem(at: url)
+        }
         return (stagedURL, true)
     }
 
@@ -3933,6 +3958,7 @@ public enum LokeyLexiconPackManager {
         packName: String? = nil,
         sourceLabel: String = "用户导入 (.lokeypack)",
         expectedSHA256: String? = nil,
+        prevalidatedSummary: ValidatedPackSummary? = nil,
         activate: Bool = true,
         in lexiconsDirectory: URL? = nil,
         defaults: UserDefaults? = nil
@@ -3955,7 +3981,18 @@ public enum LokeyLexiconPackManager {
         }
 
         let mapped = try mapFileWithCoordination(at: sourceURL)
-        let summary = try validatePack(nsData: mapped, expectedSHA256: effectiveExpected, computeHash: true)
+        let summary: ValidatedPackSummary
+        if let pre = prevalidatedSummary,
+           !pre.sha256.isEmpty,
+           pre.fileSizeBytes == Int64(mapped.length) {
+            if let exp = effectiveExpected, !exp.isEmpty, exp.lowercased() != pre.sha256.lowercased() {
+                throw LokeyLexiconPackError.sha256Mismatch(expected: exp.lowercased(), actual: pre.sha256.lowercased())
+            }
+            _ = try validatePack(nsData: mapped, computeHash: false, validateRecords: false)
+            summary = pre
+        } else {
+            summary = try validatePack(nsData: mapped, expectedSHA256: effectiveExpected, computeHash: true)
+        }
 
         let fm = FileManager.default
         let targetDir = resolveLexiconsDirectory(lexiconsDirectory)
@@ -3966,7 +4003,15 @@ public enum LokeyLexiconPackManager {
         defer { try? fm.removeItem(at: stagingPackURL) }
 
         do {
-            try mapped.write(to: stagingPackURL, options: [.atomic])
+            if sourceURL.isFileURL {
+                do {
+                    try fm.copyItem(at: sourceURL, to: stagingPackURL)
+                } catch {
+                    try mapped.write(to: stagingPackURL, options: [.atomic])
+                }
+            } else {
+                try mapped.write(to: stagingPackURL, options: [.atomic])
+            }
         } catch {
             throw LokeyLexiconPackError.cannotOpenFile
         }
@@ -4124,12 +4169,21 @@ public enum LokeyLexiconPackManager {
             throw LokeyLexiconPackError.packNotFound
         }
         let mapped = try NSData(contentsOf: packURL, options: [.mappedIfSafe])
-        let summary = try validatePack(nsData: mapped, computeHash: false)
         let metaURL = dir.appendingPathComponent(safeFile + ".json")
+        let cachedMeta: LokeyLexiconPackMetadata? = {
+            guard let metaData = try? Data(contentsOf: metaURL) else { return nil }
+            return try? JSONDecoder().decode(LokeyLexiconPackMetadata.self, from: metaData)
+        }()
+        let hasVerifiedMetadata = cachedMeta != nil
+            && cachedMeta!.fileSizeBytes == Int64(mapped.length)
+            && !cachedMeta!.sha256.isEmpty
+        let summary = try validatePack(
+            nsData: mapped,
+            computeHash: false,
+            validateRecords: !hasVerifiedMetadata
+        )
         let sha: String
-        if let metaData = try? Data(contentsOf: metaURL),
-           let meta = try? JSONDecoder().decode(LokeyLexiconPackMetadata.self, from: metaData),
-           !meta.sha256.isEmpty {
+        if let meta = cachedMeta, !meta.sha256.isEmpty, meta.fileSizeBytes == Int64(mapped.length) {
             sha = meta.sha256
         } else {
             sha = computeSHA256(raw: UnsafeRawBufferPointer(start: mapped.bytes, count: mapped.length))

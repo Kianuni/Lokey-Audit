@@ -263,7 +263,7 @@ public enum RimeUserLexiconImporter {
         }
     }
 
-    private static func cleanupInboxTemporaryFileIfNeeded(_ url: URL) {
+    public static func cleanupInboxTemporaryFileIfNeeded(_ url: URL) {
         let path = url.standardizedFileURL.path
         if path.contains("-Inbox/") || path.contains("/Documents/Inbox/") {
             try? FileManager.default.removeItem(at: url)

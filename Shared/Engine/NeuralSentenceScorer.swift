@@ -1736,8 +1736,55 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     // MARK: - On-Device Blind-Typing Typo Reranker (`LNTR` v1, 64 -> 384 -> 48 -> 1 Int8 SiLU MLP)
 
-    /// Builds the canonical 64-dim feature vector shared identically between Swift (`NoisyChannelRefiner`) and offline model training.
-    public func extractTypoFeatures(
+    /// Stack-resident 64-dimensional feature vector (`8 x SIMD8<Float>`, 256 bytes, zero heap allocation).
+    @frozen public struct TypoFeatureVec64: Equatable, Sendable {
+        public var v0: SIMD8<Float>
+        public var v1: SIMD8<Float>
+        public var v2: SIMD8<Float>
+        public var v3: SIMD8<Float>
+        public var v4: SIMD8<Float>
+        public var v5: SIMD8<Float>
+        public var v6: SIMD8<Float>
+        public var v7: SIMD8<Float>
+
+        public static let zero = TypoFeatureVec64(
+            v0: .zero, v1: .zero, v2: .zero, v3: .zero,
+            v4: .zero, v5: .zero, v6: .zero, v7: .zero
+        )
+
+        @inline(__always)
+        public init(
+            v0: SIMD8<Float>, v1: SIMD8<Float>, v2: SIMD8<Float>, v3: SIMD8<Float>,
+            v4: SIMD8<Float>, v5: SIMD8<Float>, v6: SIMD8<Float>, v7: SIMD8<Float>
+        ) {
+            self.v0 = v0
+            self.v1 = v1
+            self.v2 = v2
+            self.v3 = v3
+            self.v4 = v4
+            self.v5 = v5
+            self.v6 = v6
+            self.v7 = v7
+        }
+
+        public func toArray() -> [Float] {
+            var out = [Float](repeating: 0.0, count: 64)
+            for k in 0..<8 {
+                out[k] = v0[k]
+                out[8 + k] = v1[k]
+                out[16 + k] = v2[k]
+                out[24 + k] = v3[k]
+                out[32 + k] = v4[k]
+                out[40 + k] = v5[k]
+                out[48 + k] = v6[k]
+                out[56 + k] = v7[k]
+            }
+            return out
+        }
+    }
+
+    /// Builds the stack-resident 64-dim typo feature vector with zero `[Float]` heap allocation.
+    public func extractTypoFeaturesVec64(
         typedCount: Int,
         intendedCount: Int,
         syllableCount: Int,
@@ -1755,7 +1802,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         spellingLL: Int?,
         spellingBoundary: Int,
         words: [String]
-    ) -> [Float] {
+    ) -> TypoFeatureVec64 {
         @inline(__always)
         func clampF(_ v: Float, _ lo: Float, _ hi: Float) -> Float {
             guard v.isFinite else { return 0.0 }
@@ -1777,67 +1824,124 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         }
         let cF = Float(max(1, charTotal))
 
-        var out = [Float](repeating: 0.0, count: Self.typoFeatureDim)
-        out[0] = clampF(Float(typedCount) / 24.0, -4.0, 4.0)
-        out[1] = clampF(Float(intendedCount - typedCount) / 4.0, -4.0, 4.0)
-        out[2] = clampF(Float(alignCostQ8) / 800.0, -4.0, 4.0)
-        out[3] = clampF(Float(substCount) / 3.0, -4.0, 4.0)
-        out[4] = clampF(Float(omitCount) / 3.0, -4.0, 4.0)
-        out[5] = clampF(Float(transposeCount) / 2.0, -4.0, 4.0)
-        out[6] = clampF(Float(deleteCount) / 2.0, -4.0, 4.0)
-        out[7] = clampF(Float(maxPrimaryDriftQ8) / 300.0, -4.0, 4.0)
-        out[8] = clampF(Float(matchedTouchGainQ8) / 300.0, -4.0, 4.0)
-        out[9] = clampF((Float(viterbiScoreQ8) / sF) / 1200.0, -6.0, 6.0)
-        out[10] = clampF((Float(cleanLatticeQ8) / sF) / 1200.0, -6.0, 6.0)
-        out[11] = clampF((Float(fwdNeuralQ8) / wF) / 400.0, -4.0, 4.0)
-        out[12] = clampF((Float(bwdNeuralQ8) / wF) / 400.0, -4.0, 4.0)
-        out[13] = spellingLL.map { clampF((Float($0) / cF) / 900.0, -6.0, 6.0) } ?? 0.0
-        out[14] = clampF(Float(spellingBoundary) / 400.0, -4.0, 4.0)
-        out[15] = clampF(Float(oneCharWords) / wF, 0.0, 1.0)
-
-        for k in 0..<8 {
-            out[16 + k] = meanCtx.v0[k]
-            out[24 + k] = meanCtx.v1[k]
-            out[32 + k] = meanCtx.v2[k]
-            out[40 + k] = meanCtx.v3[k]
+        let v0 = SIMD8<Float>(
+            clampF(Float(typedCount) / 24.0, -4.0, 4.0),
+            clampF(Float(intendedCount - typedCount) / 4.0, -4.0, 4.0),
+            clampF(Float(alignCostQ8) / 800.0, -4.0, 4.0),
+            clampF(Float(substCount) / 3.0, -4.0, 4.0),
+            clampF(Float(omitCount) / 3.0, -4.0, 4.0),
+            clampF(Float(transposeCount) / 2.0, -4.0, 4.0),
+            clampF(Float(deleteCount) / 2.0, -4.0, 4.0),
+            clampF(Float(maxPrimaryDriftQ8) / 300.0, -4.0, 4.0)
+        )
+        let v1 = SIMD8<Float>(
+            clampF(Float(matchedTouchGainQ8) / 300.0, -4.0, 4.0),
+            clampF((Float(viterbiScoreQ8) / sF) / 1200.0, -6.0, 6.0),
+            clampF((Float(cleanLatticeQ8) / sF) / 1200.0, -6.0, 6.0),
+            clampF((Float(fwdNeuralQ8) / wF) / 400.0, -4.0, 4.0),
+            clampF((Float(bwdNeuralQ8) / wF) / 400.0, -4.0, 4.0),
+            spellingLL.map { clampF((Float($0) / cF) / 900.0, -6.0, 6.0) } ?? 0.0,
+            clampF(Float(spellingBoundary) / 400.0, -4.0, 4.0),
+            clampF(Float(oneCharWords) / wF, 0.0, 1.0)
+        )
+        let v6: SIMD8<Float> = if let firstW = words.first, !firstW.isEmpty {
+            wordRecord(for: firstW).tgt.v0
+        } else {
+            .zero
         }
-        if let firstW = words.first, !firstW.isEmpty {
-            let fTgt = wordRecord(for: firstW).tgt.v0
-            for k in 0..<8 { out[48 + k] = fTgt[k] }
+        let v7: SIMD8<Float> = if let lastW = words.last, !lastW.isEmpty {
+            wordRecord(for: lastW).ctx.v0
+        } else {
+            .zero
         }
-        if let lastW = words.last, !lastW.isEmpty {
-            let lCtx = wordRecord(for: lastW).ctx.v0
-            for k in 0..<8 { out[56 + k] = lCtx[k] }
-        }
-        return out
+        return TypoFeatureVec64(
+            v0: v0,
+            v1: v1,
+            v2: meanCtx.v0,
+            v3: meanCtx.v1,
+            v4: meanCtx.v2,
+            v5: meanCtx.v3,
+            v6: v6,
+            v7: v7
+        )
     }
 
-    /// Evaluates the 46.7 KB Int8 2-layer SiLU MLP (`LNTR` v1) in Apple Silicon SIMD registers (`~0.9 µs`).
-    public func scoreTypoCandidateQ8(features: [Float]) -> Int {
+    /// Builds the canonical 64-dim feature vector shared identically between Swift (`NoisyChannelRefiner`) and offline model training.
+    public func extractTypoFeatures(
+        typedCount: Int,
+        intendedCount: Int,
+        syllableCount: Int,
+        alignCostQ8: Int,
+        substCount: Int,
+        omitCount: Int,
+        transposeCount: Int,
+        deleteCount: Int,
+        maxPrimaryDriftQ8: Int,
+        matchedTouchGainQ8: Int,
+        viterbiScoreQ8: Int,
+        cleanLatticeQ8: Int,
+        fwdNeuralQ8: Int,
+        bwdNeuralQ8: Int,
+        spellingLL: Int?,
+        spellingBoundary: Int,
+        words: [String]
+    ) -> [Float] {
+        extractTypoFeaturesVec64(
+            typedCount: typedCount,
+            intendedCount: intendedCount,
+            syllableCount: syllableCount,
+            alignCostQ8: alignCostQ8,
+            substCount: substCount,
+            omitCount: omitCount,
+            transposeCount: transposeCount,
+            deleteCount: deleteCount,
+            maxPrimaryDriftQ8: maxPrimaryDriftQ8,
+            matchedTouchGainQ8: matchedTouchGainQ8,
+            viterbiScoreQ8: viterbiScoreQ8,
+            cleanLatticeQ8: cleanLatticeQ8,
+            fwdNeuralQ8: fwdNeuralQ8,
+            bwdNeuralQ8: bwdNeuralQ8,
+            spellingLL: spellingLL,
+            spellingBoundary: spellingBoundary,
+            words: words
+        ).toArray()
+    }
+
+    /// Evaluates the 46.7 KB Int8 2-layer SiLU MLP (`LNTR` v1) directly from a stack `TypoFeatureVec64` (`~0.9 µs`).
+    public func scoreTypoCandidateQ8(features: TypoFeatureVec64) -> Int {
         let w2Offset = 32 + 24_576 + 768 * 4
-        guard hasBinarySection, hasTypoReranker, features.count == Self.typoFeatureDim,
+        guard hasBinarySection, hasTypoReranker,
               lntrRawBuffer.count >= w2Offset + 48 * 384,
               let basePtr = lntrRawBuffer.baseAddress else {
             return 0
         }
 
+        @inline(__always)
+        func sanitizeAndClamp(_ raw8: SIMD8<Float>, lo: SIMD8<Float>, hi: SIMD8<Float>) -> SIMD8<Float> {
+            let finite = SIMD8<Float>(
+                raw8[0].isFinite ? raw8[0] : 0,
+                raw8[1].isFinite ? raw8[1] : 0,
+                raw8[2].isFinite ? raw8[2] : 0,
+                raw8[3].isFinite ? raw8[3] : 0,
+                raw8[4].isFinite ? raw8[4] : 0,
+                raw8[5].isFinite ? raw8[5] : 0,
+                raw8[6].isFinite ? raw8[6] : 0,
+                raw8[7].isFinite ? raw8[7] : 0
+            )
+            return finite.clamped(lowerBound: lo, upperBound: hi)
+        }
+
         return withUnsafeTemporaryAllocation(of: SIMD8<Float>.self, capacity: 56) { scratch in
             let lo8 = SIMD8<Float>(repeating: -8.0)
             let hi8 = SIMD8<Float>(repeating: 8.0)
-            for g in 0..<8 {
-                let off = g * 8
-                let raw8 = SIMD8<Float>(
-                    features[off].isFinite ? features[off] : 0,
-                    features[off + 1].isFinite ? features[off + 1] : 0,
-                    features[off + 2].isFinite ? features[off + 2] : 0,
-                    features[off + 3].isFinite ? features[off + 3] : 0,
-                    features[off + 4].isFinite ? features[off + 4] : 0,
-                    features[off + 5].isFinite ? features[off + 5] : 0,
-                    features[off + 6].isFinite ? features[off + 6] : 0,
-                    features[off + 7].isFinite ? features[off + 7] : 0
-                )
-                scratch[g] = raw8.clamped(lowerBound: lo8, upperBound: hi8)
-            }
+            scratch[0] = sanitizeAndClamp(features.v0, lo: lo8, hi: hi8)
+            scratch[1] = sanitizeAndClamp(features.v1, lo: lo8, hi: hi8)
+            scratch[2] = sanitizeAndClamp(features.v2, lo: lo8, hi: hi8)
+            scratch[3] = sanitizeAndClamp(features.v3, lo: lo8, hi: hi8)
+            scratch[4] = sanitizeAndClamp(features.v4, lo: lo8, hi: hi8)
+            scratch[5] = sanitizeAndClamp(features.v5, lo: lo8, hi: hi8)
+            scratch[6] = sanitizeAndClamp(features.v6, lo: lo8, hi: hi8)
+            scratch[7] = sanitizeAndClamp(features.v7, lo: lo8, hi: hi8)
 
             let w1Ptr = basePtr.advanced(by: 32).assumingMemoryBound(to: Int8.self)
             for blk in 0..<48 {
@@ -1889,6 +1993,31 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             let cap = Float(lntrMaxDeltaQ8)
             return Int(min(cap, max(-cap, scaled)))
         }
+    }
+
+    /// Evaluates the 46.7 KB Int8 2-layer SiLU MLP (`LNTR` v1) in Apple Silicon SIMD registers (`~0.9 µs`).
+    public func scoreTypoCandidateQ8(features: [Float]) -> Int {
+        guard features.count == Self.typoFeatureDim else { return 0 }
+        @inline(__always)
+        func group(_ off: Int) -> SIMD8<Float> {
+            SIMD8<Float>(
+                features[off], features[off + 1], features[off + 2], features[off + 3],
+                features[off + 4], features[off + 5], features[off + 6], features[off + 7]
+            )
+        }
+        return scoreTypoCandidateQ8(
+            features: TypoFeatureVec64(
+                v0: group(0), v1: group(8), v2: group(16), v3: group(24),
+                v4: group(32), v5: group(40), v6: group(48), v7: group(56)
+            )
+        )
+    }
+
+    @inline(__always)
+    public func scoreTypoDeltaQ8(challenger: TypoFeatureVec64, incumbent: TypoFeatureVec64) -> Int {
+        guard hasBinarySection, hasTypoReranker else { return 0 }
+        let diff = scoreTypoCandidateQ8(features: challenger) - scoreTypoCandidateQ8(features: incumbent)
+        return min(lntrMaxDeltaQ8, max(-lntrMaxDeltaQ8, diff))
     }
 
     @inline(__always)
@@ -2328,7 +2457,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     @inline(__always)
     private static func loadFloat16Vec32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Vec32 {
-        guard offset >= 0, offset <= raw.count - 64 else { return .zero }
+        guard raw.count >= 64, UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 64) else { return .zero }
         @inline(__always)
         func lane8(_ baseOff: Int) -> SIMD8<Float> {
             SIMD8<Float>(
@@ -2353,7 +2482,9 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     @inline(__always)
     private static func loadQuantizedVec32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Vec32 {
         let scale: Float = 1.0 / 32.0
-        guard offset >= 0, offset <= raw.count - 32, let base = raw.baseAddress else { return .zero }
+        guard let base = raw.baseAddress,
+              raw.count >= 32,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 32) else { return .zero }
         let p = base.advanced(by: offset).assumingMemoryBound(to: Int8.self)
         let v0 = SIMD8<Float>(
             Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3]),
@@ -2377,7 +2508,9 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     @inline(__always)
     private static func loadQuantizedVec16As32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Vec32 {
         let scale: Float = 1.0 / 32.0
-        guard offset >= 0, offset <= raw.count - 16, let base = raw.baseAddress else { return .zero }
+        guard let base = raw.baseAddress,
+              raw.count >= 16,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 16) else { return .zero }
         let p = base.advanced(by: offset).assumingMemoryBound(to: Int8.self)
         let v0 = SIMD8<Float>(
             Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3]),
@@ -2392,7 +2525,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     @inline(__always)
     private static func loadSIMD8F32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> SIMD8<Float> {
-        guard offset >= 0, offset <= raw.count - 32 else { return .zero }
+        guard raw.count >= 32, UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 32) else { return .zero }
         let f0 = Float(bitPattern: loadU32(raw, at: offset))
         let f1 = Float(bitPattern: loadU32(raw, at: offset + 4))
         let f2 = Float(bitPattern: loadU32(raw, at: offset + 8))
@@ -2405,14 +2538,18 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     }
 
     @inline(__always)
-    private static func loadU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 2 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func loadU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
+        guard let base = raw.baseAddress,
+              raw.count >= 2,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 2) else { return 0 }
         return UInt16(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
-    private static func loadU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
-        guard let base = raw.baseAddress, UInt(bitPattern: offset) &+ 4 <= UInt(bitPattern: raw.count) else { return 0 }
+    internal static func loadU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
+        guard let base = raw.baseAddress,
+              raw.count >= 4,
+              UInt(bitPattern: offset) <= UInt(bitPattern: raw.count &- 4) else { return 0 }
         return UInt32(littleEndian: base.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 

@@ -446,20 +446,28 @@ public final class OpenCCConverter: @unchecked Sendable {
 
     @inline(__always)
     private func loadU16(_ byteOffset: Int) -> UInt16 {
-        guard byteOffset >= 0, byteOffset + 2 <= rawBuffer.count else { return 0 }
-        return UInt16(littleEndian: rawBuffer.loadUnaligned(fromByteOffset: byteOffset, as: UInt16.self))
+        Self.loadU16(rawBuffer, at: byteOffset)
     }
 
     @inline(__always)
     private func loadU32(_ byteOffset: Int) -> UInt32 {
-        guard byteOffset >= 0, byteOffset + 4 <= rawBuffer.count else { return 0 }
-        return UInt32(littleEndian: rawBuffer.loadUnaligned(fromByteOffset: byteOffset, as: UInt32.self))
+        Self.loadU32(rawBuffer, at: byteOffset)
     }
 
     @inline(__always)
-    private static func loadU32(_ raw: UnsafeRawBufferPointer, at byteOffset: Int) -> UInt32 {
-        guard byteOffset >= 0, byteOffset + 4 <= raw.count else { return 0 }
-        return UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: byteOffset, as: UInt32.self))
+    internal static func loadU16(_ raw: UnsafeRawBufferPointer, at byteOffset: Int) -> UInt16 {
+        guard let base = raw.baseAddress,
+              raw.count >= 2,
+              UInt(bitPattern: byteOffset) <= UInt(bitPattern: raw.count &- 2) else { return 0 }
+        return UInt16(littleEndian: base.loadUnaligned(fromByteOffset: byteOffset, as: UInt16.self))
+    }
+
+    @inline(__always)
+    internal static func loadU32(_ raw: UnsafeRawBufferPointer, at byteOffset: Int) -> UInt32 {
+        guard let base = raw.baseAddress,
+              raw.count >= 4,
+              UInt(bitPattern: byteOffset) <= UInt(bitPattern: raw.count &- 4) else { return 0 }
+        return UInt32(littleEndian: base.loadUnaligned(fromByteOffset: byteOffset, as: UInt32.self))
     }
 
     @inline(__always)

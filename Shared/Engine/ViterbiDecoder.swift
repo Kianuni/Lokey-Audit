@@ -2640,6 +2640,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
 
     private func learnedCommitChoice(after context: String, reading: String, lead: String) -> MmapLexicon.WordHit? {
         guard lexicon.neuralLM.version == 2 else { return nil }
+        let suffix = Self.extractTrailingChineseSuffix(from: context, maxChars: 12)
+        guard !suffix.isEmpty else { return nil }
         let pairs: [CommitPair]
         if let cached = commitPairsByReading[reading] {
             pairs = cached
@@ -2650,8 +2652,6 @@ public final class ViterbiDecoder: @unchecked Sendable {
         }
         let matchingPairs = pairs.filter { $0.first == lead || $0.second == lead }
         guard !matchingPairs.isEmpty else { return nil }
-        let suffix = Self.extractTrailingChineseSuffix(from: context, maxChars: 12)
-        guard !suffix.isEmpty else { return nil }
         let baseFeatures = lexicon.neuralLM.commitContextFeatures(suffix)
         var bestHit: (hit: MmapLexicon.WordHit, excess: Float)? = nil
         for pair in matchingPairs {
@@ -5352,7 +5352,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                 && !arc.isSoftClipped
                                 && !arc.isPrefixCompletion
                                 && (newPen <= 85 || (start == 0 && arc.end == n))
-                                && userSnapshot.hasSyllablePrefix(getNewSyls().joined(separator: " ")) {
+                                && userSnapshot.hasSyllablePrefix(state.syllables.isEmpty ? arc.canonical : getNewSyls().joined(separator: " ")) {
                                 nextNode = virtualUserTrieNode
                             } else {
                                 continue
@@ -5543,27 +5543,33 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                 // O(1) RAM user phrase lookup (zero SQLite I/O, skipped completely when user phrase table is empty).
                                 // Mid-sentence spans require exact/fuzzy match (`recordPen <= 85`) and `>= 2` chars so single-char or
                                 // noisy soft-phonetic arcs (`chi -> ci`) never hijack coherent multi-word sentences.
-                                if checkUserPhrases && state.initialCount == 0 && (recordPen <= 85 || (start == 0 && arc.end == n)) {
+                                if checkUserPhrases
+                                    && !state.syllables.isEmpty
+                                    && state.initialCount == 0
+                                    && (state.userPrefixMatched || (start == 0 && arc.end == n && (recordPen > 85 || combinedSoftClip || arc.isPrefixCompletion)))
+                                    && (recordPen <= 85 || (start == 0 && arc.end == n)) {
                                     let sylsForUser = getNewSyls()
-                                    let compactSyl = sylsForUser.joined()
-                                    for up in userSnapshot.exactSyllablePhrases(compactPinyin: compactSyl) where up.surface.count >= 2 {
-                                        guard let score = up.embeddedScore(
-                                            syllables: sylsForUser,
-                                            dictionary: nextNode == virtualUserTrieNode ? [] : lexicon.words(at: nextNode, limit: 24)
-                                        ) else { continue }
-                                        recordSpan(
-                                            WordSpan(
-                                                start: start,
-                                                end: arc.end,
-                                                text: up.surface,
+                                    let exactUserHits = userSnapshot.exactSyllablePhrases(compactPinyin: sylsForUser.joined())
+                                    if !exactUserHits.isEmpty {
+                                        for up in exactUserHits where up.surface.count >= 2 {
+                                            guard let score = up.embeddedScore(
                                                 syllables: sylsForUser,
-                                                scoreQ8: score - recordPen,
-                                                penaltyQ8: recordPen,
-                                                isUserPhrase: true,
-                                                hasKeySubstitution: combinedHasKeySub,
-                                                keySubstitutionCount: combinedKeySubCount
+                                                dictionary: nextNode == virtualUserTrieNode ? [] : lexicon.words(at: nextNode, limit: 24)
+                                            ) else { continue }
+                                            recordSpan(
+                                                WordSpan(
+                                                    start: start,
+                                                    end: arc.end,
+                                                    text: up.surface,
+                                                    syllables: sylsForUser,
+                                                    scoreQ8: score - recordPen,
+                                                    penaltyQ8: recordPen,
+                                                    isUserPhrase: true,
+                                                    hasKeySubstitution: combinedHasKeySub,
+                                                    keySubstitutionCount: combinedKeySubCount
+                                                )
                                             )
-                                        )
+                                        }
                                     }
                                 }
                             }
@@ -5933,11 +5939,12 @@ public final class ViterbiDecoder: @unchecked Sendable {
                             }
 
                             let nextUserPrefixMatched = checkUserPhrases
+                                && state.userPrefixMatched
                                 && state.initialCount == 0
                                 && !combinedSoftClip
                                 && !arc.isPrefixCompletion
                                 && spanPen <= 85
-                                && userSnapshot.hasStrictSyllablePrefix(getNewSyls().joined(separator: " "))
+                                && userSnapshot.hasStrictSyllablePrefix(state.syllables.isEmpty ? arc.canonical : getNewSyls().joined(separator: " "))
                             if arc.end < n && (nextNode != virtualUserTrieNode || nextUserPrefixMatched) {
                                 if depth < 7 {
                                     let frontierPen = isCoherentMultiSylChunk ? (spanPen + 360) : spanPen
@@ -7805,7 +7812,11 @@ public final class ViterbiDecoder: @unchecked Sendable {
         _ = recoverableEndings.count
         _ = standaloneReplies.count
         _ = postWordFallbackParticles.count
+        _ = standaloneTwoCharParticleWords.count
+        _ = openTailSingleCharPredicates.count
+        _ = postPhraseConversationalContinuations.count
         _ = stutterAdverbPrefixes.count
+        _ = adverbialNoSuffixPrefixes.count
         _ = productiveDerivationalSuffixes.count
         _ = pronounMonosyllables.count
         _ = pronounCopulas.count

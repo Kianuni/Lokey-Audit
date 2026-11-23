@@ -1,4 +1,4 @@
-# Lokey-Audit (v0.9.5 · Build 86)
+# Lokey-Audit (v0.9.5 · Build 87)
 
 **Lokey Security Audit Repository · 纯离线零联网安全审计仓库**
 
@@ -65,7 +65,7 @@ codesign -d --entitlements - --xml "$EXT_DIR"
 
 ### 许可声明
 - 本仓库代码采用 **Source-Available Security Audit License**（见根目录 `LICENSE`）：允许出于安全审计与本地测试目的进行源码查阅、编译与测试，**禁止分发 `.ipa`/二进制安装包或用于商业/App Store 重新上架**。
-- 示范词库使用的开放许可上游数据声明见 `LICENSES/`（`rime-pinyin-simp` Apache-2.0、`OpenCC` Apache-2.0、`Unicode Unihan & CLDR` Unicode-3.0）。
+- 示范资源对应的第三方开源许可声明见 `LICENSES/`。
 
 ---
 
@@ -101,7 +101,7 @@ Lokey 内置 100% 开放许可的基础词库（开箱即用，无需联网）�
 - **`AuditDemoApp/`**: Minimal SwiftUI host shell providing keyboard activation status, a live typing sandbox, iOS Settings onboarding, and zero-network documentation. Commercial `.lokeypack` pack management, Rime importer UI, diagnostic viewer, and `build_ipa.sh` are omitted.
 - **`Shared/Resources/`**: Contains minimal permissive demonstration binaries compiled by `scripts/build_demo_lexicon.py`:
   - `demo_lexicon.bin`: ~4,000 permissive entries covering all 416 canonical Mandarin syllables, basic English words, clean next-word bigrams, and un-tuned neutral `LNLM-v2` weights (zero commercial `target-deltas.tsv`/`commit-deltas.tsv`, zero `lokey_spelling.bin`, zero GPL/LGPL data). Copied as `lokey_lexicon.bin` inside built app/extension/test bundles at build time so all engine & keyboard `.swift` files stay byte-identical.
-  - `lokey_emoji.bin` & `lokey_opencc.bin`: Minimal permissive Emoji (`CLDR` Unicode-3.0) and OpenCC (`BYVoid/OpenCC` Apache-2.0) tables.
+  - `lokey_emoji.bin` & `lokey_opencc.bin`: Minimal Emoji association and Simplified/Traditional conversion tables.
 
 ### Audit & Verification Commands
 

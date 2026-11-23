@@ -374,16 +374,21 @@ public final class LokeySessionController {
             if !pendingSegments.isEmpty {
                 utteranceFeedbackState?.didAppendLettersAfterPartialCommit = true
             }
-            if !isSecureContext && LokeyDiagnosticLogger.shared.isEnabled {
-                LokeyDiagnosticLogger.shared.recordLetterDisposition(
-                    touchSeq: touchSeq, enteredPinyin: true, detail: "已入串 字母=\(effectiveChar) 位置=\(insertAt + 1)"
+            if !isSecureContext && LokeyDiagnosticLogger.shared.canRecordInteractions {
+                LokeyDiagnosticLogger.shared.recordLetterDispositionFast(
+                    touchSeq: touchSeq,
+                    enteredPinyin: true,
+                    disposition: .enteredPinyin(effectiveChar, insertAt + 1)
                 )
             }
         }
 
         if inputMode == .englishASCII {
-            if !isSecureContext && LokeyDiagnosticLogger.shared.isEnabled {
-                LokeyDiagnosticLogger.shared.recordLetterDisposition(touchSeq: touchSeq, detail: "未入串，英文直输 \(effectiveChar)")
+            if !isSecureContext && LokeyDiagnosticLogger.shared.canRecordInteractions {
+                LokeyDiagnosticLogger.shared.recordLetterDispositionFast(
+                    touchSeq: touchSeq,
+                    disposition: .englishDirect(effectiveChar)
+                )
             }
             lastCommittedWasChinese = false
             return .commitText(String(effectiveChar), remaining: currentDecode)
@@ -391,8 +396,11 @@ public final class LokeySessionController {
 
         // Apostrophe is only meaningful inside an active Pinyin buffer
         if effectiveChar == "'" && samples.isEmpty {
-            if !isSecureContext && LokeyDiagnosticLogger.shared.isEnabled {
-                LokeyDiagnosticLogger.shared.recordLetterDisposition(touchSeq: touchSeq, detail: "未入串，隔音符直输")
+            if !isSecureContext && LokeyDiagnosticLogger.shared.canRecordInteractions {
+                LokeyDiagnosticLogger.shared.recordLetterDispositionFast(
+                    touchSeq: touchSeq,
+                    disposition: .apostropheDirect
+                )
             }
             return .commitText("'", remaining: currentDecode)
         }
@@ -1398,7 +1406,7 @@ public final class LokeySessionController {
         let cand = currentDecode.candidates[index]
         let canonical = canonicalCandidate(at: index) ?? cand
         if !isSecureContext, cand.text == "📋输出诊断日志" && cand.consumedInputCount == 8 {
-            let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
+            let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
             let report = LokeyDiagnosticLogger.formatPlainTextReport(
                 snapshot: LokeyDiagnosticLogger.shared.currentSnapshot(),
                 appVersion: ver
@@ -1407,7 +1415,7 @@ public final class LokeySessionController {
             return .commitText(report, remaining: currentDecode)
         }
         if !isSecureContext, cand.text == "📋输出选词样本" && cand.consumedInputCount == 8 {
-            let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
+            let ver = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
             let snap = (selectionFeedbackLogger ?? LokeySelectionFeedbackLogger.shared).currentSnapshot()
             let report = LokeySelectionFeedbackLogger.formatTSVReport(snapshot: snap, appVersion: ver)
             resetComposing()

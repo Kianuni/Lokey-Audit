@@ -112,7 +112,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
     private let renderer: ViterbiDecoder
     private var scoreCache: [CleanScoreKey: Int] = [:]
     private var cachedUserGeneration: UInt64 = 0
-    private var cachedWordCost: Int = 320
+    private var cachedWordCost: Int = 60
     private var cleanBestBuf = [Int](repeating: 0, count: 68)
     private var cleanBackStartBuf = [Int](repeating: -1, count: 68)
     private var cleanBackNodeBuf = [UInt32](repeating: 0, count: 68)
@@ -717,9 +717,9 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         var classical: (candidate: LokeyCandidate, total: Int, rawTotal: Int, cost: Int)?
         var surfaces: [String: (candidate: LokeyCandidate, score: Int, cost: Int, usesFar: Bool)] = [:]
         let allowedSylSlack = (cleanReferenceScore == nil || (lntrActive && isFracturedVowelIslandLiteral)) ? 1 : 0
-        var typoFeatCache: [String: [Float]] = [:]
+        var typoFeatCache: [String: NeuralSentenceScorer.TypoFeatureVec64] = [:]
 
-        func typoFeatures(for cand: LokeyCandidate, readingBytes: [UInt8], cost: Int) -> [Float] {
+        func typoFeatures(for cand: LokeyCandidate, readingBytes: [UInt8], cost: Int) -> NeuralSentenceScorer.TypoFeatureVec64 {
             let cacheKey = "\(cand.text)\0\(cost)"
             if let existing = typoFeatCache[cacheKey] {
                 return existing
@@ -738,9 +738,13 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             return feat
         }
 
-        let refTypoFeat: [Float] = lntrActive
-            ? typoFeatures(for: reference, readingBytes: decoderPinyin, cost: decoderCost)
-            : []
+        var cachedRefTypoFeat: NeuralSentenceScorer.TypoFeatureVec64?
+        func refTypoFeatures() -> NeuralSentenceScorer.TypoFeatureVec64 {
+            if let existing = cachedRefTypoFeat { return existing }
+            let computed = typoFeatures(for: reference, readingBytes: decoderPinyin, cost: decoderCost)
+            cachedRefTypoFeat = computed
+            return computed
+        }
 
         func collect(_ c: LokeyCandidate, score: Int, cost: Int, usesFar: Bool) {
             guard inspectSpelling, c.kind == .sentence || c.kind == .lexiconPhrase,
@@ -773,7 +777,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                 let lntrBonus: Int
                 if lntrActive && first.text != reference.text {
                     let firstFeat = typoFeatures(for: first, readingBytes: alt, cost: cost)
-                    var rawBonus = lexicon.neuralLM.scoreTypoDeltaQ8(challenger: firstFeat, incumbent: refTypoFeat)
+                    var rawBonus = lexicon.neuralLM.scoreTypoDeltaQ8(challenger: firstFeat, incumbent: refTypoFeatures())
                     if decoderCost == 0 && cost > 0 && typedIsClean && !isFracturedVowelIslandLiteral && cleanReferenceScore != nil {
                         rawBonus = min(0, rawBonus)
                     } else if rawBonus < 0, cost <= decoderCost + costs.deletion,
@@ -843,10 +847,20 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             let score = max(entry?.score ?? Int.min, baselineScore)
             let cost = entry?.cost ?? (promoted?.cost ?? decoderCost)
             let boundary = lexicon.spellingBoundary(incumbent.text, trailingWord: incumbent.trailingWord)
-            let incReadingBytes = Array(incumbent.matchedSyllables.joined().utf8)
-            let incTypoFeat: [Float] = lntrActive
-                ? typoFeatures(for: incumbent, readingBytes: incReadingBytes, cost: cost)
-                : []
+            var cachedIncReadingBytes: [UInt8]?
+            func incReadingBytes() -> [UInt8] {
+                if let existing = cachedIncReadingBytes { return existing }
+                let built = Array(incumbent.matchedSyllables.joined().utf8)
+                cachedIncReadingBytes = built
+                return built
+            }
+            var cachedIncTypoFeat: NeuralSentenceScorer.TypoFeatureVec64?
+            func incTypoFeatures() -> NeuralSentenceScorer.TypoFeatureVec64 {
+                if let existing = cachedIncTypoFeat { return existing }
+                let computed = typoFeatures(for: incumbent, readingBytes: incReadingBytes(), cost: cost)
+                cachedIncTypoFeat = computed
+                return computed
+            }
             var alternatives: [(candidate: LokeyCandidate, gain: Int, cost: Int, boundaryGain: Int, usesFar: Bool)] = []
             for (text, other) in surfaces where text != incumbent.text {
                 if other.score <= score - 5200 { continue }
@@ -871,7 +885,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                 if lntrActive {
                     let otherBytes = Array(other.candidate.matchedSyllables.joined().utf8)
                     let otherFeat = typoFeatures(for: other.candidate, readingBytes: otherBytes, cost: other.cost)
-                    var rawDelta = lexicon.neuralLM.scoreTypoDeltaQ8(challenger: otherFeat, incumbent: incTypoFeat)
+                    var rawDelta = lexicon.neuralLM.scoreTypoDeltaQ8(challenger: otherFeat, incumbent: incTypoFeatures())
                     if cost == 0 && other.cost > 0 && typedIsClean && !isFracturedVowelIslandLiteral && cleanReferenceScore != nil {
                         rawDelta = min(0, rawDelta)
                     } else if other.cost <= cost + costs.deletion && (ll - prior) >= 1400 {
@@ -910,7 +924,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                     if let existing = cachedIncUsesFar {
                         incFar = existing
                     } else {
-                        let computed = alignmentCostAndFarFlag(typed: typed, intended: incReadingBytes, hypsCount: hyps.count).usesFar
+                        let computed = alignmentCostAndFarFlag(typed: typed, intended: incReadingBytes(), hypsCount: hyps.count).usesFar
                         cachedIncUsesFar = computed
                         incFar = computed
                     }
@@ -1413,8 +1427,8 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
     ) {
         let n = s.count
         guard n > 0, n < 62 else { return }
-        var scratch = [UInt8](repeating: 0, count: n + 1)
-        scratch.withUnsafeMutableBufferPointer { out in
+        withUnsafeTemporaryAllocation(of: UInt8.self, capacity: n + 1) { out in
+            out.initialize(repeating: 0)
             guard let outBase = out.baseAddress else { return }
             s.withUnsafeBufferPointer { src in
                 guard let srcBase = src.baseAddress else { return }
@@ -2073,7 +2087,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         maxPrimaryDrift: Int,
         precedingContext: String?,
         topicMemory: NeuralSentenceScorer.Vec32 = .zero
-    ) -> [Float] {
+    ) -> NeuralSentenceScorer.TypoFeatureVec64 {
         let words = segmentCandidateWords(cand.text, syllables: cand.matchedSyllables, trailingWord: cand.trailingWord)
         let stats = typoAlignmentBreakdown(typed: typed, intended: readingBytes, hyps: hyps)
         let spellingLL = lexicon.spellingLikelihood(cand.text)
@@ -2085,7 +2099,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             topicMemory: topicMemory
         )
         let bwdQ8 = lexicon.neuralLM.isBackwardLoaded ? lexicon.neuralLM.scoreBackwardSentence(words: words) : 0
-        return lexicon.neuralLM.extractTypoFeatures(
+        return lexicon.neuralLM.extractTypoFeaturesVec64(
             typedCount: typed.count,
             intendedCount: readingBytes.count,
             syllableCount: cand.matchedSyllables.count,

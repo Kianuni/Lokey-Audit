@@ -248,7 +248,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(hostBundle.bundleIdentifier, "com.kianuni.lokey.audit")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "86")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "87")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool, false)
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool, false)
         XCTAssertNil(hostBundle.object(forInfoDictionaryKey: "CFBundleDocumentTypes"))
@@ -259,7 +259,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(extBundle.bundleIdentifier, "com.kianuni.lokey.audit.keyboard")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "86")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "87")
 
         XCTAssertEqual(Bundle(for: LokeyAuditTests.self).bundleIdentifier, "com.kianuni.lokey.audit.tests")
 
@@ -562,5 +562,75 @@ final class LokeyAuditTests: XCTestCase {
         vc.beginAppearanceTransition(false, animated: false)
         vc.endAppearanceTransition()
         XCTAssertEqual(vc.activeSessionForTesting?.topicMemoryVector, .zero)
+    }
+
+    func testRawBufferNegativeOffsetBoundsAndCandidateUIMemoryHygiene() throws {
+        let sampleBytes: [UInt8] = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0]
+        sampleBytes.withUnsafeBytes { raw in
+            for badOffset in [-1, -2, -4, -8, Int.min, Int.max, raw.count] {
+                XCTAssertEqual(MmapLexicon.loadU16(raw, at: badOffset), 0)
+                XCTAssertEqual(MmapLexicon.loadI16(raw, at: badOffset), 0)
+                XCTAssertEqual(MmapLexicon.loadU32(raw, at: badOffset), 0)
+                XCTAssertEqual(MmapLexicon.loadU64BE(raw, at: badOffset), 0)
+                XCTAssertEqual(LokeyLexiconPackManager.readU16(raw, at: badOffset), 0)
+                XCTAssertEqual(LokeyLexiconPackManager.readU32(raw, at: badOffset), 0)
+                XCTAssertEqual(NeuralSentenceScorer.loadU16(raw, at: badOffset), 0)
+                XCTAssertEqual(NeuralSentenceScorer.loadU32(raw, at: badOffset), 0)
+                XCTAssertEqual(OpenCCConverter.loadU16(raw, at: badOffset), 0)
+                XCTAssertEqual(OpenCCConverter.loadU32(raw, at: badOffset), 0)
+            }
+            XCTAssertEqual(MmapLexicon.loadU16(raw, at: 8), 0xA090)
+            XCTAssertEqual(MmapLexicon.loadU16(raw, at: 9), 0)
+            XCTAssertEqual(OpenCCConverter.loadU32(raw, at: 6), 0xA0908070)
+            XCTAssertEqual(OpenCCConverter.loadU32(raw, at: 7), 0)
+            XCTAssertEqual(NeuralSentenceScorer.loadU32(raw, at: 6), 0xA0908070)
+            XCTAssertEqual(NeuralSentenceScorer.loadU32(raw, at: 7), 0)
+        }
+
+        // Verify `CandidateBarView.trimUnusedPoolIfIdle()` shrinks expanded pool while idle candidates remain visible
+        let bar = CandidateBarView(frame: CGRect(x: 0, y: 0, width: 1200, height: 44))
+        let wideCands = (0..<36).map { idx in
+            LokeyCandidate(text: "字\(idx)", consumedInputCount: 2, matchedSyllables: ["zi"], scoreQ8: -100 - idx, kind: .lexiconPhrase)
+        }
+        bar.update(candidates: wideCands, highlightFirst: true, expanded: false)
+        let expandedPoolCount = bar.poolCapacityForTesting
+        XCTAssertGreaterThan(expandedPoolCount, 20)
+
+        bar.frame = CGRect(x: 0, y: 0, width: 393, height: 44)
+        let idleCands = ["的", "了", "我", "是", "在", "不", "有", "你", "好", "也", "就", "都", "要", "会"].map {
+            LokeyCandidate(text: $0, consumedInputCount: 0, matchedSyllables: [], scoreQ8: 0, kind: .lexiconPhrase)
+        }
+        bar.update(candidates: idleCands, highlightFirst: false, expanded: false)
+        bar.trimUnusedPoolIfIdle()
+        XCTAssertLessThan(bar.poolCapacityForTesting, expandedPoolCount)
+        XCTAssertLessThanOrEqual(bar.poolCapacityForTesting, 14)
+        XCTAssertEqual(bar.candidateButton(at: 0).currentTitle, "的")
+
+        bar.update(candidates: [], highlightFirst: false, expanded: false)
+        bar.trimUnusedPoolIfIdle()
+        XCTAssertEqual(bar.poolCapacityForTesting, 12)
+
+        // Verify `ExpandedCandidateGridView` deallocates cleanly while `CADisplayLink` is scheduled
+        let prevDiagEnabled = LokeyDiagnosticLogger.shared.isEnabled
+        let prevSecure = LokeyDiagnosticLogger.shared.isSecureContext
+        LokeyDiagnosticLogger.shared.isEnabled = true
+        LokeyDiagnosticLogger.shared.isSecureContext = false
+        defer {
+            LokeyDiagnosticLogger.shared.isEnabled = prevDiagEnabled
+            LokeyDiagnosticLogger.shared.isSecureContext = prevSecure
+        }
+
+        weak var weakGrid: ExpandedCandidateGridView?
+        autoreleasepool {
+            let win = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 300))
+            let grid = ExpandedCandidateGridView(frame: CGRect(x: 0, y: 0, width: 393, height: 224))
+            weakGrid = grid
+            win.addSubview(grid)
+            win.isHidden = false
+            grid.isHidden = false
+            grid.beginOpenTrace(start: CACurrentMediaTime())
+            grid.layoutSubviews()
+        }
+        XCTAssertNil(weakGrid)
     }
 }

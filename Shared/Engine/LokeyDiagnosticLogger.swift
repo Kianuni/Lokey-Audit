@@ -164,12 +164,21 @@ public enum MissedTouchReasonToken: Sendable {
 /// Zero-allocation letter disposition token recorded on `.main`.
 public enum LetterDispositionToken: Sendable {
     case engineNotLoadedDirect(Character, Bool)
+    case enteredPinyin(Character, Int)
+    case englishDirect(Character)
+    case apostropheDirect
 
     fileprivate var renderedText: String {
         switch self {
         case let .engineNotLoadedDirect(ch, isShifted):
             let s = isShifted ? String(ch.uppercased()) : String(ch)
             return "未入串，引擎未载入，直接输入 \(s)"
+        case let .enteredPinyin(ch, pos):
+            return "已入串 字母=\(ch) 位置=\(pos)"
+        case let .englishDirect(ch):
+            return "未入串，英文直输 \(ch)"
+        case .apostropheDirect:
+            return "未入串，隔音符直输"
         }
     }
 }
@@ -1042,7 +1051,7 @@ public final class LokeyDiagnosticLogger: @unchecked Sendable {
         os_unfair_lock_unlock(lockPtr)
         if let clearedCopy, isRunningInExtension {
             ioQueue.async { [weak self] in
-                self?.writeSnapshotToDisk(clearedCopy, notifyIPC: false, isClearReset: true)
+                self?.writeSnapshotToDisk(clearedCopy, notifyIPC: false, isClearReset: true, forceWrite: true)
             }
         }
     }
@@ -1171,7 +1180,7 @@ public final class LokeyDiagnosticLogger: @unchecked Sendable {
 
         cachedMaterializedEntries.removeAll(keepingCapacity: true)
         cachedMaterializedEpoch = nextEpoch
-        writeSnapshotToDisk(snapToWrite, notifyIPC: true, isClearReset: true)
+        writeSnapshotToDisk(snapToWrite, notifyIPC: true, isClearReset: true, forceWrite: true)
         if fileURLOverride == nil {
             LokeyIPC.postDiagnosticLogCleared()
         }
