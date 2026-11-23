@@ -117,7 +117,9 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
     private var cleanBackStartBuf = [Int](repeating: -1, count: 68)
     private var cleanBackNodeBuf = [UInt32](repeating: 0, count: 68)
     private var cleanStackBuf: [(node: UInt32, pos: Int, depth: Int)] = []
-    private var alignBuf = [Int](repeating: 0, count: 68 * 68)
+    private var alignBuf: [Int] = []
+    private var breakdownDPBuf: [Int] = []
+    private var breakdownBackOpBuf: [UInt8] = []
     private var hypCostBuf = [Int](repeating: 0, count: 48 * 26)
     private struct RefineHistoryEntry {
         let samples: [TouchSample]
@@ -151,7 +153,18 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         self.cachedWordCost = self.costs.wordCost
         self.renderer = ViterbiDecoder(lexicon: lexicon, userStore: userStore, lookupCache: lookupCache)
         self.cleanStackBuf.reserveCapacity(64)
-        self.scoreCache.reserveCapacity(512)
+    }
+
+    /// Releases transient score caches and DP scratch buffers under memory pressure.
+    public func purgeTransientCaches(releaseCapacity: Bool = false) {
+        scoreCache.removeAll(keepingCapacity: !releaseCapacity)
+        recentRefineHistory.removeAll(keepingCapacity: !releaseCapacity)
+        renderer.purgeTransientCaches(releaseCapacity: releaseCapacity)
+        if releaseCapacity {
+            alignBuf.removeAll(keepingCapacity: false)
+            breakdownDPBuf.removeAll(keepingCapacity: false)
+            breakdownBackOpBuf.removeAll(keepingCapacity: false)
+        }
     }
 
     // MARK: - Public entry
@@ -1617,83 +1630,10 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         }
     }
 
-    /// Zero-allocation weighted Damerau-Levenshtein cost using prebuilt `hypCostBuf` and reusable `alignBuf`.
-    private func alignmentCostFast(typed: [UInt8], intended: [UInt8], hypsCount: Int) -> Int {
+    /// Zero-allocation weighted Damerau-Levenshtein cost + minimum-cost far-substitution flag using prebuilt `hypCostBuf` and reusable `alignBuf`.
+    private func alignmentCostAndFarFlag(typed: [UInt8], intended: [UInt8], hypsCount: Int) -> (cost: Int, usesFar: Bool) {
         let n = typed.count, m = intended.count
-        if n == 0 || m == 0 { return max(n, m) * costs.insertion }
-        let stride = m + 1
-        let needed = (n + 1) * stride
-        if alignBuf.count < needed {
-            alignBuf = [Int](repeating: 0, count: needed)
-        }
-        let insCost = costs.insertion
-        let delCost = costs.deletion
-        let dupDelCost = costs.duplicateDeletion
-        let transCost = costs.transposition
-        let nbrSubCost = costs.neighborSubstitution
-        let farCost = costs.farSubstitution
-        return alignBuf.withUnsafeMutableBufferPointer { d in
-            d[0] = 0
-            for i in 1...n { d[i * stride] = d[(i - 1) * stride] + delCost }
-            for j in 1...m { d[j] = d[j - 1] + insCost }
-            for i in 1...n {
-                let t = typed[i - 1]
-                let rowOff = i * stride
-                let prevRowOff = (i - 1) * stride
-                let dup = (i >= 2 && typed[i - 2] == t) || (i < n && typed[i] == t)
-                let niEGraze = t == 0x65 && i >= 3 && typed[i - 3] == 0x6E && typed[i - 2] == 0x69
-                let extraKeyCost = (dup || niEGraze) ? dupDelCost : delCost
-                let hypBase = (i - 1 < hypsCount) ? (i - 1) * 26 : -1
-                for j in 1...m {
-                    let w = intended[j - 1]
-                    var v: Int
-                    if t == w {
-                        v = d[prevRowOff + j - 1]
-                    } else {
-                        let subCost = (hypBase >= 0 && w >= 0x61 && w <= 0x7A)
-                            ? hypCostBuf[hypBase + Int(w - 0x61)]
-                            : farCost
-                        v = d[prevRowOff + j - 1] + subCost
-                    }
-                    let delCand = d[prevRowOff + j] + extraKeyCost
-                    if delCand < v { v = delCand }
-                    let stepInsCost = (w == 0x67 && j >= 2 && intended[j - 2] == 0x6E && t == 0x6E)
-                        ? max(240, insCost - 140)
-                        : insCost
-                    let insCand = d[rowOff + j - 1] + stepInsCost
-                    if insCand < v { v = insCand }
-                    if i >= 2, j >= 2 {
-                        let tPrev = typed[i - 2]
-                        let wPrev = intended[j - 2]
-                        let diagPrev2 = d[(i - 2) * stride + (j - 2)]
-                        if t == wPrev, tPrev == w, t != w {
-                            let trCand = diagPrev2 + transCost
-                            if trCand < v { v = trCand }
-                        } else if t == wPrev, tPrev != w, Self.areQWERTYNeighbors(tPrev, w) {
-                            let prevHypBase = (i - 2 < hypsCount) ? (i - 2) * 26 : -1
-                            let subCost = (prevHypBase >= 0 && w >= 0x61 && w <= 0x7A)
-                                ? hypCostBuf[prevHypBase + Int(w - 0x61)]
-                                : nbrSubCost
-                            let trSubCand = diagPrev2 + transCost + subCost
-                            if trSubCand < v { v = trSubCand }
-                        } else if tPrev == w, t != wPrev, Self.areQWERTYNeighbors(t, wPrev) {
-                            let subCost = (hypBase >= 0 && wPrev >= 0x61 && wPrev <= 0x7A)
-                                ? hypCostBuf[hypBase + Int(wPrev - 0x61)]
-                                : nbrSubCost
-                            let trSubCand = diagPrev2 + transCost + subCost
-                            if trSubCand < v { v = trSubCand }
-                        }
-                    }
-                    d[rowOff + j] = v
-                }
-            }
-            return d[n * stride + m]
-        }
-    }
-
-    private func alignmentUsesFarSubstitution(typed: [UInt8], intended: [UInt8], hypsCount: Int) -> Bool {
-        let n = typed.count, m = intended.count
-        if n == 0 || m == 0 { return false }
+        if n == 0 || m == 0 { return (max(n, m) * costs.insertion, false) }
         let stride = m + 1
         let needed = (n + 1) * stride
         if alignBuf.count < needed {
@@ -1766,8 +1706,19 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                     d[rowOff + j] = v
                 }
             }
-            return (d[n * stride + m] & 1) != 0
+            let packed = d[n * stride + m]
+            return (packed >> 1, (packed & 1) != 0)
         }
+    }
+
+    @inline(__always)
+    private func alignmentCostFast(typed: [UInt8], intended: [UInt8], hypsCount: Int) -> Int {
+        alignmentCostAndFarFlag(typed: typed, intended: intended, hypsCount: hypsCount).cost
+    }
+
+    @inline(__always)
+    private func alignmentUsesFarSubstitution(typed: [UInt8], intended: [UInt8], hypsCount: Int) -> Bool {
+        alignmentCostAndFarFlag(typed: typed, intended: intended, hypsCount: hypsCount).usesFar
     }
 
     /// Weighted Damerau-Levenshtein cost of producing `typed` when the user meant `intended`.
@@ -1996,103 +1947,113 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             return (0, m, 0, n, 0)
         }
         let stride = m + 1
-        var dp = [Int](repeating: Int.max / 4, count: (n + 1) * stride)
-        var backOp = [UInt8](repeating: 0, count: (n + 1) * stride) // 0=match, 1=sub, 2=ins(omit), 3=del, 4=trans
+        let needed = (n + 1) * stride
+        if breakdownDPBuf.count < needed {
+            breakdownDPBuf = [Int](repeating: Int.max / 4, count: needed)
+        }
+        if breakdownBackOpBuf.count < needed {
+            breakdownBackOpBuf = [UInt8](repeating: 0, count: needed)
+        }
         let insCost = costs.insertion
         let delCost = costs.deletion
         let dupDelCost = costs.duplicateDeletion
         let transCost = costs.transposition
         let farCost = costs.farSubstitution
 
-        dp[0] = 0
-        for i in 1...n {
-            dp[i * stride] = i * delCost
-            backOp[i * stride] = 3
-        }
-        for j in 1...m {
-            dp[j] = j * insCost
-            backOp[j] = 2
-        }
-        for i in 1...n {
-            let t = typed[i - 1]
-            let dup = (i >= 2 && typed[i - 2] == t) || (i < n && typed[i] == t)
-            let extraKeyCost = dup ? dupDelCost : delCost
-            let hypBase = (i - 1 < hyps.count) ? (i - 1) * 26 : -1
-            for j in 1...m {
-                let w = intended[j - 1]
-                let idx = i * stride + j
-                if t == w {
-                    dp[idx] = dp[(i - 1) * stride + (j - 1)]
-                    backOp[idx] = 0
-                } else {
-                    let subCost = (hypBase >= 0 && w >= 0x61 && w <= 0x7A)
-                        ? hypCostBuf[hypBase + Int(w - 0x61)]
-                        : farCost
-                    dp[idx] = dp[(i - 1) * stride + (j - 1)] + subCost
-                    backOp[idx] = 1
+        return breakdownDPBuf.withUnsafeMutableBufferPointer { dp in
+            breakdownBackOpBuf.withUnsafeMutableBufferPointer { backOp in
+                dp[0] = 0
+                backOp[0] = 0
+                for i in 1...n {
+                    dp[i * stride] = i * delCost
+                    backOp[i * stride] = 3
                 }
-                let delCand = dp[(i - 1) * stride + j] + extraKeyCost
-                if delCand < dp[idx] {
-                    dp[idx] = delCand
-                    backOp[idx] = 3
+                for j in 1...m {
+                    dp[j] = j * insCost
+                    backOp[j] = 2
                 }
-                let stepInsCost = (w == 0x67 && j >= 2 && intended[j - 2] == 0x6E && t == 0x6E)
-                    ? max(240, insCost - 140)
-                    : insCost
-                let insCand = dp[i * stride + (j - 1)] + stepInsCost
-                if insCand < dp[idx] {
-                    dp[idx] = insCand
-                    backOp[idx] = 2
-                }
-                if i >= 2, j >= 2, t == intended[j - 2], typed[i - 2] == w, t != w {
-                    let trCand = dp[(i - 2) * stride + (j - 2)] + transCost
-                    if trCand < dp[idx] {
-                        dp[idx] = trCand
-                        backOp[idx] = 4
+                for i in 1...n {
+                    let t = typed[i - 1]
+                    let dup = (i >= 2 && typed[i - 2] == t) || (i < n && typed[i] == t)
+                    let extraKeyCost = dup ? dupDelCost : delCost
+                    let hypBase = (i - 1 < hyps.count) ? (i - 1) * 26 : -1
+                    for j in 1...m {
+                        let w = intended[j - 1]
+                        let idx = i * stride + j
+                        if t == w {
+                            dp[idx] = dp[(i - 1) * stride + (j - 1)]
+                            backOp[idx] = 0
+                        } else {
+                            let subCost = (hypBase >= 0 && w >= 0x61 && w <= 0x7A)
+                                ? hypCostBuf[hypBase + Int(w - 0x61)]
+                                : farCost
+                            dp[idx] = dp[(i - 1) * stride + (j - 1)] + subCost
+                            backOp[idx] = 1
+                        }
+                        let delCand = dp[(i - 1) * stride + j] + extraKeyCost
+                        if delCand < dp[idx] {
+                            dp[idx] = delCand
+                            backOp[idx] = 3
+                        }
+                        let stepInsCost = (w == 0x67 && j >= 2 && intended[j - 2] == 0x6E && t == 0x6E)
+                            ? max(240, insCost - 140)
+                            : insCost
+                        let insCand = dp[i * stride + (j - 1)] + stepInsCost
+                        if insCand < dp[idx] {
+                            dp[idx] = insCand
+                            backOp[idx] = 2
+                        }
+                        if i >= 2, j >= 2, t == intended[j - 2], typed[i - 2] == w, t != w {
+                            let trCand = dp[(i - 2) * stride + (j - 2)] + transCost
+                            if trCand < dp[idx] {
+                                dp[idx] = trCand
+                                backOp[idx] = 4
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        var subst = 0, omit = 0, trans = 0, del = 0, matchedGainQ8 = 0
-        var ci = n, cj = m
-        while ci > 0 || cj > 0 {
-            let op = backOp[ci * stride + cj]
-            switch op {
-            case 0:
-                if ci - 1 < hyps.count {
-                    let target = Character(UnicodeScalar(intended[cj - 1]))
-                    let pPen = hyps[ci - 1].first(where: { $0.char == target })?.penaltyQ8 ?? 0
-                    matchedGainQ8 += max(0, 260 - pPen)
-                }
-                ci -= 1
-                cj -= 1
-            case 1:
-                subst += 1
-                if ci - 1 < hyps.count {
-                    let target = Character(UnicodeScalar(intended[cj - 1]))
-                    if let h = hyps[ci - 1].first(where: { $0.char == target }) {
-                        matchedGainQ8 += max(0, 340 - h.penaltyQ8)
+                var subst = 0, omit = 0, trans = 0, del = 0, matchedGainQ8 = 0
+                var ci = n, cj = m
+                while ci > 0 || cj > 0 {
+                    let op = backOp[ci * stride + cj]
+                    switch op {
+                    case 0:
+                        if ci - 1 < hyps.count {
+                            let target = Character(UnicodeScalar(intended[cj - 1]))
+                            let pPen = hyps[ci - 1].first(where: { $0.char == target })?.penaltyQ8 ?? 0
+                            matchedGainQ8 += max(0, 260 - pPen)
+                        }
+                        ci -= 1
+                        cj -= 1
+                    case 1:
+                        subst += 1
+                        if ci - 1 < hyps.count {
+                            let target = Character(UnicodeScalar(intended[cj - 1]))
+                            if let h = hyps[ci - 1].first(where: { $0.char == target }) {
+                                matchedGainQ8 += max(0, 340 - h.penaltyQ8)
+                            }
+                        }
+                        ci -= 1
+                        cj -= 1
+                    case 2:
+                        omit += 1
+                        cj -= 1
+                    case 3:
+                        del += 1
+                        ci -= 1
+                    case 4:
+                        trans += 1
+                        ci -= 2
+                        cj -= 2
+                    default:
+                        if ci > 0 { ci -= 1 }
+                        if cj > 0 { cj -= 1 }
                     }
                 }
-                ci -= 1
-                cj -= 1
-            case 2:
-                omit += 1
-                cj -= 1
-            case 3:
-                del += 1
-                ci -= 1
-            case 4:
-                trans += 1
-                ci -= 2
-                cj -= 2
-            default:
-                if ci > 0 { ci -= 1 }
-                if cj > 0 { cj -= 1 }
+                return (subst, omit, trans, del, matchedGainQ8)
             }
         }
-        return (subst, omit, trans, del, matchedGainQ8)
     }
 
     private func computeTypoCandidateFeatures(

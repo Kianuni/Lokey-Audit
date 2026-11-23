@@ -104,7 +104,7 @@ public struct LokeyPersonalBackup: Codable, Equatable, Sendable {
                 return LokeyPersonalBackup(
                     format: currentFormat,
                     exportedAtISO8601: ISO8601DateFormatter().string(from: Date()),
-                    appVersion: "0.8.1",
+                    appVersion: "0.9.5",
                     touchCalibration: cal,
                     phrases: [],
                     bigrams: [],
@@ -228,6 +228,8 @@ public final class UserLexiconStore: @unchecked Sendable {
         public let syllablePrefixSet: Set<String>
         public let strictSyllablePrefixSet: Set<String>
         fileprivate let exactCache: [String: [UserPhrase]]
+        fileprivate let jianpinCache: [String: [UserPhrase]]
+        fileprivate let shuangpinCache: [String: [UserPhrase]]
         fileprivate let bigramBonusCache: [String: [String: Int]]
         fileprivate let unigramCache: [String: [String: UnigramBoostEntry]]
 
@@ -235,6 +237,38 @@ public final class UserLexiconStore: @unchecked Sendable {
         public func exactSyllablePhrases(compactPinyin: String) -> [UserPhrase] {
             guard hasAnyExactPhrases, !compactPinyin.isEmpty else { return [] }
             return exactCache[compactPinyin] ?? []
+        }
+
+        /// Lock-free O(1) lookup for full-buffer exact, Jianpin, and Shuangpin user phrases.
+        public func fullBufferPhrases(
+            cleanLower: String,
+            scheme: PinyinScheme,
+            limit: Int = 6
+        ) -> [UserPhrase] {
+            guard hasAnyExactPhrases, !cleanLower.isEmpty else { return [] }
+            var out: [UserPhrase] = []
+            var seen = Set<String>()
+
+            if let exactHits = exactCache[cleanLower] {
+                for p in exactHits where seen.insert(p.id).inserted {
+                    out.append(p)
+                }
+            }
+            if scheme == .quanpin, cleanLower.count >= 2, let jpHits = jianpinCache[cleanLower] {
+                for p in jpHits where seen.insert(p.id).inserted {
+                    out.append(p)
+                }
+            }
+            out.sort { $0.dynamicBoostQ8 > $1.dynamicBoostQ8 }
+            if out.count > limit {
+                out.removeSubrange(limit..<out.count)
+            }
+            if scheme != .quanpin, let spHits = shuangpinCache[cleanLower] {
+                for p in spHits where seen.insert(p.id).inserted {
+                    out.append(p)
+                }
+            }
+            return out
         }
 
         @inline(__always)
@@ -294,7 +328,56 @@ public final class UserLexiconStore: @unchecked Sendable {
     private var _hasAnyExactPhrases: Bool = false
     private var _hasAnyBigrams: Bool = false
     private var _hasAnyUnigrams: Bool = false
-    private var cachedSnapshot: DecodeSnapshot?
+    private var cachedQuanpinSnapshot: DecodeSnapshot?
+    private var cachedXiaoheSnapshot: DecodeSnapshot?
+    private var cachedZiranmaSnapshot: DecodeSnapshot?
+    private var cachedXiaohePhrases: [String: [UserPhrase]]?
+    private var cachedZiranmaPhrases: [String: [UserPhrase]]?
+
+    private func invalidateSnapshotsLocked(phrasesChanged: Bool) {
+        _cacheGeneration &+= 1
+        cachedQuanpinSnapshot = nil
+        cachedXiaoheSnapshot = nil
+        cachedZiranmaSnapshot = nil
+        if phrasesChanged {
+            cachedXiaohePhrases = nil
+            cachedZiranmaPhrases = nil
+        }
+    }
+
+    private func buildShuangpinPhraseIndexLocked(for scheme: PinyinScheme) -> [String: [UserPhrase]] {
+        guard scheme != .quanpin, !orderedPhrasesCache.isEmpty else { return [:] }
+        if scheme == .xiaohe, let existing = cachedXiaohePhrases { return existing }
+        if scheme == .ziranma, let existing = cachedZiranmaPhrases { return existing }
+
+        var built: [String: [UserPhrase]] = [:]
+        for up in orderedPhrasesCache.prefix(256) {
+            let syls = up.pinyinNormalized.split(separator: " ")
+            guard !syls.isEmpty else { continue }
+            var encoded = ""
+            encoded.reserveCapacity(syls.count * 2)
+            var valid = true
+            for syl in syls {
+                guard let spCode = PinyinSyllableAutomaton.primaryShuangpinCode(
+                    forCanonicalSyllable: String(syl),
+                    scheme: scheme
+                ) else {
+                    valid = false
+                    break
+                }
+                encoded.append(spCode)
+            }
+            if valid, !encoded.isEmpty {
+                built[encoded, default: []].append(up)
+            }
+        }
+        if scheme == .xiaohe {
+            cachedXiaohePhrases = built
+        } else if scheme == .ziranma {
+            cachedZiranmaPhrases = built
+        }
+        return built
+    }
 
     public var cacheGeneration: UInt64 {
         lock.lock()
@@ -318,12 +401,26 @@ public final class UserLexiconStore: @unchecked Sendable {
     }
 
     /// Returns a lock-free immutable snapshot of user phrases and bigrams in `O(1)` via copy-on-write sharing.
-    public func decodeSnapshot() -> DecodeSnapshot {
+    public func decodeSnapshot(for scheme: PinyinScheme = .quanpin) -> DecodeSnapshot {
         lock.lock()
-        if let snap = cachedSnapshot {
-            lock.unlock()
-            return snap
+        switch scheme {
+        case .quanpin:
+            if let snap = cachedQuanpinSnapshot {
+                lock.unlock()
+                return snap
+            }
+        case .xiaohe:
+            if let snap = cachedXiaoheSnapshot {
+                lock.unlock()
+                return snap
+            }
+        case .ziranma:
+            if let snap = cachedZiranmaSnapshot {
+                lock.unlock()
+                return snap
+            }
         }
+        let spMap = (scheme == .quanpin) ? [:] : buildShuangpinPhraseIndexLocked(for: scheme)
         let built = DecodeSnapshot(
             generation: _cacheGeneration,
             hasAnyExactPhrases: _hasAnyExactPhrases,
@@ -332,10 +429,16 @@ public final class UserLexiconStore: @unchecked Sendable {
             syllablePrefixSet: syllablePrefixCache,
             strictSyllablePrefixSet: strictSyllablePrefixCache,
             exactCache: exactCache,
+            jianpinCache: jianpinCache,
+            shuangpinCache: spMap,
             bigramBonusCache: bigramBonusCache,
             unigramCache: unigramCache
         )
-        cachedSnapshot = built
+        switch scheme {
+        case .quanpin: cachedQuanpinSnapshot = built
+        case .xiaohe: cachedXiaoheSnapshot = built
+        case .ziranma: cachedZiranmaSnapshot = built
+        }
         lock.unlock()
         return built
     }
@@ -536,9 +639,9 @@ public final class UserLexiconStore: @unchecked Sendable {
         """
         sqlite3_exec(db, schema, nil, nil, nil)
 
-        // Atomic schema v4 hygiene migration: purge legacy whole-sentence rows (`is_custom = 0` >=4 chars,
+        // Atomic schema hygiene migration: purge legacy whole-sentence rows (`is_custom = 0` >=4 chars,
         // >=5-char multi-segment sentences, and `is_custom = 1` conversational clauses like "明天我们" or "发个定位"
-        // created by manual segment taps in v0.1..v0.3) plus >=4-char or clause-like `user_bigrams`, while preserving
+        // created by manual segment taps) plus >=4-char or clause-like `user_bigrams`, while preserving
         // genuine custom phrases (`is_custom = 1` such as "落键输入", "兰州陇原", "陈泽宇").
         var verStmt: OpaquePointer?
         var currentVer: Int32 = 0
@@ -888,8 +991,7 @@ public final class UserLexiconStore: @unchecked Sendable {
         _hasAnyExactPhrases = nextHasExact
         _hasAnyBigrams = nextHasBigrams
         _hasAnyUnigrams = nextHasUnigrams
-        _cacheGeneration &+= 1
-        cachedSnapshot = nil
+        invalidateSnapshotsLocked(phrasesChanged: true)
         lock.unlock()
     }
 
@@ -962,8 +1064,7 @@ public final class UserLexiconStore: @unchecked Sendable {
             bucket[cleanSurface] = UnigramBoostEntry(count: nextCount, recencyDecay: 1.0)
             unigramCache[compact] = bucket
             _hasAnyUnigrams = true
-            _cacheGeneration &+= 1
-            cachedSnapshot = nil
+            invalidateSnapshotsLocked(phrasesChanged: false)
             enqueuePersistenceAndUnlock { [self] in
                 guard let db else { return }
                 let sql = """
@@ -1080,8 +1181,7 @@ public final class UserLexiconStore: @unchecked Sendable {
             syllablePrefixCache = prefixes.all
             strictSyllablePrefixCache = prefixes.strict
         }
-        _cacheGeneration &+= 1
-        cachedSnapshot = nil
+        invalidateSnapshotsLocked(phrasesChanged: true)
         enqueuePersistenceAndUnlock { [self] in
             guard let db else { return }
             let sql = """
@@ -1138,8 +1238,7 @@ public final class UserLexiconStore: @unchecked Sendable {
         }
         bigramBonusCache[prev] = bonusBucket
         _hasAnyBigrams = true
-        _cacheGeneration &+= 1
-        cachedSnapshot = nil
+        invalidateSnapshotsLocked(phrasesChanged: false)
         enqueuePersistenceAndUnlock { [self] in
             guard let db else { return }
             let sql = """
@@ -1328,8 +1427,7 @@ public final class UserLexiconStore: @unchecked Sendable {
             orderedPhrasesCache[existingIdx] = updated
             rebuildPhraseIndexesLocked()
         }
-        _cacheGeneration &+= 1
-        cachedSnapshot = nil
+        invalidateSnapshotsLocked(phrasesChanged: true)
         enqueuePersistenceAndUnlock { [self] in
             if let db {
                 var updStmt: OpaquePointer?
@@ -1384,8 +1482,7 @@ public final class UserLexiconStore: @unchecked Sendable {
         }
         rebuildBigramBonusCacheLocked()
         _hasAnyBigrams = !bigramCache.isEmpty
-        _cacheGeneration &+= 1
-        cachedSnapshot = nil
+        invalidateSnapshotsLocked(phrasesChanged: true)
         enqueuePersistenceAndUnlock { [self] in
             if let db {
                 var stmt: OpaquePointer?
@@ -1573,7 +1670,6 @@ public final class UserLexiconStore: @unchecked Sendable {
 
     public func clearAll() {
         lock.lock()
-        _cacheGeneration &+= 1
         exactCache.removeAll()
         jianpinCache.removeAll()
         orderedPhrasesCache.removeAll()
@@ -1585,7 +1681,7 @@ public final class UserLexiconStore: @unchecked Sendable {
         _hasAnyExactPhrases = false
         _hasAnyBigrams = false
         _hasAnyUnigrams = false
-        cachedSnapshot = nil
+        invalidateSnapshotsLocked(phrasesChanged: true)
         enqueuePersistenceAndUnlock { [self] in
             if let db {
                 sqlite3_exec(db, "DELETE FROM user_phrases; DELETE FROM user_bigrams; DELETE FROM user_unigrams;", nil, nil, nil)
@@ -1696,7 +1792,7 @@ public final class UserLexiconStore: @unchecked Sendable {
 
     public func exportPersonalBackup(
         touchCalibration: LokeyTouchCalibration? = LokeyTouchCalibration.load(),
-        appVersion: String = "0.8.1"
+        appVersion: String = "0.9.5"
     ) -> LokeyPersonalBackup {
         let records = dbQueue.sync { Self.readBackupRecords(from: db) }
         return LokeyPersonalBackup(
@@ -1712,7 +1808,7 @@ public final class UserLexiconStore: @unchecked Sendable {
 
     public func exportPersonalBackupJSONData(
         touchCalibration: LokeyTouchCalibration? = LokeyTouchCalibration.load(),
-        appVersion: String = "0.8.1"
+        appVersion: String = "0.9.5"
     ) throws -> Data {
         let backup = exportPersonalBackup(touchCalibration: touchCalibration, appVersion: appVersion)
         let encoder = JSONEncoder()

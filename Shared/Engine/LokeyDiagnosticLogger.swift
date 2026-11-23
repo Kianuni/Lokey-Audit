@@ -42,7 +42,7 @@ public struct LokeyDiagnosticCounters: Codable, Sendable, Equatable {
     // Older persisted reports omit the grid counter.
     public var gridScrollPanCount: Int?
     public var missedOrCancelledCount: Int = 0
-    public var pinyinAppendCount: Int? // Absent in reports from before Build 50.
+    public var pinyinAppendCount: Int? // Optional for backward compatibility with older persisted snapshots.
 
     public init() {}
 }
@@ -1645,7 +1645,7 @@ public final class LokeyDiagnosticLogger: @unchecked Sendable {
         lines.append("屏幕总点击: \(c.screenTouchDownCount) 次 | 字母命中: \(c.letterTapCount) 次 | 空格/回车/标点: \(c.spaceReturnSymbolCount) 次 | 退格: \(c.backspaceTapCount) 次")
         lines.append("双指重叠连击: \(c.multiTouchOverlapCount) 次 | 候选栏底沿直通: \(c.seamPassThroughCount) 次 | 边缘防误触修正: \(c.borderRemapCount) 次")
         lines.append("候选栏选词: \(c.candidateTapCount) 次 | 候选栏横向滑动: \(c.candidateScrollPanCount) 次 | 展开面板纵滑: \(c.gridScrollPanCount ?? 0) 次 | 未命中/取消: \(c.missedOrCancelledCount) 次")
-        lines.append("逐触点追踪（Build 50 起） | 已入拼音串: \(c.pinyinAppendCount ?? 0) 次 | 明细: 最近 \(snapshot.entries.count)/\(Self.maxEntries) 条")
+        lines.append("逐触点追踪 | 已入拼音串: \(c.pinyinAppendCount ?? 0) 次 | 明细: 最近 \(snapshot.entries.count)/\(Self.maxEntries) 条")
         lines.append(String(repeating: "-", count: 52))
         if snapshot.entries.isEmpty {
             lines.append("（暂无日志记录）")
@@ -1761,6 +1761,17 @@ public final class LokeyDiagnosticLogger: @unchecked Sendable {
         ioQueue.async { [weak self] in self?.flushOnIOQueue() }
     }
 
+    /// Flushes any dirty diagnostic entries and releases the transient `ioQueue` materialization buffer on memory warning.
+    public func purgeTransientCachesForMemoryWarning() {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            self.flushOnIOQueue()
+            self.cachedMaterializedEpoch = 0
+            self.cachedMaterializedRevision = 0
+            self.cachedMaterializedEntries.removeAll(keepingCapacity: false)
+        }
+    }
+
     private func writeSnapshotToDisk(
         _ snap: LokeyDiagnosticSnapshot,
         notifyIPC: Bool,
@@ -1828,7 +1839,7 @@ public final class LokeyDiagnosticLogger: @unchecked Sendable {
     }
 }
 
-// MARK: - Non-Blocking Host App & Extension Shared Async Loaders (F10)
+// MARK: - Non-Blocking Host App & Extension Shared Async Loaders
 
 private let sharedAsyncLoaderQueue = DispatchQueue(label: "com.kianuni.lokey.sharedAsyncLoader", qos: .utility)
 
@@ -1878,7 +1889,7 @@ public extension LokeyTouchCalibration {
 // MARK: - Candidate Selection Mismatch / Feedback Logger (选词纠偏样本本)
 
 /// Structured record of a real-world candidate selection mismatch (`top1Predicted` vs `userChosen`)
-/// accumulated locally for future offline neural / lexicon distillation.
+/// accumulated locally for user review and offline model evaluation.
 public struct LokeySelectionFeedbackEntry: Codable, Sendable, Equatable, Identifiable {
     public enum Kind: String, Codable, Sendable, CaseIterable {
         case nonTopSelect = "non_top"
@@ -2443,6 +2454,17 @@ public final class LokeySelectionFeedbackLogger: @unchecked Sendable {
 
     public func flushAsync() {
         ioQueue.async { [weak self] in self?.flushOnIOQueue() }
+    }
+
+    /// Flushes any dirty diagnostic entries and releases the transient `ioQueue` materialization buffer on memory warning.
+    public func purgeTransientCachesForMemoryWarning() {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            self.flushOnIOQueue()
+            self.cachedMaterializedEpoch = 0
+            self.cachedMaterializedRevision = 0
+            self.cachedMaterializedEntries.removeAll(keepingCapacity: false)
+        }
     }
 
     public func clear() {

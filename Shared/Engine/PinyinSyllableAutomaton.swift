@@ -384,14 +384,6 @@ public struct PinyinSyllableAutomaton: Sendable {
 
     // MARK: - Double Pinyin (Shuangpin: Xiaohe & Ziranma)
 
-    private struct ShuangpinTableKey: Hashable {
-        let lexiconID: ObjectIdentifier
-        let scheme: PinyinScheme
-    }
-
-    private static let shuangpinLock = NSLock()
-    private static var shuangpinTableCache: [ShuangpinTableKey: [[ExpandedSyllable]]] = [:]
-
     private static let xiaoheZeroInitialPrimary: [String: String] = [
         "a": "aa", "o": "oo", "e": "ee",
         "ai": "ai", "ei": "ei", "ao": "ao", "ou": "ou",
@@ -473,72 +465,65 @@ public struct PinyinSyllableAutomaton: Sendable {
     }
 
     private static func shuangpinLookupTable(for scheme: PinyinScheme, in lexicon: MmapLexicon) -> [[ExpandedSyllable]] {
-        let key = ShuangpinTableKey(lexiconID: ObjectIdentifier(lexicon), scheme: scheme)
-        shuangpinLock.lock()
-        if let cached = shuangpinTableCache[key] {
-            shuangpinLock.unlock()
-            return cached
-        }
-        shuangpinLock.unlock()
-
-        var buckets = [[ExpandedSyllable]](repeating: [], count: 26 * 26)
-        @inline(__always)
-        func appendSlot(code: String, sid: UInt16, canonical: String, penaltyQ8: Int) {
-            let bytes = Array(code.utf8)
-            guard bytes.count == 2 else { return }
-            let i0 = Int(bytes[0] - 0x61)
-            let i1 = Int(bytes[1] - 0x61)
-            guard (0..<26).contains(i0), (0..<26).contains(i1) else { return }
-            let slot = i0 * 26 + i1
-            if let idx = buckets[slot].firstIndex(where: { $0.syllableID == sid }) {
-                if penaltyQ8 < buckets[slot][idx].penaltyQ8 {
-                    buckets[slot][idx] = ExpandedSyllable(syllableID: sid, canonical: canonical, penaltyQ8: penaltyQ8)
+        lexicon.shuangpinLookupTable(for: scheme) {
+            var buckets = [[ExpandedSyllable]](repeating: [], count: 26 * 26)
+            @inline(__always)
+            func appendSlot(code: String, sid: UInt16, canonical: String, penaltyQ8: Int) {
+                var c = code
+                c.withUTF8 { bytes in
+                    guard bytes.count == 2,
+                          bytes[0] >= 0x61, bytes[0] <= 0x7A,
+                          bytes[1] >= 0x61, bytes[1] <= 0x7A else { return }
+                    let slot = Int(bytes[0] - 0x61) * 26 + Int(bytes[1] - 0x61)
+                    if let idx = buckets[slot].firstIndex(where: { $0.syllableID == sid }) {
+                        if penaltyQ8 < buckets[slot][idx].penaltyQ8 {
+                            buckets[slot][idx] = ExpandedSyllable(syllableID: sid, canonical: canonical, penaltyQ8: penaltyQ8)
+                        }
+                    } else {
+                        buckets[slot].append(ExpandedSyllable(syllableID: sid, canonical: canonical, penaltyQ8: penaltyQ8))
+                    }
                 }
-            } else {
-                buckets[slot].append(ExpandedSyllable(syllableID: sid, canonical: canonical, penaltyQ8: penaltyQ8))
             }
-        }
 
-        for rawSID in 1...lexicon.totalSyllables {
-            let sid = UInt16(rawSID)
-            let canon = lexicon.idToSyllable[rawSID]
-            guard let code = primaryShuangpinCode(forCanonicalSyllable: canon, scheme: scheme) else { continue }
-            appendSlot(code: code, sid: sid, canonical: canon, penaltyQ8: 0)
+            if lexicon.totalSyllables >= 1 {
+                for rawSID in 1...lexicon.totalSyllables {
+                    let sid = UInt16(rawSID)
+                    let canon = lexicon.idToSyllable[rawSID]
+                    guard let code = primaryShuangpinCode(forCanonicalSyllable: canon, scheme: scheme) else { continue }
+                    appendSlot(code: code, sid: sid, canonical: canon, penaltyQ8: 0)
 
-            // Support j/q/x/y + v (`jv/qv/xv/yv -> ju/qu/xu/yu`) and `nv`/`lv` aliases seamlessly
-            if code.count == 2 && code.hasSuffix("u"),
-               let first = code.first, first == "j" || first == "q" || first == "x" || first == "y" {
-                appendSlot(code: "\(first)v", sid: sid, canonical: canon, penaltyQ8: 0)
+                    // Support j/q/x/y + v (`jv/qv/xv/yv -> ju/qu/xu/yu`) and `nv`/`lv` aliases seamlessly
+                    if code.count == 2 && code.hasSuffix("u"),
+                       let first = code.first, first == "j" || first == "q" || first == "x" || first == "y" {
+                        appendSlot(code: "\(first)v", sid: sid, canonical: canon, penaltyQ8: 0)
+                    }
+                }
             }
-        }
 
-        // Standard alternate zero-initial mappings (`o*` aliases)
-        let zeroAliases = (scheme == .xiaohe) ? xiaoheZeroInitialAlias : ziranmaZeroInitialAlias
-        for (code, canon) in zeroAliases {
-            if let sid = lexicon.syllableToID[canon] {
-                appendSlot(code: code, sid: sid, canonical: canon, penaltyQ8: scheme == .ziranma ? 15 : 25)
+            // Standard alternate zero-initial mappings (`o*` aliases)
+            let zeroAliases = (scheme == .xiaohe) ? xiaoheZeroInitialAlias : ziranmaZeroInitialAlias
+            for (code, canon) in zeroAliases {
+                if let sid = lexicon.syllableToID[canon] {
+                    appendSlot(code: code, sid: sid, canonical: canon, penaltyQ8: scheme == .ziranma ? 15 : 25)
+                }
             }
-        }
 
-        // Preserve `yue`/`nve`/`lve` orthographic consistency
-        if let nveSID = lexicon.syllableToID["nve"], let nveCode = primaryShuangpinCode(forCanonicalSyllable: "nve", scheme: scheme) {
-            appendSlot(code: nveCode, sid: nveSID, canonical: "nve", penaltyQ8: 0)
-        }
-        if let lveSID = lexicon.syllableToID["lve"], let lveCode = primaryShuangpinCode(forCanonicalSyllable: "lve", scheme: scheme) {
-            appendSlot(code: lveCode, sid: lveSID, canonical: "lve", penaltyQ8: 0)
-        }
-
-        for idx in buckets.indices where buckets[idx].count > 1 {
-            buckets[idx].sort {
-                if $0.penaltyQ8 != $1.penaltyQ8 { return $0.penaltyQ8 < $1.penaltyQ8 }
-                return $0.canonical < $1.canonical
+            // Preserve `yue`/`nve`/`lve` orthographic consistency
+            if let nveSID = lexicon.syllableToID["nve"], let nveCode = primaryShuangpinCode(forCanonicalSyllable: "nve", scheme: scheme) {
+                appendSlot(code: nveCode, sid: nveSID, canonical: "nve", penaltyQ8: 0)
             }
-        }
+            if let lveSID = lexicon.syllableToID["lve"], let lveCode = primaryShuangpinCode(forCanonicalSyllable: "lve", scheme: scheme) {
+                appendSlot(code: lveCode, sid: lveSID, canonical: "lve", penaltyQ8: 0)
+            }
 
-        shuangpinLock.lock()
-        shuangpinTableCache[key] = buckets
-        shuangpinLock.unlock()
-        return buckets
+            for idx in buckets.indices where buckets[idx].count > 1 {
+                buckets[idx].sort {
+                    if $0.penaltyQ8 != $1.penaltyQ8 { return $0.penaltyQ8 < $1.penaltyQ8 }
+                    return $0.canonical < $1.canonical
+                }
+            }
+            return buckets
+        }
     }
 
     public static func matchShuangpinPair(
@@ -573,19 +558,18 @@ public struct PinyinSyllableAutomaton: Sendable {
         scheme: PinyinScheme,
         in lexicon: MmapLexicon
     ) -> Bool {
-        guard scheme != .quanpin, !bytes.isEmpty else { return false }
-        let arr = Array(bytes)
-        let count = arr.count
-        guard count.isMultiple(of: 2) else { return false }
+        guard scheme != .quanpin, !bytes.isEmpty, bytes.count.isMultiple(of: 2) else { return false }
         let table = shuangpinLookupTable(for: scheme, in: lexicon)
-        var i = 0
-        while i < count {
-            let i0 = Int(arr[i]) - 0x61
-            let i1 = Int(arr[i + 1]) - 0x61
-            guard (0..<26).contains(i0), (0..<26).contains(i1), !table[i0 * 26 + i1].isEmpty else {
+        var idx = bytes.startIndex
+        let end = bytes.endIndex
+        while idx < end {
+            let b0 = bytes[idx]
+            let b1 = bytes[idx &+ 1]
+            guard b0 >= 0x61, b0 <= 0x7A, b1 >= 0x61, b1 <= 0x7A,
+                  !table[Int(b0 - 0x61) * 26 + Int(b1 - 0x61)].isEmpty else {
                 return false
             }
-            i += 2
+            idx &+= 2
         }
         return true
     }

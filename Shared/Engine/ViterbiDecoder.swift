@@ -182,6 +182,18 @@ public final class ViterbiDecoder: @unchecked Sendable {
         var syllableMatchCache: [UInt64: [PinyinSyllableAutomaton.ExpandedSyllable]] = [:]
         /// Packed `(nodeIndex << 26) | packedRime` cache for Trie dropped-initial edge resolution.
         var droppedInitialCache: [UInt64: [MmapLexicon.DroppedInitialEdgeHit]] = [:]
+
+        func purge(releaseCapacity: Bool) {
+            rawAssocMapCache.removeAll(keepingCapacity: !releaseCapacity)
+            assocMapCache.removeAll(keepingCapacity: !releaseCapacity)
+            assocFilterCache.removeAll(keepingCapacity: !releaseCapacity)
+            wordTraitCache.removeAll(keepingCapacity: !releaseCapacity)
+            neuralRecordCache.removeAll(keepingCapacity: !releaseCapacity)
+            neuralRecordRing.removeAll(keepingCapacity: !releaseCapacity)
+            neuralRecordRingCursor = 0
+            syllableMatchCache.removeAll(keepingCapacity: !releaseCapacity)
+            droppedInitialCache.removeAll(keepingCapacity: !releaseCapacity)
+        }
     }
 
     let lookupCache: LookupCache
@@ -273,6 +285,27 @@ public final class ViterbiDecoder: @unchecked Sendable {
             return nil
         }
         return cachedPosHyps
+    }
+
+    /// Releases transient lookup and incremental lattice/DP caches under memory pressure.
+    public func purgeTransientCaches(releaseCapacity: Bool = false) {
+        lookupCache.purge(releaseCapacity: releaseCapacity)
+        cachedInitHiddenContext = nil
+        cachedInitHiddenVec = .zero
+        cachedSamples.removeAll(keepingCapacity: !releaseCapacity)
+        cachedPosHyps.removeAll(keepingCapacity: !releaseCapacity)
+        cachedPosHypsCap = 0
+        cachedArcsByStart.removeAll(keepingCapacity: !releaseCapacity)
+        cachedLatticeDepsByStart.removeAll(keepingCapacity: !releaseCapacity)
+        cachedSpansByStart.removeAll(keepingCapacity: !releaseCapacity)
+        cachedMaxPosByStart.removeAll(keepingCapacity: !releaseCapacity)
+        cachedSpanDepsByStart.removeAll(keepingCapacity: !releaseCapacity)
+        cachedDP.removeAll(keepingCapacity: !releaseCapacity)
+        cachedDPSeedWord = ""
+        cachedDPPrecedingContext = ""
+        cachedDPTopicMemory = .zero
+        cachedDPBeamK = 0
+        recentDecodeHistory.removeAll(keepingCapacity: !releaseCapacity)
     }
 
     public func setSupplementaryEntries(_ entries: [(shortcut: String, phrase: String)]) {
@@ -681,16 +714,18 @@ public final class ViterbiDecoder: @unchecked Sendable {
         return true
     }
 
+    private static let maxNeuralRecordCacheCount = 384
+
     @inline(__always)
     private func neuralRecord(for word: String) -> NeuralSentenceScorer.WordNeuralRecord {
         if let hit = lookupCache.neuralRecordCache[word] { return hit }
         let rec = lexicon.neuralLM.wordRecord(for: word)
-        if lookupCache.neuralRecordRing.count >= 2048 {
+        if lookupCache.neuralRecordRing.count >= Self.maxNeuralRecordCacheCount {
             let victim = lookupCache.neuralRecordRing[lookupCache.neuralRecordRingCursor]
             lookupCache.neuralRecordCache.removeValue(forKey: victim)
             lookupCache.neuralRecordRing[lookupCache.neuralRecordRingCursor] = word
             lookupCache.neuralRecordRingCursor += 1
-            if lookupCache.neuralRecordRingCursor == 2048 {
+            if lookupCache.neuralRecordRingCursor == Self.maxNeuralRecordCacheCount {
                 lookupCache.neuralRecordRingCursor = 0
             }
         } else {
@@ -725,9 +760,9 @@ public final class ViterbiDecoder: @unchecked Sendable {
             return DecodeResult(preeditDisplay: "", candidates: [])
         }
 
-        if lookupCache.wordTraitCache.count > 8192 { lookupCache.wordTraitCache.removeAll(keepingCapacity: true) }
-        if lookupCache.syllableMatchCache.count > 4096 { lookupCache.syllableMatchCache.removeAll(keepingCapacity: true) }
-        if lookupCache.droppedInitialCache.count > 4096 { lookupCache.droppedInitialCache.removeAll(keepingCapacity: true) }
+        if lookupCache.wordTraitCache.count > 2048 { lookupCache.wordTraitCache.removeAll(keepingCapacity: true) }
+        if lookupCache.syllableMatchCache.count > 2048 { lookupCache.syllableMatchCache.removeAll(keepingCapacity: true) }
+        if lookupCache.droppedInitialCache.count > 1024 { lookupCache.droppedInitialCache.removeAll(keepingCapacity: true) }
 
         let n = samples.count
         var rawChars: [Character] = []
@@ -763,7 +798,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
 
         let urgentNow = isUrgentCommit()
         let spatialGen = spatialModel.modelGeneration
-        let curUserGen = userStore.decodeSnapshot().generation
+        let userSnap = userStore.decodeSnapshot(for: settings.pinyinScheme)
+        let curUserGen = userSnap.generation
         if !urgentNow && n <= 16 {
             if let hitIdx = recentDecodeHistory.lastIndex(where: {
                 $0.samples == samples
@@ -947,7 +983,6 @@ public final class ViterbiDecoder: @unchecked Sendable {
             return DecodeResult(preeditDisplay: rawString, candidates: [])
         }
 
-        let userSnap = userStore.decodeSnapshot()
         let userGen = userSnap.generation
         let spanRegimeChangedMask = Self.spanRegimeFlags(prevN, urgent: cachedWasUrgentCommit)
             ^ Self.spanRegimeFlags(n, urgent: urgentNow)
@@ -1171,10 +1206,10 @@ public final class ViterbiDecoder: @unchecked Sendable {
             }
         }
 
-        // 5B. User SQLite learned phrases (exact or Jianpin match for full buffer)
-        let userHits = userStore.lookup(query: cleanLower, limit: 6)
+        // 5B. User SQLite learned phrases (lock-free O(1) exact, Jianpin, and Shuangpin match for full buffer)
+        let userHits = userSnap.fullBufferPhrases(cleanLower: cleanLower, scheme: settings.pinyinScheme, limit: 6)
         var exactUserHitCount = 0
-        for up in userHits where up.compactPinyin == cleanLower || (settings.pinyinScheme == .quanpin && up.jianpin == cleanLower) {
+        for up in userHits {
             let prevCount = candidates.count
             appendCandidate(
                 LokeyCandidate(
@@ -1188,40 +1223,6 @@ public final class ViterbiDecoder: @unchecked Sendable {
             )
             if candidates.count > prevCount {
                 exactUserHitCount += 1
-            }
-        }
-        if settings.pinyinScheme != .quanpin && !cleanLower.isEmpty {
-            for up in userStore.allPhrases(limit: 256) {
-                let syls = up.pinyinNormalized.split(separator: " ").map(String.init)
-                guard !syls.isEmpty else { continue }
-                var encoded = ""
-                encoded.reserveCapacity(syls.count * 2)
-                var validShuangpin = true
-                for syl in syls {
-                    guard let spCode = PinyinSyllableAutomaton.primaryShuangpinCode(
-                        forCanonicalSyllable: syl,
-                        scheme: settings.pinyinScheme
-                    ) else {
-                        validShuangpin = false
-                        break
-                    }
-                    encoded.append(spCode)
-                }
-                guard validShuangpin && encoded == cleanLower else { continue }
-                let prevCount = candidates.count
-                appendCandidate(
-                    LokeyCandidate(
-                        text: up.surface,
-                        consumedInputCount: n,
-                        matchedSyllables: syls,
-                        scoreQ8: up.dynamicBoostQ8,
-                        kind: .userPhrase,
-                        isDeletableUserPhrase: true
-                    )
-                )
-                if candidates.count > prevCount {
-                    exactUserHitCount += 1
-                }
             }
         }
 
@@ -4491,7 +4492,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             }
         }
 
-        // P2-2: Evaluate once per decode outside `for start in 0..<n` so Chinese inputs never pay per-start
+        // Evaluate once per decode outside `for start in 0..<n` so Chinese inputs never pay per-start
         // overhead or poison `SpanCacheDeps` on unrelated prefix starts.
         let isPureEnglishCompound: Bool = {
             guard n >= 6 && n <= 24 && !wholeInputClean else { return false }
@@ -4636,7 +4637,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 }
             }
 
-            // P2-2: Seamless mid-sentence Chinese-English mixed-input WordSpans
+            // Seamless mid-sentence Chinese-English mixed-input WordSpans
             if samples[start].primaryChar != "'" {
                 deps.dependsOnNMask |= SpanRegimeBit.nGE5
             }
@@ -4711,7 +4712,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                 guard eligible else { continue }
 
                                 // Yield full-string 2-word English compounds (`applepie -> Apple pie`, `swiftcode`)
-                                // and incomplete English prefix completions (`macbookp -> MacBook Pro`) to Stage 5E.
+                                // and incomplete English prefix completions (`macbookp -> MacBook Pro`) to English completion ranking.
                                 if start == firstNonSep && spanEnd < n {
                                     var tailScanEnd = spanEnd
                                     var tailIsPlainAlpha = true
@@ -6290,15 +6291,15 @@ public final class ViterbiDecoder: @unchecked Sendable {
         // Every destination we extend is beyond the reused read-only prefix.
         var limitsByEnd = [BeamLimits](repeating: BeamLimits(), count: n + 1)
         let wordBoundaryPenalty = 210
-        if lookupCache.rawAssocMapCache.count > 2048 {
+        if lookupCache.rawAssocMapCache.count > 512 {
             lookupCache.rawAssocMapCache.removeAll(keepingCapacity: true)
         }
-        if lookupCache.assocMapCache.count > 2048 {
+        if lookupCache.assocMapCache.count > 512 {
             lookupCache.assocMapCache.removeAll(keepingCapacity: true)
             lookupCache.assocFilterCache.removeAll(keepingCapacity: true)
         }
 
-        if lookupCache.assocFilterCache.count > 2048 { lookupCache.assocFilterCache.removeAll(keepingCapacity: true) }
+        if lookupCache.assocFilterCache.count > 512 { lookupCache.assocFilterCache.removeAll(keepingCapacity: true) }
         func associationFilter(_ map: [String: Int], for word: String) -> UInt64 {
             if let cached = lookupCache.assocFilterCache[word] { return cached }
             var bits: UInt64 = 0
@@ -6479,6 +6480,10 @@ public final class ViterbiDecoder: @unchecked Sendable {
 
         let trailingTwoHorizAdjacent = (n >= 3) && spatialModel.areKeysHorizontallyAdjacentASCII(lowerASCII[n - 1], lowerASCII[n - 2])
         let trailingM = (n >= 3) && lowerASCII[n - 1] == 0x6D /* 'm' */
+        var countsByEndScratch = [Int](repeating: 0, count: n + 1)
+        var exactCountsByEndScratch = [Int](repeating: 0, count: n + 1)
+        var cleanSingleSylBestScoreByEnd = [Int](repeating: Int.min, count: n + 1)
+        var bestEffScoreByEnd = [Int](repeating: Int.min, count: n + 1)
 
         for i in firstStart..<n {
             if ((fastCleanSentenceOnly && (i & 1) == 0) || (i & 3) == 0) && isCancelled() {
@@ -6495,15 +6500,17 @@ public final class ViterbiDecoder: @unchecked Sendable {
             let perEndCap0 = seedWord.isEmpty ? 10 : 12
             let candidateSpans: [WordSpan]
             if i == firstStart {
-                var countsByEnd: [Int: Int] = [:]
-                var exactCountsByEnd: [Int: Int] = [:]
+                for endIdx in i...n {
+                    countsByEndScratch[endIdx] = 0
+                    exactCountsByEndScratch[endIdx] = 0
+                }
                 candidateSpans = rawSpans.filter { sp in
-                    let c = countsByEnd[sp.end, default: 0]
-                    let ec = exactCountsByEnd[sp.end, default: 0]
+                    let c = countsByEndScratch[sp.end]
+                    let ec = exactCountsByEndScratch[sp.end]
                     if c < perEndCap0 || (sp.penaltyQ8 == 0 && ec < 4) {
-                        countsByEnd[sp.end] = c + 1
+                        countsByEndScratch[sp.end] = c + 1
                         if sp.penaltyQ8 == 0 {
-                            exactCountsByEnd[sp.end] = ec + 1
+                            exactCountsByEndScratch[sp.end] = ec + 1
                         }
                         return true
                     }
@@ -6515,18 +6522,17 @@ public final class ViterbiDecoder: @unchecked Sendable {
             let spans = (i < activeDPBound) ? candidateSpans.filter { $0.end > activeDPBound } : candidateSpans
             if spans.isEmpty { continue }
 
-            var cleanSingleSylBestScoreByEnd: [Int: Int] = [:]
-            var bestEffScoreByEnd: [Int: Int] = [:]
+            for endIdx in i...n {
+                cleanSingleSylBestScoreByEnd[endIdx] = Int.min
+                bestEffScoreByEnd[endIdx] = Int.min
+            }
             for sp in spans {
                 let eff = sp.scoreQ8
-                if eff > (bestEffScoreByEnd[sp.end] ?? Int.min) {
+                if eff > bestEffScoreByEnd[sp.end] {
                     bestEffScoreByEnd[sp.end] = eff
                 }
-                if sp.penaltyQ8 == 0 && sp.syllables.count == 1 {
-                    let prev = cleanSingleSylBestScoreByEnd[sp.end] ?? Int.min
-                    if sp.scoreQ8 > prev {
-                        cleanSingleSylBestScoreByEnd[sp.end] = sp.scoreQ8
-                    }
+                if sp.penaltyQ8 == 0 && sp.syllables.count == 1 && sp.scoreQ8 > cleanSingleSylBestScoreByEnd[sp.end] {
+                    cleanSingleSylBestScoreByEnd[sp.end] = sp.scoreQ8
                 }
             }
 
@@ -6583,7 +6589,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 let cleanSingle = sp.syllables.count == 1
                     && !sp.isEnglishSpan
                     && sp.penaltyQ8 >= 240
-                    && (cleanSingleSylBestScoreByEnd[sp.end] ?? Int.min) >= -2550
+                    && cleanSingleSylBestScoreByEnd[sp.end] >= -2550
                 let hijackPen = cleanSingle ? (sp.penaltyQ8 >= 420 ? 240 : 120) : 0
                 let aeo: Bool
                 if !sp.isEnglishSpan, let b0 = sp.syllables.first?.utf8.first {
@@ -6612,13 +6618,14 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     }
                     maxExtra = cap
                 }
+                let bestAtEnd = bestEffScoreByEnd[sp.end]
                 spanMetas.append(
                     SpanMeta(
                         utf8Count: uCount,
                         isOneChar: oneCh,
                         hasCleanCommonSingleSyl: cleanSingle,
                         singleSylHijackPen: hijackPen,
-                        spanScoreDeficit: (bestEffScoreByEnd[sp.end] ?? sp.scoreQ8) - sp.scoreQ8,
+                        spanScoreDeficit: (bestAtEnd == Int.min ? sp.scoreQ8 : bestAtEnd) - sp.scoreQ8,
                         fingerprint: trait.fingerprint,
                         startsWithAEO: aeo,
                         maxPositiveExtraQ8: maxExtra,
@@ -6715,15 +6722,24 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 let curEndsAtPlace = ((cf & (1 << 23)) != 0) || (((cf & (1 << 24)) != 0) && (cur.prevWord == "在" || cur.prevWord == "你在" || cur.prevWord == "不在"))
                 let curIsBangPro = ((cf & (1 << 25)) != 0) || (curIsPronoun1 && cur.prevWord == "帮")
 
-                let curLastRecord = (cur.lastWord.isEmpty || cur.lastWord.last?.isASCII == true)
-                    ? NeuralSentenceScorer.WordNeuralRecord.empty
-                    : neuralRecord(for: cur.lastWord)
+                let curLastIsEmptyOrASCII = cur.lastWord.isEmpty || (cur.lastWord.last?.isASCII == true)
+                var cachedCurLastRecord: NeuralSentenceScorer.WordNeuralRecord? = curLastIsEmptyOrASCII ? .empty : nil
+                @inline(__always)
+                func getCurLastRecord() -> NeuralSentenceScorer.WordNeuralRecord {
+                    if let rec = cachedCurLastRecord { return rec }
+                    let rec = neuralRecord(for: cur.lastWord)
+                    cachedCurLastRecord = rec
+                    return rec
+                }
+                let curLastIsAccidentalSingleton = (!curLastIsEmptyOrASCII && curIsOneChar)
+                    ? getCurLastRecord().isAccidentalSingleton
+                    : false
                 var lazyPredictor: NeuralSentenceScorer.StepPredictor? = nil
                 @inline(__always)
                 func getPredictor() -> NeuralSentenceScorer.StepPredictor {
                     if let p = lazyPredictor { return p }
                     let p = lexicon.neuralLM.prepareStepPredictor(
-                        lastRecord: curLastRecord,
+                        lastRecord: getCurLastRecord(),
                         hidden: cur.hidden,
                         topicMemory: topicMemory
                     )
@@ -7093,30 +7109,30 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     // On-Device Neural Language Model (`LNLM v2` 32-dim gated recurrent SiLU MLP + bilinear semantic scorer):
                     // Evaluated on noisy/missed-key paths (`sp.penaltyQ8 > 70 || cur.lastSpanPenaltyQ8 > 70`), accidental singleton tokens
                     // (`亏, 素, 恩...`), and clean multi-syllable transitions without a lexical association, preserving calibrated 1-char homophone precision.
-                    let spRec: NeuralSentenceScorer.WordNeuralRecord
-                    if sp.isEnglishSpan {
-                        spRec = .empty
-                    } else if let cachedRec = spNeuralRecords[spIdx] {
-                        spRec = cachedRec
-                    } else {
+                    @inline(__always)
+                    func getSpRec() -> NeuralSentenceScorer.WordNeuralRecord {
+                        if sp.isEnglishSpan { return .empty }
+                        if let cachedRec = spNeuralRecords[spIdx] { return cachedRec }
                         let loadedRec = neuralRecord(for: sp.text)
                         spNeuralRecords[spIdx] = loadedRec
-                        spRec = loadedRec
+                        return loadedRec
                     }
+                    let spIsAccidentalSingleton = (isTopSpanAtEnd && spIsOneChar && !sp.isEnglishSpan)
+                        ? getSpRec().isAccidentalSingleton
+                        : false
                     let isCleanMultiSylEval = n >= 8 && !(n >= 10 && urgentNow) && !curIsOneChar && sp.syllables.count >= 2 && bgBonus < 380
                     let isSinglePrefixHomophoneDisambig = !isNoisyTransition
                         && !isCleanMultiSylEval
-                        && !spRec.isAccidentalSingleton
-                        && !curLastRecord.isAccidentalSingleton
+                        && !spIsAccidentalSingleton
+                        && !curLastIsAccidentalSingleton
                         && n >= 6
                         && !(n >= 10 && urgentNow)
                         && bgBonus == 0
                         && sp.syllables.count >= 2
                         && meta.hasCloseHomophoneCompetition
-                    let useNeural = !cur.lastWord.isEmpty
+                    let useNeural = !curLastIsEmptyOrASCII
                         && !sp.isEnglishSpan
-                        && !(cur.lastWord.last?.isASCII == true)
-                        && (isNoisyTransition || isCleanMultiSylEval || isSinglePrefixHomophoneDisambig || spRec.isAccidentalSingleton || curLastRecord.isAccidentalSingleton)
+                        && (isNoisyTransition || isCleanMultiSylEval || isSinglePrefixHomophoneDisambig || spIsAccidentalSingleton || curLastIsAccidentalSingleton)
                         && isTopSpanAtEnd
                     let neuralBonus: Int
                     if !useNeural {
@@ -7131,7 +7147,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                             let topicQ8 = lexicon.neuralLM.scoreTopicGateBonusQ8(
                                 hidden: cur.hidden,
                                 topicMemory: topicMemory,
-                                record: spRec
+                                record: getSpRec()
                             )
                             neuralBonus = max(-220, min(220, topicQ8))
                         } else {
@@ -7141,7 +7157,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         let pred = getPredictor()
                         let rawNeural = lexicon.neuralLM.scorePreloadedCandidate(
                             predictor: pred,
-                            record: spRec,
+                            record: getSpRec(),
                             singleCharRun: isGrammaticalMonosyllableChain ? 0 : cur.singleCharRun,
                             isEndOfSentence: sp.end == n
                         )
@@ -7153,7 +7169,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                             && sp.penaltyQ8 == 0
                             && spIsOneChar
                             && bestCleanMultiCharScoreAtI > cur.scoreQ8
-                            && !curLastRecord.isAccidentalSingleton
+                            && !curLastIsAccidentalSingleton
                             && rawNeural > 0 {
                             // Prevent asymmetric `isNoisyTransition` neural subsidy when `dp[i]` already has a higher-scoring
                             // 0-penalty multi-char leader (`打字` -2501 > `大致` -2565 / `单子` -2852) that skips `LNLM` on 1-char `sp` (`更`).
@@ -7161,7 +7177,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         } else if (sp.hasKeySubstitution || (cur.hasKeySubstitution && (wholeInputClean || spIsOneChar)))
                             && !(sp.penaltyQ8 > 70 && !sp.hasKeySubstitution)
                             && !cur.hasAccidentalSingleton
-                            && !spRec.isAccidentalSingleton
+                            && !spIsAccidentalSingleton
                             && rawNeural > 0 {
                             let localSpanClean: Bool
                             if n < 9 {
@@ -7224,6 +7240,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         }
                     }
 
+                    let spRec = getSpRec()
                     let nextSingleRun: Int
                     if spRec.charCount == 1 {
                         if isGrammaticalMonosyllableChain && cur.singleCharRun < 3 {
@@ -7244,7 +7261,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         nextHidden = cur.hidden
                     } else {
                         let afterSpan: NeuralSentenceScorer.Vec32
-                        if curLastRecord.charCount == 0 {
+                        if curLastIsEmptyOrASCII || getCurLastRecord().charCount == 0 {
                             afterSpan = lexicon.neuralLM.advanceHiddenStateFromBOS(record: spRec, baseHidden: cur.hidden)
                         } else {
                             afterSpan = lexicon.neuralLM.advanceHiddenState(predictor: getPredictor(), record: spRec)
@@ -7396,7 +7413,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 let isCoherentCleanSentenceHijack: Bool
                 if topNoisy.hasKeySubstitution {
                     // Spatial neighbor substitution on a clean buffer (`womenqubaheba -> *我们去那个吧`):
-                    // Preserve full v0.5.8 clean-sentence barrier unless `bestClean` collided with accidental singletons (`*我开始是亏素输入`)
+                    // Preserve clean-sentence barrier unless `bestClean` collided with accidental singletons (`*我开始是亏素输入`)
                     // or fractured into `>= 2` consecutive 1-char syllable soup (`hu+ri+fa -> 壶日发`) where `LNLM` strongly prefers `topNoisy`.
                     let cleanOk = bestClean.scoreQ8 >= cleanGuardFloor && !bestClean.hasAccidentalSingleton
                     let soupBrokenClean = (bestClean.maxOneCharRun >= 2 && topNoisy.neuralScoreQ8 >= bestClean.neuralScoreQ8 + 240)
@@ -7536,15 +7553,20 @@ public final class ViterbiDecoder: @unchecked Sendable {
                           Self.curClauseSwitchTable[slot.word] == nil else {
                         return false
                     }
+                    if userSnapshot.exactSyllablePhrases(compactPinyin: slot.syls.joined()).contains(where: { $0.surface == slot.word }) {
+                        return false
+                    }
                     if slotIdx == 0 {
                         if spansByStart[firstStart]?.contains(where: { $0.text == slot.word && $0.isUserPhrase }) == true {
                             return false
                         }
-                    } else {
-                        let hasUserSlotPhrase = spansByStart.values.contains { list in
-                            list.contains(where: { $0.text == slot.word && $0.isUserPhrase })
+                    } else if slotIdx == 1, let firstSpans = spansByStart[firstStart] {
+                        let leadWord = refSegs[0].word
+                        for sp0 in firstSpans where sp0.text == leadWord {
+                            if spansByStart[sp0.end]?.contains(where: { $0.text == slot.word && $0.isUserPhrase }) == true {
+                                return false
+                            }
                         }
-                        if hasUserSlotPhrase { return false }
                     }
 
                     let exactHits = lexicon.lookupExactWords(forSyllables: slot.syls, limit: 24)

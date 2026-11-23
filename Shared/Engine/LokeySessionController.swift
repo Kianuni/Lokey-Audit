@@ -237,7 +237,17 @@ public final class LokeySessionController {
     public var selectionFeedbackLogger: LokeySelectionFeedbackLogger?
 
     private var candidateWorker: CandidateDecodeWorker?
-    private lazy var commitRefiner = NoisyChannelRefiner(lexicon: decoder.lexicon, userStore: decoder.userStore, lookupCache: decoder.lookupCache)
+    private var _commitRefiner: NoisyChannelRefiner?
+    private var commitRefiner: NoisyChannelRefiner {
+        if let existing = _commitRefiner { return existing }
+        let created = NoisyChannelRefiner(
+            lexicon: decoder.lexicon,
+            userStore: decoder.userStore,
+            lookupCache: decoder.lookupCache
+        )
+        _commitRefiner = created
+        return created
+    }
     // Both deferred publications belong to the current operation. Only the main
     // queue touches this slot. Replacing or cancelling the operation invalidates it.
     private var deferredPrimary: DecodeResult?
@@ -821,7 +831,7 @@ public final class LokeySessionController {
         return convertAuxiliaryCandidates(rawList)
     }
 
-    /// Native iOS 26 Chinese Pinyin empty-field starter candidate sequence (`pro_native.png` / `298a61ea.jpg`).
+    /// Native iOS 26 Chinese Pinyin empty-field starter candidate sequence.
     public static let defaultStarterIdleWords: [String] = [
         "我", "你", "在", "这", "不", "是", "一", "好", "他", "那",
         "了", "就", "有", "都", "也", "要", "会", "去", "说", "看",
@@ -878,6 +888,27 @@ public final class LokeySessionController {
         currentDecode = DecodeResult(preeditDisplay: "", candidates: [])
     }
 
+    /// Releases transient decode, neural, and noisy-channel caches without disturbing active composing state.
+    public func purgeTransientCaches(releaseCapacity: Bool = false) {
+        decoder.purgeTransientCaches(releaseCapacity: releaseCapacity)
+        decoder.lexicon.purgeTransientCaches(releaseCapacity: releaseCapacity)
+        if releaseCapacity {
+            _commitRefiner = nil
+        } else {
+            _commitRefiner?.purgeTransientCaches(releaseCapacity: false)
+        }
+        if samples.isEmpty {
+            completedPrefixSnapshots.removeAll(keepingCapacity: !releaseCapacity)
+            displayToCanonicalSurface.removeAll(keepingCapacity: !releaseCapacity)
+        }
+        if let worker = candidateWorker {
+            worker.queue.addOperation {
+                worker.decoder.purgeTransientCaches(releaseCapacity: releaseCapacity)
+                worker.refiner.purgeTransientCaches(releaseCapacity: releaseCapacity)
+            }
+        }
+    }
+
     // MARK: - Internal Helpers
 
     func publishReadyCandidates() {
@@ -919,19 +950,36 @@ public final class LokeySessionController {
             return finishPendingCandidateDecode()
         }
         let waitStart = DispatchTime.now().uptimeNanoseconds
-        let rawLower = String(samples.map { Character($0.primaryChar.lowercased()) })
+        var rawLowerBytes: [UInt8] = []
+        rawLowerBytes.reserveCapacity(samples.count)
+        var hasApostrophe = false
+        var allASCII = true
+        for s in samples {
+            guard let ascii = s.primaryChar.asciiValue else {
+                allASCII = false
+                break
+            }
+            if ascii == 0x27 { hasApostrophe = true }
+            let lower = (ascii >= 0x41 && ascii <= 0x5A) ? (ascii &+ 32) : ascii
+            rawLowerBytes.append(lower)
+        }
+        let rawLower = allASCII
+            ? String(decoding: rawLowerBytes, as: UTF8.self)
+            : String(samples.map { Character($0.primaryChar.lowercased()) })
+        let hasSep = allASCII ? hasApostrophe : rawLower.contains("'")
         let isClean: Bool
         if settings.pinyinScheme == .quanpin {
-            isClean = !rawLower.contains("'") && decoder.lexicon.canSegmentCleanly(rawLower)
+            isClean = !hasSep && decoder.lexicon.canSegmentCleanly(rawLower)
         } else {
-            isClean = !rawLower.contains("'")
+            isClean = !hasSep
+                && allASCII
                 && PinyinSyllableAutomaton.canSegmentShuangpinCleanly(
-                    Array(rawLower.utf8)[...],
+                    rawLowerBytes[...],
                     scheme: settings.pinyinScheme,
                     in: decoder.lexicon
                 )
         }
-        let isExactEnglish = !rawLower.contains("'")
+        let isExactEnglish = !hasSep
             && samples.count >= 2
             && decoder.lexicon.lookupExactEnglish(rawLower) != nil
         let isShortUnsegmentedNoisy = !isClean && !isExactEnglish && samples.count <= 16

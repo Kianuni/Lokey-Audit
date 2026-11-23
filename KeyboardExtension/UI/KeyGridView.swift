@@ -1274,6 +1274,24 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
+    private static let asciiLowerStrings: [String] = (0..<26).map { String(UnicodeScalar(0x61 + $0)!) }
+    private static let asciiUpperStrings: [String] = (0..<26).map { String(UnicodeScalar(0x41 + $0)!) }
+
+    @inline(__always)
+    private static func letterDisplayString(_ ch: Character, uppercase: Bool) -> String {
+        if let ascii = ch.asciiValue {
+            if ascii >= 0x61 && ascii <= 0x7A {
+                let idx = Int(ascii - 0x61)
+                return uppercase ? asciiUpperStrings[idx] : asciiLowerStrings[idx]
+            }
+            if ascii >= 0x41 && ascii <= 0x5A {
+                let idx = Int(ascii - 0x41)
+                return uppercase ? asciiUpperStrings[idx] : asciiLowerStrings[idx]
+            }
+        }
+        return uppercase ? String(ch.uppercased()) : String(ch)
+    }
+
     private func configureKeyView(_ v: KeycapItemView, role: KeyRole, dark: Bool, pressed: Bool, row: Int = -1, col: Int = -1) {
         let primaryText = KeyboardTheme.primaryKeyTextColor(dark: dark)
         let fgPrimary = isTrackpadActive ? primaryText.withAlphaComponent(0.16) : primaryText
@@ -1281,7 +1299,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         switch role {
         case let .letter(ch):
             let isUpper = (shiftState != .lower)
-            let display = isUpper ? String(ch.uppercased()) : String(ch)
+            let display = Self.letterDisplayString(ch, uppercase: isUpper)
             let subHint = (enableTopRowNumberSwipe && page == .alphabetic && row == 0 && col >= 0 && col < Self.topRowDigits.count)
                 ? Self.topRowDigits[col]
                 : nil
@@ -1525,7 +1543,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private func calloutText(for role: KeyRole) -> String? {
         switch role {
         case let .letter(ch):
-            return (shiftState != .lower) ? String(ch.uppercased()) : String(ch)
+            return Self.letterDisplayString(ch, uppercase: shiftState != .lower)
         case let .symbol(sym) where sym.count == 1:
             return sym
         default:
@@ -1587,11 +1605,14 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     }
 
     private func nearestKey(at point: CGPoint) -> (row: Int, col: Int)? {
-        guard let hit = nearestKeyWithDiagnostic(at: point) else { return nil }
+        guard let hit = nearestKeyWithDiagnostic(at: point, includeDiagnostic: false) else { return nil }
         return (hit.row, hit.col)
     }
 
-    private func nearestKeyWithDiagnostic(at point: CGPoint) -> (row: Int, col: Int, remappedFrom: String?)? {
+    private func nearestKeyWithDiagnostic(
+        at point: CGPoint,
+        includeDiagnostic: Bool = LokeyDiagnosticLogger.shared.canRecordInteractions
+    ) -> (row: Int, col: Int, remappedFrom: String?)? {
         // Generous vertical tolerance above Row 0 (`y >= -49`) so high thumb taps on `q..p` (`w`, `o`, `u`, `i`) are never missed,
         // and `effectiveHitHeight` below Row 3 so bottom-row keys stay reachable during transient 176pt host compat bounds!
         let hitBounds = CGRect(
@@ -1649,12 +1670,11 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             if bestRow == 2 {
                 if bestCol == 0 {
                     // Landed on `.shift`: protect `'a'` (directly above `.shift`) and `'z'` (to the right of `.shift`)
-                    let rawLabel = roleDiagnosticLabel(rowItems[2][0].role)
                     if point.y <= aFrame.maxY + (isComposing ? 16.0 : 10.5) && point.x >= aFrame.minX - 6.0 {
-                        return (1, 0, rawLabel)
+                        return (1, 0, includeDiagnostic ? roleDiagnosticLabel(rowItems[2][0].role) : nil)
                     }
                     if point.x >= zFrame.minX - (isComposing ? 18.0 : 11.0) {
-                        return (2, 1, rawLabel)
+                        return (2, 1, includeDiagnostic ? roleDiagnosticLabel(rowItems[2][0].role) : nil)
                     }
                 } else if bestCol == rowItems[2].count - 1 {
                     // Landed on `.backspace`: protect `'l'` (directly above `.backspace`) and `'m'` (to the left of `.backspace`)
@@ -1662,7 +1682,6 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                     // The visible delete key owns its entire face. Letter rescue
                     // still applies in the empty gutter above or beside it.
                     if backspace.frame.contains(point) { return (bestRow, bestCol, nil) }
-                    let rawLabel = roleDiagnosticLabel(backspace.role)
                     let lDownAllowance: CGFloat
                     if point.x <= lFrame.midX + 4.0 {
                         lDownAllowance = isComposing ? 11.0 : 8.5
@@ -1670,10 +1689,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                         lDownAllowance = isComposing ? 9.7 : 7.5
                     }
                     if point.y <= lFrame.maxY + lDownAllowance && point.x <= lFrame.maxX + 4.0 {
-                        return (1, lCol, rawLabel)
+                        return (1, lCol, includeDiagnostic ? roleDiagnosticLabel(backspace.role) : nil)
                     }
                     if point.x <= mFrame.maxX + (isComposing ? 12.0 : 8.5) {
-                        return (2, mCol, rawLabel)
+                        return (2, mCol, includeDiagnostic ? roleDiagnosticLabel(backspace.role) : nil)
                     }
                 }
             } else if bestRow == 3 {
@@ -1705,7 +1724,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                                 letterCol = c
                             }
                         }
-                        return (2, letterCol, roleDiagnosticLabel(r3Role))
+                        return (2, letterCol, includeDiagnostic ? roleDiagnosticLabel(r3Role) : nil)
                     }
                 }
             }

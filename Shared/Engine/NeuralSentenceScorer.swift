@@ -59,22 +59,22 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         public static let zero = EmbeddingPair(ctx: .zero, tgt: .zero)
     }
 
-    /// Pre-bundled neural projections for a lexical word so Viterbi inner loops run 100% lock-free in SIMD registers.
+    /// Pre-bundled neural embeddings for a lexical word so Viterbi inner loops run 100% lock-free in SIMD registers.
+    /// Left-context matrix projections (`W_ctx * ctx`, `B_direct * ctx`, `W_char * lastCharCtx`, `W_sem * semCtx`)
+    /// are computed lazily only when a word survives beam pruning to act as a predecessor context.
     public struct WordNeuralRecord: Sendable {
         public let ctx: Vec32
         public let tanhCtx: Vec32
         public let tgt: Vec32
         public let firstCharTgt: Vec32
-        public let wx: Vec32
-        public let bd: Vec32
-        public let cp: Vec32
         public let eosCtxScore: Float
         public let charCount: Int
         public let isAccidentalSingleton: Bool
-        /// Asymmetric 64-dim semantic upper-half (`dims[32..<64]`) + pre-projected `W_sem * semCtx`.
+        /// Asymmetric 64-dim semantic upper-half (`dims[32..<64]`).
         public let semCtx: Vec32
         public let semTgt: Vec32
-        public let semPred: Vec32
+        fileprivate let cacheId: UInt32
+        fileprivate let lastCharScalar: UInt32
 
         @inline(__always)
         public init(
@@ -82,9 +82,9 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             tanhCtx: Vec32,
             tgt: Vec32,
             firstCharTgt: Vec32,
-            wx: Vec32,
-            bd: Vec32,
-            cp: Vec32,
+            wx: Vec32 = .zero,
+            bd: Vec32 = .zero,
+            cp: Vec32 = .zero,
             eosCtxScore: Float,
             charCount: Int,
             isAccidentalSingleton: Bool,
@@ -92,19 +92,48 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             semTgt: Vec32 = .zero,
             semPred: Vec32 = .zero
         ) {
+            _ = wx
+            _ = bd
+            _ = cp
+            _ = semPred
             self.ctx = ctx
             self.tanhCtx = tanhCtx
             self.tgt = tgt
             self.firstCharTgt = firstCharTgt
-            self.wx = wx
-            self.bd = bd
-            self.cp = cp
             self.eosCtxScore = eosCtxScore
             self.charCount = charCount
             self.isAccidentalSingleton = isAccidentalSingleton
             self.semCtx = semCtx
             self.semTgt = semTgt
-            self.semPred = semPred
+            self.cacheId = 0
+            self.lastCharScalar = 0
+        }
+
+        @inline(__always)
+        fileprivate init(
+            ctx: Vec32,
+            tanhCtx: Vec32,
+            tgt: Vec32,
+            firstCharTgt: Vec32,
+            eosCtxScore: Float,
+            charCount: Int,
+            isAccidentalSingleton: Bool,
+            semCtx: Vec32,
+            semTgt: Vec32,
+            cacheId: UInt32,
+            lastCharScalar: UInt32
+        ) {
+            self.ctx = ctx
+            self.tanhCtx = tanhCtx
+            self.tgt = tgt
+            self.firstCharTgt = firstCharTgt
+            self.eosCtxScore = eosCtxScore
+            self.charCount = charCount
+            self.isAccidentalSingleton = isAccidentalSingleton
+            self.semCtx = semCtx
+            self.semTgt = semTgt
+            self.cacheId = cacheId
+            self.lastCharScalar = lastCharScalar
         }
 
         public static let empty = WordNeuralRecord(
@@ -112,13 +141,24 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             tanhCtx: .zero,
             tgt: .zero,
             firstCharTgt: .zero,
-            wx: .zero,
-            bd: .zero,
-            cp: .zero,
             eosCtxScore: 0.0,
             charCount: 0,
-            isAccidentalSingleton: false
+            isAccidentalSingleton: false,
+            semCtx: .zero,
+            semTgt: .zero,
+            cacheId: 0,
+            lastCharScalar: 0
         )
+    }
+
+    private struct ContextProjectionSlot {
+        var cacheId: UInt32
+        var wx: Vec32
+        var bd: Vec32
+        var cp: Vec32
+        var semPred: Vec32
+
+        static let empty = ContextProjectionSlot(cacheId: 0, wx: .zero, bd: .zero, cp: .zero, semPred: .zero)
     }
 
     public struct StepPredictor: Sendable {
@@ -240,12 +280,16 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     private let sem64SentenceDecay: Float
     private let sem64MaxBonusQ8: Int
 
-    // Consolidated in-memory cache for hot word records (single lock acquisition per unique word)
+    // Consolidated in-memory cache for hot word records + lazy left-context projections
     private var cacheLock = os_unfair_lock_s()
     private var wordRecordCache: [String: WordNeuralRecord] = [:]
     private var wordRecordRing: [String] = []
     private var wordRecordRingCursor: Int = 0
-    private static let maxWordRecordCacheCount = 3072
+    private var nextRecordCacheId: UInt32 = 1
+    private var contextProjSlots: [ContextProjectionSlot] = []
+    private static let maxWordRecordCacheCount = 768
+    private static let contextProjSlotCount = 256
+    private static let contextProjSlotMask: UInt32 = 255
 
     public static let magicLNLM: UInt32 = 0x4D4C4E4C // "LNLM"
     public static let magicLNBR: UInt32 = 0x52424E4C // "LNBR"
@@ -1124,9 +1168,6 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
                 self.hBos = bosVec
                 self.wEos = weVec
                 self.uEos = ueVec
-
-                self.wordRecordCache.reserveCapacity(Self.maxWordRecordCacheCount)
-                self.wordRecordRing.reserveCapacity(Self.maxWordRecordCacheCount)
                 return
             }
         } else if foundOffset > 0 && foundSize > 0 && foundVer == 1 {
@@ -1202,9 +1243,6 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
                 self.hBos = bosVec
                 self.wEos = weVec
                 self.uEos = ueVec
-
-                self.wordRecordCache.reserveCapacity(Self.maxWordRecordCacheCount)
-                self.wordRecordRing.reserveCapacity(Self.maxWordRecordCacheCount)
                 return
             }
         }
@@ -1245,6 +1283,59 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     public var isSemantic64Loaded: Bool { hasBinarySection && hasSemantic64 }
     public var semantic64QuantMode: UInt32 { hasBinarySection && hasSemantic64 ? sem64QuantMode : 0 }
     public var version: UInt32 { modelVersion }
+
+    /// Releases transient decoded word-embedding and context-projection caches under iOS keyboard extension memory pressure.
+    public func purgeTransientCaches(releaseCapacity: Bool = false) {
+        os_unfair_lock_lock(&cacheLock)
+        wordRecordCache.removeAll(keepingCapacity: !releaseCapacity)
+        wordRecordRing.removeAll(keepingCapacity: !releaseCapacity)
+        wordRecordRingCursor = 0
+        if releaseCapacity {
+            contextProjSlots.removeAll(keepingCapacity: false)
+        } else if !contextProjSlots.isEmpty {
+            for idx in contextProjSlots.indices {
+                contextProjSlots[idx].cacheId = 0
+            }
+        }
+        os_unfair_lock_unlock(&cacheLock)
+    }
+
+    @inline(__always)
+    private func contextProjection(for record: WordNeuralRecord) -> ContextProjectionSlot {
+        let cid = record.cacheId
+        if cid != 0 {
+            let slotIdx = Int(cid & Self.contextProjSlotMask)
+            os_unfair_lock_lock(&cacheLock)
+            if contextProjSlots.count == Self.contextProjSlotCount {
+                let slot = contextProjSlots[slotIdx]
+                if slot.cacheId == cid {
+                    os_unfair_lock_unlock(&cacheLock)
+                    return slot
+                }
+            }
+            os_unfair_lock_unlock(&cacheLock)
+        }
+
+        let lastCharCtx = embedding(forScalarValue: Int(record.lastCharScalar)).ctx
+        let built = ContextProjectionSlot(
+            cacheId: cid,
+            wx: Self.matVec32(wCtxRows, x: record.ctx),
+            bd: Self.matVec32(bDirectRows, x: record.ctx),
+            cp: Self.matVec32(wCharRows, x: lastCharCtx),
+            semPred: hasSemantic64 ? Self.matVec32(sem64WSemRows, x: record.semCtx) : .zero
+        )
+
+        if cid != 0 {
+            let slotIdx = Int(cid & Self.contextProjSlotMask)
+            os_unfair_lock_lock(&cacheLock)
+            if contextProjSlots.count != Self.contextProjSlotCount {
+                contextProjSlots = Array(repeating: .empty, count: Self.contextProjSlotCount)
+            }
+            contextProjSlots[slotIdx] = built
+            os_unfair_lock_unlock(&cacheLock)
+        }
+        return built
+    }
 
     // MARK: - Recurrent Neural Forward Pass (`SIMD8<Float> x 4`)
 
@@ -1357,18 +1448,20 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             )
         }
 
+        let proj = contextProjection(for: lastRecord)
+
         // Layer 1: z = SiLU(W_ctx * v_ctx(w_{m-1}) + W_rec * h_{m-1} + b_1)
         let wr = Self.matVec32(wRecRows, x: hidden)
-        let z = Self.silu32(lastRecord.wx + wr + b1)
+        let z = Self.silu32(proj.wx + wr + b1)
 
         // Layer 2: p_word = W_proj * z + B_direct * v_ctx(w_{m-1}) + B_skip * h_{m-1} + b_2
         let wp = Self.matVec32(wProjRows, x: z)
         let bs = Self.matVec32(bSkipRows, x: hidden)
-        let wordPred = wp + lastRecord.bd + bs + b2
+        let wordPred = wp + proj.bd + bs + b2
 
         var semCombined = Vec32.zero
         if hasSemantic64 {
-            semCombined = sem64SemScale * lastRecord.semPred
+            semCombined = sem64SemScale * proj.semPred
             if topicMemory != .zero && sem64TopicScale > 0 {
                 let gArg = sem64WGateH.dot(hidden) + sem64WGateTopic.dot(topicMemory) + sem64BGate
                 let gate = Self.approxSigmoidScalar(gArg)
@@ -1379,7 +1472,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
         return StepPredictor(
             wordPred: wordPred,
-            charPred: lastRecord.cp,
+            charPred: proj.cp,
             z: z,
             prevHidden: hidden,
             lastCtx: lastRecord.ctx,
@@ -1539,15 +1632,15 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     ) -> Int {
         guard hasBinarySection, !words.isEmpty else { return 0 }
         var hidden = initialHiddenState(precedingContext: precedingContext)
-        var prevWord = ViterbiDecoder.extractTrailingChineseSuffix(from: precedingContext ?? "", maxChars: 3)
+        let prevWord = ViterbiDecoder.extractTrailingChineseSuffix(from: precedingContext ?? "", maxChars: 3)
+        var prevRec: WordNeuralRecord = prevWord.isEmpty ? .empty : wordRecord(for: prevWord)
         var totalQ8 = 0
-        var oneCharRun = prevWord.count == 1 ? 1 : 0
+        var oneCharRun = prevRec.charCount == 1 ? 1 : 0
 
         for (idx, w) in words.enumerated() {
             let isLast = (idx == words.count - 1)
             let wRec = wordRecord(for: w)
-            if !prevWord.isEmpty {
-                let prevRec = wordRecord(for: prevWord)
+            if prevRec.charCount > 0 {
                 let pred = prepareStepPredictor(lastRecord: prevRec, hidden: hidden, topicMemory: topicMemory)
                 totalQ8 += scorePreloadedCandidate(
                     predictor: pred,
@@ -1567,7 +1660,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             } else {
                 oneCharRun = 0
             }
-            prevWord = w
+            prevRec = wRec
         }
         return totalQ8
     }
@@ -1721,80 +1814,81 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     /// Evaluates the 46.7 KB Int8 2-layer SiLU MLP (`LNTR` v1) in Apple Silicon SIMD registers (`~0.9 µs`).
     public func scoreTypoCandidateQ8(features: [Float]) -> Int {
+        let w2Offset = 32 + 24_576 + 768 * 4
         guard hasBinarySection, hasTypoReranker, features.count == Self.typoFeatureDim,
+              lntrRawBuffer.count >= w2Offset + 48 * 384,
               let basePtr = lntrRawBuffer.baseAddress else {
             return 0
         }
 
-        var xVecs = [SIMD8<Float>](repeating: .zero, count: 8)
-        let lo8 = SIMD8<Float>(repeating: -8.0)
-        let hi8 = SIMD8<Float>(repeating: 8.0)
-        for g in 0..<8 {
-            let off = g * 8
-            let raw8 = SIMD8<Float>(
-                features[off].isFinite ? features[off] : 0,
-                features[off + 1].isFinite ? features[off + 1] : 0,
-                features[off + 2].isFinite ? features[off + 2] : 0,
-                features[off + 3].isFinite ? features[off + 3] : 0,
-                features[off + 4].isFinite ? features[off + 4] : 0,
-                features[off + 5].isFinite ? features[off + 5] : 0,
-                features[off + 6].isFinite ? features[off + 6] : 0,
-                features[off + 7].isFinite ? features[off + 7] : 0
-            )
-            xVecs[g] = raw8.clamped(lowerBound: lo8, upperBound: hi8)
-        }
-
-        let w1Ptr = basePtr.advanced(by: 32).assumingMemoryBound(to: Int8.self)
-        var h1Vecs = [SIMD8<Float>](repeating: .zero, count: 48)
-        for blk in 0..<48 {
-            var pre8 = SIMD8<Float>.zero
-            for lane in 0..<8 {
-                let row = blk * 8 + lane
-                let rPtr = w1Ptr.advanced(by: row * 64)
-                var acc = SIMD8<Float>.zero
-                for g in 0..<8 {
-                    let gOff = g * 8
-                    let w8 = SIMD8<Float>(
-                        Float(rPtr[gOff]), Float(rPtr[gOff + 1]), Float(rPtr[gOff + 2]), Float(rPtr[gOff + 3]),
-                        Float(rPtr[gOff + 4]), Float(rPtr[gOff + 5]), Float(rPtr[gOff + 6]), Float(rPtr[gOff + 7])
-                    )
-                    acc += w8 * xVecs[g]
-                }
-                pre8[lane] = acc.sum() * lntrScale1[row] + lntrB1[row]
+        return withUnsafeTemporaryAllocation(of: SIMD8<Float>.self, capacity: 56) { scratch in
+            let lo8 = SIMD8<Float>(repeating: -8.0)
+            let hi8 = SIMD8<Float>(repeating: 8.0)
+            for g in 0..<8 {
+                let off = g * 8
+                let raw8 = SIMD8<Float>(
+                    features[off].isFinite ? features[off] : 0,
+                    features[off + 1].isFinite ? features[off + 1] : 0,
+                    features[off + 2].isFinite ? features[off + 2] : 0,
+                    features[off + 3].isFinite ? features[off + 3] : 0,
+                    features[off + 4].isFinite ? features[off + 4] : 0,
+                    features[off + 5].isFinite ? features[off + 5] : 0,
+                    features[off + 6].isFinite ? features[off + 6] : 0,
+                    features[off + 7].isFinite ? features[off + 7] : 0
+                )
+                scratch[g] = raw8.clamped(lowerBound: lo8, upperBound: hi8)
             }
-            h1Vecs[blk] = Self.silu8(pre8)
-        }
 
-        let w2Offset = 32 + 24_576 + 768 * 4
-        let w2Ptr = basePtr.advanced(by: w2Offset).assumingMemoryBound(to: Int8.self)
-        var outDot: Float = 0.0
-        for blk2 in 0..<6 {
-            var pre2 = SIMD8<Float>.zero
-            for lane in 0..<8 {
-                let row2 = blk2 * 8 + lane
-                let rPtr2 = w2Ptr.advanced(by: row2 * 384)
-                var acc2 = SIMD8<Float>.zero
-                for b1Idx in 0..<48 {
-                    let gOff = b1Idx * 8
-                    let w8 = SIMD8<Float>(
-                        Float(rPtr2[gOff]), Float(rPtr2[gOff + 1]), Float(rPtr2[gOff + 2]), Float(rPtr2[gOff + 3]),
-                        Float(rPtr2[gOff + 4]), Float(rPtr2[gOff + 5]), Float(rPtr2[gOff + 6]), Float(rPtr2[gOff + 7])
-                    )
-                    acc2 += w8 * h1Vecs[b1Idx]
+            let w1Ptr = basePtr.advanced(by: 32).assumingMemoryBound(to: Int8.self)
+            for blk in 0..<48 {
+                var pre8 = SIMD8<Float>.zero
+                for lane in 0..<8 {
+                    let row = blk * 8 + lane
+                    let rPtr = w1Ptr.advanced(by: row * 64)
+                    var acc = SIMD8<Float>.zero
+                    for g in 0..<8 {
+                        let gOff = g * 8
+                        let w8 = SIMD8<Float>(
+                            Float(rPtr[gOff]), Float(rPtr[gOff + 1]), Float(rPtr[gOff + 2]), Float(rPtr[gOff + 3]),
+                            Float(rPtr[gOff + 4]), Float(rPtr[gOff + 5]), Float(rPtr[gOff + 6]), Float(rPtr[gOff + 7])
+                        )
+                        acc += w8 * scratch[g]
+                    }
+                    pre8[lane] = acc.sum() * lntrScale1[row] + lntrB1[row]
                 }
-                pre2[lane] = acc2.sum()
+                scratch[8 + blk] = Self.silu8(pre8)
             }
-            let h2 = Self.silu8(pre2 * lntrScale2[blk2] + lntrB2[blk2])
-            outDot += (h2 * lntrW3[blk2]).sum()
-        }
 
-        let skipDot = (lntrResLin0 * xVecs[0] + lntrResLin1 * xVecs[1]).sum()
-        let rawOut = outDot + skipDot + lntrB3
-        guard rawOut.isFinite else { return 0 }
-        let scaled = (rawOut * 170.0).rounded()
-        guard scaled.isFinite else { return rawOut > 0 ? lntrMaxDeltaQ8 : -lntrMaxDeltaQ8 }
-        let cap = Float(lntrMaxDeltaQ8)
-        return Int(min(cap, max(-cap, scaled)))
+            let w2Ptr = basePtr.advanced(by: w2Offset).assumingMemoryBound(to: Int8.self)
+            var outDot: Float = 0.0
+            for blk2 in 0..<6 {
+                var pre2 = SIMD8<Float>.zero
+                for lane in 0..<8 {
+                    let row2 = blk2 * 8 + lane
+                    let rPtr2 = w2Ptr.advanced(by: row2 * 384)
+                    var acc2 = SIMD8<Float>.zero
+                    for b1Idx in 0..<48 {
+                        let gOff = b1Idx * 8
+                        let w8 = SIMD8<Float>(
+                            Float(rPtr2[gOff]), Float(rPtr2[gOff + 1]), Float(rPtr2[gOff + 2]), Float(rPtr2[gOff + 3]),
+                            Float(rPtr2[gOff + 4]), Float(rPtr2[gOff + 5]), Float(rPtr2[gOff + 6]), Float(rPtr2[gOff + 7])
+                        )
+                        acc2 += w8 * scratch[8 + b1Idx]
+                    }
+                    pre2[lane] = acc2.sum()
+                }
+                let h2 = Self.silu8(pre2 * lntrScale2[blk2] + lntrB2[blk2])
+                outDot += (h2 * lntrW3[blk2]).sum()
+            }
+
+            let skipDot = (lntrResLin0 * scratch[0] + lntrResLin1 * scratch[1]).sum()
+            let rawOut = outDot + skipDot + lntrB3
+            guard rawOut.isFinite else { return 0 }
+            let scaled = (rawOut * 170.0).rounded()
+            guard scaled.isFinite else { return rawOut > 0 ? lntrMaxDeltaQ8 : -lntrMaxDeltaQ8 }
+            let cap = Float(lntrMaxDeltaQ8)
+            return Int(min(cap, max(-cap, scaled)))
+        }
     }
 
     @inline(__always)
@@ -1930,8 +2024,12 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         guard hasBinarySection, let scalar = ch.unicodeScalars.first else {
             return .zero
         }
-        let v = Int(scalar.value)
-        guard v >= 0x4E00 && v < 0xA000 else {
+        return embedding(forScalarValue: Int(scalar.value))
+    }
+
+    @inline(__always)
+    private func embedding(forScalarValue v: Int) -> EmbeddingPair {
+        guard hasBinarySection, v >= 0x4E00 && v < 0xA000 else {
             return .zero
         }
         let cid = Int(Self.loadU16(rawBuffer, at: charMapOffset + (v - 0x4E00) * 2))
@@ -1967,8 +2065,8 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         let cCount = word.count
         let firstCh = word.first ?? Character(" ")
         let lastCh = word.last ?? firstCh
+        let lastScalar = lastCh.unicodeScalars.first?.value ?? 0
         let firstCharEmb = embedding(forChar: firstCh)
-        let lastCharEmb = (cCount == 1) ? firstCharEmb : embedding(forChar: lastCh)
 
         let resolvedEmb: EmbeddingPair
         if let prefetchedEmbedding {
@@ -1978,8 +2076,9 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         } else if let hit = lookupWordTableEmbedding(word) {
             resolvedEmb = hit
         } else {
+            let lastCharEmb = embedding(forScalarValue: Int(lastScalar))
             // Compositional neural pooling for out-of-table compound words (`0.35 * firstChar + 0.65 * lastChar`),
-            // clearing dim 30 (`ACCIDENTAL_TYPO_SINGLETON`) and setting dim 31 (`LEXICAL_MULTIWORD_FLOW = 0.45`)!
+            // clearing dim 30 (`ACCIDENTAL_TYPO_SINGLETON`) and setting dim 31 (`LEXICAL_MULTIWORD_FLOW = 0.45`).
             var cV = 0.35 * firstCharEmb.ctx + 0.65 * lastCharEmb.ctx
             var tV = 0.65 * firstCharEmb.tgt + 0.35 * lastCharEmb.tgt
             if modelVersion >= 2 {
@@ -1993,7 +2092,6 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
         var sCtx = Vec32.zero
         var sTgt = Vec32.zero
-        var sPred = Vec32.zero
         if hasSemantic64 {
             if let semHit = lookupSemanticWordEmbedding(word) {
                 sCtx = semHit.ctx
@@ -2009,40 +2107,50 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
                     sTgt = 0.65 * fSem.tgt + 0.35 * lSem.tgt
                 }
             }
-            sPred = Self.matVec32(sem64WSemRows, x: sCtx)
         }
 
-        let built = WordNeuralRecord(
-            ctx: resolvedEmb.ctx,
-            tanhCtx: Self.tanh32(resolvedEmb.ctx),
-            tgt: resolvedEmb.tgt,
-            firstCharTgt: firstCharEmb.tgt,
-            wx: Self.matVec32(wCtxRows, x: resolvedEmb.ctx),
-            bd: Self.matVec32(bDirectRows, x: resolvedEmb.ctx),
-            cp: Self.matVec32(wCharRows, x: lastCharEmb.ctx),
-            eosCtxScore: uEos.dot(resolvedEmb.ctx),
-            charCount: cCount,
-            isAccidentalSingleton: cCount == 1 && resolvedEmb.tgt.v3[6] > 0.5,
-            semCtx: sCtx,
-            semTgt: sTgt,
-            semPred: sPred
-        )
+        let tanhCtx = Self.tanh32(resolvedEmb.ctx)
+        let eosCtxScore = uEos.dot(resolvedEmb.ctx)
+        let isSingleton = (cCount == 1 && resolvedEmb.tgt.v3[6] > 0.5)
 
         os_unfair_lock_lock(&cacheLock)
-        if wordRecordCache[word] == nil {
-            if wordRecordRing.count >= Self.maxWordRecordCacheCount {
-                let victim = wordRecordRing[wordRecordRingCursor]
-                wordRecordCache.removeValue(forKey: victim)
-                wordRecordRing[wordRecordRingCursor] = word
-                wordRecordRingCursor += 1
-                if wordRecordRingCursor == Self.maxWordRecordCacheCount {
-                    wordRecordRingCursor = 0
-                }
-            } else {
-                wordRecordRing.append(word)
-            }
-            wordRecordCache[word] = built
+        if let existing = wordRecordCache[word] {
+            os_unfair_lock_unlock(&cacheLock)
+            return existing
         }
+        let cid = nextRecordCacheId
+        nextRecordCacheId &+= 1
+        if nextRecordCacheId == 0 {
+            nextRecordCacheId = 1
+            for idx in contextProjSlots.indices {
+                contextProjSlots[idx].cacheId = 0
+            }
+        }
+        let built = WordNeuralRecord(
+            ctx: resolvedEmb.ctx,
+            tanhCtx: tanhCtx,
+            tgt: resolvedEmb.tgt,
+            firstCharTgt: firstCharEmb.tgt,
+            eosCtxScore: eosCtxScore,
+            charCount: cCount,
+            isAccidentalSingleton: isSingleton,
+            semCtx: sCtx,
+            semTgt: sTgt,
+            cacheId: cid,
+            lastCharScalar: lastScalar
+        )
+        if wordRecordRing.count >= Self.maxWordRecordCacheCount {
+            let victim = wordRecordRing[wordRecordRingCursor]
+            wordRecordCache.removeValue(forKey: victim)
+            wordRecordRing[wordRecordRingCursor] = word
+            wordRecordRingCursor += 1
+            if wordRecordRingCursor == Self.maxWordRecordCacheCount {
+                wordRecordRingCursor = 0
+            }
+        } else {
+            wordRecordRing.append(word)
+        }
+        wordRecordCache[word] = built
         os_unfair_lock_unlock(&cacheLock)
         return built
     }
@@ -2200,6 +2308,10 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     @inline(__always)
     private static func halfBitsToFloat(_ h: UInt16) -> Float {
+        if (h & 0x7C00) == 0x7C00 { return 0.0 }
+        #if arch(arm64)
+        return Float(Float16(bitPattern: h))
+        #else
         let sign = UInt32(h & 0x8000) << 16
         let exp = Int((h >> 10) & 0x1F)
         let mant = UInt32(h & 0x03FF)
@@ -2208,14 +2320,13 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             let s: Float = (h & 0x8000) != 0 ? -1.0 : 1.0
             return s * Float(mant) * (1.0 / 16_777_216.0)
         }
-        if exp == 31 {
-            return 0.0
-        }
         return Float(bitPattern: sign | (UInt32(exp + 112) << 23) | (mant << 13))
+        #endif
     }
 
     @inline(__always)
     private static func loadFloat16Vec32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Vec32 {
+        guard offset >= 0, offset <= raw.count - 64 else { return .zero }
         @inline(__always)
         func lane8(_ baseOff: Int) -> SIMD8<Float> {
             SIMD8<Float>(
@@ -2240,7 +2351,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     @inline(__always)
     private static func loadQuantizedVec32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Vec32 {
         let scale: Float = 1.0 / 32.0
-        guard let base = raw.baseAddress else { return .zero }
+        guard offset >= 0, offset <= raw.count - 32, let base = raw.baseAddress else { return .zero }
         let p = base.advanced(by: offset).assumingMemoryBound(to: Int8.self)
         let v0 = SIMD8<Float>(
             Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3]),
@@ -2264,7 +2375,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     @inline(__always)
     private static func loadQuantizedVec16As32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Vec32 {
         let scale: Float = 1.0 / 32.0
-        guard let base = raw.baseAddress else { return .zero }
+        guard offset >= 0, offset <= raw.count - 16, let base = raw.baseAddress else { return .zero }
         let p = base.advanced(by: offset).assumingMemoryBound(to: Int8.self)
         let v0 = SIMD8<Float>(
             Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3]),
@@ -2279,6 +2390,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     @inline(__always)
     private static func loadSIMD8F32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> SIMD8<Float> {
+        guard offset >= 0, offset <= raw.count - 32 else { return .zero }
         let f0 = Float(bitPattern: loadU32(raw, at: offset))
         let f1 = Float(bitPattern: loadU32(raw, at: offset + 4))
         let f2 = Float(bitPattern: loadU32(raw, at: offset + 8))
@@ -2292,12 +2404,14 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     @inline(__always)
     private static func loadU16(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt16 {
-        UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
+        guard offset >= 0, offset <= raw.count - 2 else { return 0 }
+        return UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
     private static func loadU32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> UInt32 {
-        UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+        guard offset >= 0, offset <= raw.count - 4 else { return 0 }
+        return UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 
     @inline(__always)

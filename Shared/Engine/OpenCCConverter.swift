@@ -101,7 +101,8 @@ public final class OpenCCConverter: @unchecked Sendable {
             phraseOffset: layout.stPhraseOffset,
             charCount: layout.stCharCount,
             charOffset: layout.stCharOffset,
-            poolOffset: layout.poolOffset
+            poolOffset: layout.poolOffset,
+            poolUnitCount: layout.poolUnitCount
         )
         let stage2 = applyPhraseAndCharStage(
             units: stage1,
@@ -112,7 +113,8 @@ public final class OpenCCConverter: @unchecked Sendable {
             phraseOffset: layout.twPhraseOffset,
             charCount: 0,
             charOffset: 0,
-            poolOffset: layout.poolOffset
+            poolOffset: layout.poolOffset,
+            poolUnitCount: layout.poolUnitCount
         )
         let stage3 = applyVariantStage(
             units: stage2,
@@ -136,7 +138,8 @@ public final class OpenCCConverter: @unchecked Sendable {
             phraseOffset: layout.stPhraseOffset,
             charCount: layout.stCharCount,
             charOffset: layout.stCharOffset,
-            poolOffset: layout.poolOffset
+            poolOffset: layout.poolOffset,
+            poolUnitCount: layout.poolUnitCount
         )
         let stage2 = applyVariantStage(
             units: stage1,
@@ -157,7 +160,8 @@ public final class OpenCCConverter: @unchecked Sendable {
         phraseOffset: Int,
         charCount: Int,
         charOffset: Int,
-        poolOffset: Int
+        poolOffset: Int,
+        poolUnitCount: Int
     ) -> [UInt16] {
         var out: [UInt16] = []
         out.reserveCapacity(units.count + (units.count >> 3))
@@ -173,11 +177,15 @@ public final class OpenCCConverter: @unchecked Sendable {
                    pos: pos,
                    indexCount: indexCount,
                    indexOffset: indexOffset,
+                   phraseCount: phraseCount,
                    phraseOffset: phraseOffset,
-                   poolOffset: poolOffset
+                   poolOffset: poolOffset,
+                   poolUnitCount: poolUnitCount
                ) {
-                if match.valPacked == 0 {
-                    // Overlap guard entry: preserve phrase boundary, emit per-scalar STCharacters.
+                let valOff = Int(match.valPacked >> 8)
+                let valLen = Int(match.valPacked & 0xFF)
+                if match.valPacked == 0 || valLen == 0 || valOff < 0 || valOff > poolUnitCount - valLen {
+                    // Overlap guard entry (or invalid value range): preserve phrase boundary, emit per-scalar STCharacters.
                     appendCharConvertedSlice(
                         units: units,
                         start: pos,
@@ -187,8 +195,6 @@ public final class OpenCCConverter: @unchecked Sendable {
                         into: &out
                     )
                 } else {
-                    let valOff = Int(match.valPacked >> 8)
-                    let valLen = Int(match.valPacked & 0xFF)
                     let byteBase = poolOffset + valOff * 2
                     for i in 0..<valLen {
                         out.append(loadU16(byteBase + i * 2))
@@ -239,8 +245,10 @@ public final class OpenCCConverter: @unchecked Sendable {
         pos: Int,
         indexCount: Int,
         indexOffset: Int,
+        phraseCount: Int,
         phraseOffset: Int,
-        poolOffset: Int
+        poolOffset: Int,
+        poolUnitCount: Int
     ) -> (matchedLen: Int, valPacked: UInt32)? {
         let u0 = units[pos]
         guard let idxPos = binarySearchFirstUnit(u0, count: indexCount, offset: indexOffset) else {
@@ -251,7 +259,7 @@ public final class OpenCCConverter: @unchecked Sendable {
         let lenMask = loadU16(entryBase + 2)
         let groupStart = Int(loadU32(entryBase + 4))
         let groupEnd = Int(loadU32(entryBase + 12))
-        guard groupStart < groupEnd else { return nil }
+        guard groupStart >= 0, groupStart < groupEnd, groupEnd <= phraseCount else { return nil }
 
         let maxLen = min(16, units.count - pos)
         var length = maxLen
@@ -264,7 +272,8 @@ public final class OpenCCConverter: @unchecked Sendable {
                     groupStart: groupStart,
                     groupEnd: groupEnd,
                     phraseOffset: phraseOffset,
-                    poolOffset: poolOffset
+                    poolOffset: poolOffset,
+                    poolUnitCount: poolUnitCount
                 ) {
                     return (length, valPacked)
                 }
@@ -298,7 +307,8 @@ public final class OpenCCConverter: @unchecked Sendable {
         groupStart: Int,
         groupEnd: Int,
         phraseOffset: Int,
-        poolOffset: Int
+        poolOffset: Int,
+        poolUnitCount: Int
     ) -> UInt32? {
         var lo = groupStart
         var hi = groupEnd - 1
@@ -308,6 +318,9 @@ public final class OpenCCConverter: @unchecked Sendable {
             let keyPacked = loadU32(recBase)
             let keyOff = Int(keyPacked >> 8)
             let keyLen = Int(keyPacked & 0xFF)
+            guard keyOff >= 0, keyLen > 0, keyOff <= poolUnitCount - keyLen else {
+                return nil
+            }
             let cmp = compareSlice(
                 units: units,
                 pos: pos,
@@ -433,23 +446,20 @@ public final class OpenCCConverter: @unchecked Sendable {
 
     @inline(__always)
     private func loadU16(_ byteOffset: Int) -> UInt16 {
-        UInt16(rawBuffer[byteOffset]) | (UInt16(rawBuffer[byteOffset + 1]) << 8)
+        guard byteOffset >= 0, byteOffset + 2 <= rawBuffer.count else { return 0 }
+        return UInt16(littleEndian: rawBuffer.loadUnaligned(fromByteOffset: byteOffset, as: UInt16.self))
     }
 
     @inline(__always)
     private func loadU32(_ byteOffset: Int) -> UInt32 {
-        UInt32(rawBuffer[byteOffset])
-            | (UInt32(rawBuffer[byteOffset + 1]) << 8)
-            | (UInt32(rawBuffer[byteOffset + 2]) << 16)
-            | (UInt32(rawBuffer[byteOffset + 3]) << 24)
+        guard byteOffset >= 0, byteOffset + 4 <= rawBuffer.count else { return 0 }
+        return UInt32(littleEndian: rawBuffer.loadUnaligned(fromByteOffset: byteOffset, as: UInt32.self))
     }
 
     @inline(__always)
     private static func loadU32(_ raw: UnsafeRawBufferPointer, at byteOffset: Int) -> UInt32 {
-        UInt32(raw[byteOffset])
-            | (UInt32(raw[byteOffset + 1]) << 8)
-            | (UInt32(raw[byteOffset + 2]) << 16)
-            | (UInt32(raw[byteOffset + 3]) << 24)
+        guard byteOffset >= 0, byteOffset + 4 <= raw.count else { return 0 }
+        return UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: byteOffset, as: UInt32.self))
     }
 
     @inline(__always)
@@ -544,20 +554,23 @@ public final class OpenCCConverter: @unchecked Sendable {
             poolOffset: Int(loadU32(raw, at: 76))
         )
 
-        func inBounds(_ offset: Int, bytes: Int) -> Bool {
-            offset >= 80 && bytes >= 0 && offset + bytes <= raw.count
+        func inBounds(_ offset: Int, count: Int, stride: Int) -> Bool {
+            guard offset >= 80, offset <= raw.count, count >= 0, stride > 0 else { return false }
+            return count <= (raw.count - offset) / stride
         }
 
-        guard inBounds(layout.stCharOffset, bytes: layout.stCharCount * 8),
-              inBounds(layout.twVarOffset, bytes: layout.twVarCount * 8),
-              inBounds(layout.hkVarOffset, bytes: layout.hkVarCount * 8),
-              inBounds(layout.stBitmapOffset, bytes: 8192),
-              inBounds(layout.stIndexOffset, bytes: (layout.stIndexCount + 1) * 8),
-              inBounds(layout.stPhraseOffset, bytes: layout.stPhraseCount * 8),
-              inBounds(layout.twBitmapOffset, bytes: 8192),
-              inBounds(layout.twIndexOffset, bytes: (layout.twIndexCount + 1) * 8),
-              inBounds(layout.twPhraseOffset, bytes: layout.twPhraseCount * 8),
-              inBounds(layout.poolOffset, bytes: layout.poolUnitCount * 2) else {
+        guard layout.stIndexCount >= 0, layout.stIndexCount < Int.max,
+              layout.twIndexCount >= 0, layout.twIndexCount < Int.max,
+              inBounds(layout.stCharOffset, count: layout.stCharCount, stride: 8),
+              inBounds(layout.twVarOffset, count: layout.twVarCount, stride: 8),
+              inBounds(layout.hkVarOffset, count: layout.hkVarCount, stride: 8),
+              inBounds(layout.stBitmapOffset, count: 8192, stride: 1),
+              inBounds(layout.stIndexOffset, count: layout.stIndexCount + 1, stride: 8),
+              inBounds(layout.stPhraseOffset, count: layout.stPhraseCount, stride: 8),
+              inBounds(layout.twBitmapOffset, count: 8192, stride: 1),
+              inBounds(layout.twIndexOffset, count: layout.twIndexCount + 1, stride: 8),
+              inBounds(layout.twPhraseOffset, count: layout.twPhraseCount, stride: 8),
+              inBounds(layout.poolOffset, count: layout.poolUnitCount, stride: 2) else {
             return nil
         }
 

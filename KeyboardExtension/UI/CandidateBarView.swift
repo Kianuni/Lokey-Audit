@@ -1392,9 +1392,13 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
 
         // Synchronize `candToSlot` atomically with `slotLayouts` BEFORE mutating `scrollView.contentSize` / `contentOffset`
         // (which synchronously fire `scrollViewDidScroll` in UIKit!).
-        if candToSlot.count != count {
-            candToSlot = Array(repeating: -1, count: count)
+        if candToSlot.count < count {
+            for i in 0..<candToSlot.count { candToSlot[i] = -1 }
+            candToSlot.append(contentsOf: repeatElement(-1, count: count - candToSlot.count))
         } else {
+            if candToSlot.count > count {
+                candToSlot.removeSubrange(count..<candToSlot.count)
+            }
             for i in 0..<count {
                 candToSlot[i] = -1
             }
@@ -2826,9 +2830,13 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
             gridCandidateEmojiFlags.append(CandidateBarView.isEmojiSurface(c.text))
         }
 
-        if candToSlot.count != visibleCellCount {
-            candToSlot = Array(repeating: -1, count: visibleCellCount)
+        if candToSlot.count < visibleCellCount {
+            for i in 0..<candToSlot.count { candToSlot[i] = -1 }
+            candToSlot.append(contentsOf: repeatElement(-1, count: visibleCellCount - candToSlot.count))
         } else {
+            if candToSlot.count > visibleCellCount {
+                candToSlot.removeSubrange(visibleCellCount..<candToSlot.count)
+            }
             for i in 0..<visibleCellCount {
                 candToSlot[i] = -1
             }
@@ -2891,8 +2899,10 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
             return
         }
 
-        if frames.count != visibleCellCount {
-            frames = Array(repeating: .zero, count: visibleCellCount)
+        if frames.count < visibleCellCount {
+            frames.append(contentsOf: repeatElement(.zero, count: visibleCellCount - frames.count))
+        } else if frames.count > visibleCellCount {
+            frames.removeSubrange(visibleCellCount..<frames.count)
         }
 
         let effH = (bounds.height > 1.0 && bounds.height <= 420.0) ? bounds.height : 224.5

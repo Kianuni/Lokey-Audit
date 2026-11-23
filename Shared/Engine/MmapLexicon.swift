@@ -71,6 +71,8 @@ public final class MmapLexicon: @unchecked Sendable {
     }
     private var sharedCacheLock = os_unfair_lock()
     private var sharedRawAssocCache: [String: [String: Int]] = [:]
+    private var cachedXiaoheTable: [[PinyinSyllableAutomaton.ExpandedSyllable]]?
+    private var cachedZiranmaTable: [[PinyinSyllableAutomaton.ExpandedSyllable]]?
     private var rootTargetBySID: [UInt32] = []
     private var rootTopWordScoreBySID: [Int32] = []
     private var rootHasOutgoingBySID: [Bool] = []
@@ -2651,12 +2653,70 @@ public final class MmapLexicon: @unchecked Sendable {
 
         let loaded = associationBonusMap(after: prevWord)
         os_unfair_lock_lock(&sharedCacheLock)
-        if sharedRawAssocCache.count >= 4096 {
+        if sharedRawAssocCache.count >= 1024 {
             sharedRawAssocCache.removeAll(keepingCapacity: true)
         }
         sharedRawAssocCache[prevWord] = loaded
         os_unfair_lock_unlock(&sharedCacheLock)
         return loaded
+    }
+
+    func shuangpinLookupTable(
+        for scheme: PinyinScheme,
+        builder: () -> [[PinyinSyllableAutomaton.ExpandedSyllable]]
+    ) -> [[PinyinSyllableAutomaton.ExpandedSyllable]] {
+        os_unfair_lock_lock(&sharedCacheLock)
+        switch scheme {
+        case .xiaohe:
+            if let existing = cachedXiaoheTable {
+                os_unfair_lock_unlock(&sharedCacheLock)
+                return existing
+            }
+        case .ziranma:
+            if let existing = cachedZiranmaTable {
+                os_unfair_lock_unlock(&sharedCacheLock)
+                return existing
+            }
+        case .quanpin:
+            os_unfair_lock_unlock(&sharedCacheLock)
+            return []
+        }
+        os_unfair_lock_unlock(&sharedCacheLock)
+
+        let built = builder()
+        os_unfair_lock_lock(&sharedCacheLock)
+        switch scheme {
+        case .xiaohe:
+            cachedXiaoheTable = built
+        case .ziranma:
+            cachedZiranmaTable = built
+        case .quanpin:
+            break
+        }
+        os_unfair_lock_unlock(&sharedCacheLock)
+        return built
+    }
+
+    /// Releases transient heap-materialized caches while keeping the read-only `mmap` backing intact.
+    public func purgeTransientCaches(releaseCapacity: Bool = false) {
+        os_unfair_lock_lock(&sharedCacheLock)
+        sharedRawAssocCache.removeAll(keepingCapacity: !releaseCapacity)
+        cachedXiaoheTable = nil
+        cachedZiranmaTable = nil
+        os_unfair_lock_unlock(&sharedCacheLock)
+
+        charReadingLock.lock()
+        primaryReadingByHanScalar = nil
+        charReadingLock.unlock()
+
+        os_unfair_lock_lock(&spokenDrop2Lock)
+        for idx in spokenDrop2BuiltLengths.indices {
+            spokenDrop2BuiltLengths[idx] = false
+            spokenDrop2ByLength[idx].removeAll(keepingCapacity: false)
+        }
+        os_unfair_lock_unlock(&spokenDrop2Lock)
+
+        neuralLM.purgeTransientCaches(releaseCapacity: releaseCapacity)
     }
 
     /// Returns a positive Viterbi transition bonus (`0`..`620` Q8 units) if `nextWord` is a frequent natural continuation of `prevWord`.

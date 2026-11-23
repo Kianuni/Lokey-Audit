@@ -187,7 +187,13 @@ private enum SharedLexiconHolder {
             lexiconLock.unlock()
             return cached
         }
+        // Release the previous mapped lexicon before mapping a newly selected `.lokeypack`
+        // so two large lexicons do not overlap in the extension's address space.
+        let previous = cachedLexicon
+        cachedLexicon = nil
+        cachedSignature = nil
         lexiconLock.unlock()
+        previous?.purgeTransientCaches(releaseCapacity: true)
 
         let resolved = LokeyLexiconPackManager.resolveActiveOrBuiltInLexicon(
             builtInURL: builtInLexiconURL(),
@@ -202,6 +208,13 @@ private enum SharedLexiconHolder {
         }
         lexiconLock.unlock()
         return resolved
+    }
+
+    static func purgeTransientCaches(releaseCapacity: Bool) {
+        lexiconLock.lock()
+        let current = cachedLexicon
+        lexiconLock.unlock()
+        current?.purgeTransientCaches(releaseCapacity: releaseCapacity)
     }
 
     static var lexicon: MmapLexicon? {
@@ -639,7 +652,6 @@ public final class KeyboardViewController: UIInputViewController {
     private var lastPresentedExpanded: Bool = false
     private var lastPresentedShowsAccessory: Bool = true
     private var hasValidPresentedCandidateSignature: Bool = false
-    private var cachedExternalHostTopPadding: CGFloat?
     private var activeDocumentID: UUID?
     private var activeDocumentGeneration: UInt64 = 0
     private var pendingDocumentEdits: [(docGen: UInt64, isUnmarkCommit: Bool, edit: (UITextDocumentProxy) -> Void)] = []
@@ -661,10 +673,6 @@ public final class KeyboardViewController: UIInputViewController {
     private var lastTextWillChangeUptime: TimeInterval = -10
     private var pendingGlobeSwitchDeparture: Bool = false
     private var isDisappearing: Bool = false
-    private var lastGlobeInteractionUptime: TimeInterval = -10
-    private var didReceiveHostResignOrBackground: Bool = false
-    private var lastActiveDisappearUptime: TimeInterval = -10
-    private var wasVisibleBeforeDisappear: Bool = false
     private var lastLoggedGeometrySignature: GeometrySignature?
     private var lastNotifiedHostHeightMismatchSignature: String = ""
     private var isHostResizeRetryScheduled: Bool = false
@@ -759,7 +767,7 @@ public final class KeyboardViewController: UIInputViewController {
     private static let fallbackEmptyTextDocumentProxy = FallbackEmptyTextDocumentProxy()
 
     /// Reads `UIInputViewController.textDocumentProxy` via Objective-C IMP dispatch so a transient `nil` (`0x0`)
-    /// `_textDocumentInterface` during foldable display migration (`LCD-1 -> LCD`) never triggers Swift's fatal
+    /// `_textDocumentInterface` during foldable display transitions never triggers Swift's fatal
     /// non-optional bridging `SIGTRAP`.
     private func safeSuperTextDocumentProxy() -> UITextDocumentProxy {
         typealias GetterIMP = @convention(c) (AnyObject, Selector) -> UnsafeMutableRawPointer?
@@ -799,6 +807,10 @@ public final class KeyboardViewController: UIInputViewController {
         KeyboardTheme.clearCachesForMemoryWarning()
         KeyGridView.clearSymbolCacheForMemoryWarning()
         calloutBubble.clearCachedPathStateIfHidden()
+        session?.purgeTransientCaches(releaseCapacity: true)
+        SharedLexiconHolder.purgeTransientCaches(releaseCapacity: true)
+        LokeyDiagnosticLogger.shared.purgeTransientCachesForMemoryWarning()
+        LokeySelectionFeedbackLogger.shared.purgeTransientCachesForMemoryWarning()
         if !isCandidateGridExpanded && !expandedGrid.hasActiveInteraction {
             expandedGrid.releasePoolIfHidden()
         }
@@ -843,7 +855,6 @@ public final class KeyboardViewController: UIInputViewController {
             LokeyDiagnosticLogger.shared.bootstrapFromDiskAsync()
             LokeySelectionFeedbackLogger.shared.bootstrapFromDiskAsync()
         }
-        refreshCachedHostTopPadding()
         setupHierarchy()
         let initialSettings = setupEngine(
             refreshCalibration: !isRunningInExtensionProcess,
@@ -920,11 +931,7 @@ public final class KeyboardViewController: UIInputViewController {
         hasAppearedInHost = true
         lastNotifiedHostHeightMismatchSignature = ""
         pendingGlobeSwitchDeparture = false
-        didReceiveHostResignOrBackground = false
-        wasVisibleBeforeDisappear = false
-        lastActiveDisappearUptime = -10
         cachedHasFullAccess = hasFullAccess
-        refreshCachedHostTopPadding()
         updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
         if cachedHasFullAccess {
             let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
@@ -1046,10 +1053,7 @@ public final class KeyboardViewController: UIInputViewController {
         hasAppearedInHost = false
         hasSyncedGlobeKey = false
         clearPendingSelfEcho()
-        cachedExternalHostTopPadding = nil
         lastNotifiedHostHeightMismatchSignature = ""
-        lastActiveDisappearUptime = -10
-        wasVisibleBeforeDisappear = false
         pendingGlobeSwitchDeparture = false
         publishExtensionVisibility(isVisible: false)
         contextReconcileWorkItem?.cancel()
@@ -1110,13 +1114,13 @@ public final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    /// Returns `true` when running on `iPhone Duo` Outer Cover **after** the extension has observed an
-    /// unfolded inner display (`LCD-1 -> LCD`). On `iPhone OS 27.2.1 (24B91034)`, calling
-    /// `UIInputViewController.handleInputModeList(from:with:)` on long-press triggers an Apple `UIKitCore`
+    /// Returns `true` when running on a foldable outer cover screen **after** the extension has observed an
+    /// unfolded inner display in the same process. After an inner-to-cover display transition, calling
+    /// `UIInputViewController.handleInputModeList(from:with:)` on long-press can trigger a system `UIKitCore`
     /// use-after-free in `-[UIKeyboardMenuView supplementalVisibleFramesInView:]` (`objc_retain` on a freed
     /// `UIInputSwitcherView.referenceKey`), crashing the host app. Bypassing the HUD menu with public
     /// `advanceToNextInputMode()` completely prevents the host crash while preserving full long-press menus
-    /// on regular iPhones, Unfolded `iPhone Duo`, and fresh Cover sessions.
+    /// on standard iPhones, unfolded displays, and fresh cover sessions.
     internal func shouldBypassInputModeListHUDForDuoFold() -> Bool {
         let scr = effectiveScreenSize()
         let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
@@ -1676,7 +1680,6 @@ public final class KeyboardViewController: UIInputViewController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.didReceiveHostResignOrBackground = true
             self?.pendingGlobeSwitchDeparture = false
             LokeyDiagnosticLogger.shared.flushAsync()
             LokeySelectionFeedbackLogger.shared.flushAsync()
@@ -1686,10 +1689,10 @@ public final class KeyboardViewController: UIInputViewController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.didReceiveHostResignOrBackground = true
             self?.pendingGlobeSwitchDeparture = false
             self?.session?.resetTopicMemory()
             self?.session?.notifyContextBreak()
+            self?.session?.purgeTransientCaches(releaseCapacity: false)
             LokeyDiagnosticLogger.shared.flushAsync()
             LokeySelectionFeedbackLogger.shared.flushAsync()
         }
@@ -1746,6 +1749,8 @@ public final class KeyboardViewController: UIInputViewController {
                     return
                 }
                 self.session?.resetTopicMemory()
+                self.session?.purgeTransientCaches(releaseCapacity: true)
+                self.session = nil
                 let latestSettings = self.setupEngine(lexiconOverride: newLexicon)
                 self.applyPreferences(latestSettings ?? LokeySettings.load())
                 self.syncModeUI()
@@ -2718,7 +2723,7 @@ public final class KeyboardViewController: UIInputViewController {
                 }
             }
             let preedit = session.currentDecode.preeditDisplay
-            let formattedPinyin = preedit.replacingOccurrences(of: "'", with: " ")
+            let formattedPinyin = Self.replaceApostropheWithSpace(preedit)
             let caretLocation = min(formattedPinyin.utf16.count, max(0, session.preeditCaretUTF16Offset))
             let range = NSRange(location: caretLocation, length: 0)
             if !isKeyEdit
@@ -2801,7 +2806,6 @@ public final class KeyboardViewController: UIInputViewController {
 
         if isRunningInExtensionProcess {
             pendingGlobeSwitchDeparture = true
-            lastGlobeInteractionUptime = ProcessInfo.processInfo.systemUptime
         }
         if let hook = onSuperHandleInputModeListForTesting {
             hook(view, event)
@@ -2816,7 +2820,6 @@ public final class KeyboardViewController: UIInputViewController {
         }
         if isRunningInExtensionProcess {
             pendingGlobeSwitchDeparture = true
-            lastGlobeInteractionUptime = ProcessInfo.processInfo.systemUptime
         }
         if let hook = onAdvanceToNextInputModeForTesting {
             hook()
@@ -3149,8 +3152,14 @@ public final class KeyboardViewController: UIInputViewController {
         return min(max(CGFloat(hostSnap.hostTopPadding), 0.0), KeyboardTheme.iOS26RoundedHostTopPadding)
     }
 
-    private func refreshCachedHostTopPadding() {
-        cachedExternalHostTopPadding = nil
+    @inline(__always)
+    private static func replaceApostropheWithSpace(_ text: String) -> String {
+        guard text.utf8.contains(0x27) else { return text }
+        var bytes = Array(text.utf8)
+        for idx in bytes.indices where bytes[idx] == 0x27 {
+            bytes[idx] = 0x20
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     internal static func resolveEffectiveHostTopPadding(
@@ -3180,7 +3189,7 @@ public final class KeyboardViewController: UIInputViewController {
             override: overrideHostTopPaddingForTesting,
             isExtensionProcess: isRunningInExtensionProcess,
             referenceWidth: refWidth,
-            cachedExternalPadding: cachedExternalHostTopPadding,
+            cachedExternalPadding: nil,
             didActivateSystemKeyboardLayout: Self.didActivateSystemKeyboardLayoutInProcess,
             isiOS26OrNewer: isiOS26OrNewer
         )

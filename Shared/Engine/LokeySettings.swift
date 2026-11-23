@@ -1351,8 +1351,8 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.enableSpatialCorrection = try container.decodeIfPresent(Bool.self, forKey: .enableSpatialCorrection) ?? true
         self.enableAdaptiveTouchCalibration = try container.decodeIfPresent(Bool.self, forKey: .enableAdaptiveTouchCalibration) ?? true
         self.enableEmojiCandidates = try container.decodeIfPresent(Bool.self, forKey: .enableEmojiCandidates) ?? true
-        // Build 81+: Both lab logging toggles default to OFF (developer-only opt-in).
-        // Legacy pre-Build-81 configs without `labLoggingOptInV2` migrate cleanly to OFF.
+        // Both optional lab logging toggles default to OFF unless explicitly opted in via `labLoggingOptInV2`.
+        // Older persisted configs without `labLoggingOptInV2` migrate cleanly to OFF.
         let hasOptInSchema = (try container.decodeIfPresent(Bool.self, forKey: .labLoggingOptInV2)) ?? false
         if hasOptInSchema {
             self.enableDiagnosticLogging = try container.decodeIfPresent(Bool.self, forKey: .enableDiagnosticLogging) ?? false
@@ -1614,7 +1614,7 @@ public final class LokeyHapticEngine {
         #endif
     }
 
-    /// Resets CoreHaptics state across foldable display transitions (`LCD-1 <-> LCD`) so a migrated
+    /// Resets CoreHaptics state across foldable display transitions so a migrated
     /// extension instance recreates its haptic session cleanly on the destination display without stalling.
     public func resetForDisplayTransition() {
         #if canImport(CoreHaptics)
