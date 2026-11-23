@@ -8,7 +8,7 @@
 
 ## 中文说明
 
-`Lokey-Audit` 是 **Lokey**（iOS 26 键全拼离线输入法）的公开安全审计仓库，用于让安全研究者与用户独立验证键盘扩展的**物理级零联网隔离**、**隐私清单（Privacy Manifest）** 与**纯本地全拼解码逻辑**。
+`Lokey-Audit` 是 **Lokey**（iOS 26 键全拼与小鹤/自然码双拼离线输入法）的公开安全审计仓库，用于让安全研究者与用户独立验证键盘扩展的**物理级零联网隔离**、**隐私清单（Privacy Manifest）** 与**纯本地拼音解码逻辑**。
 
 ### 审计范围与源码一致性
 
@@ -93,7 +93,7 @@ Lokey 内置 100% 开放许可的基础词库（开箱即用，无需联网）�
 
 ## English
 
-`Lokey-Audit` is the source-available security audit repository for **Lokey** (an offline iOS 26-key Full-Pinyin keyboard). It allows researchers and users to independently verify physical zero-network isolation, Apple Privacy Manifest declarations, and offline Pinyin decoding behavior.
+`Lokey-Audit` is the source-available security audit repository for **Lokey** (an offline iOS 26-key Full-Pinyin & Xiaohe/Ziranma Shuangpin keyboard). It allows researchers and users to independently verify physical zero-network isolation, Apple Privacy Manifest declarations, and offline Pinyin decoding behavior.
 
 ### Architecture & Source Parity
 

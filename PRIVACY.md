@@ -1,6 +1,6 @@
-# 隐私政策 / Privacy Policy — Lokey（落键）
+# 隐私政策 / Privacy Policy — Lokey
 
-**生效与更新日期 / Effective & Updated Date**：2026-11-22  
+**生效与更新日期 / Effective & Updated Date**：2026-11-23  
 **联系邮箱 / Contact Email**：[Kianuni@proton.me](mailto:Kianuni@proton.me)  
 **安全审计仓库 / Public Security Audit Repository**：<https://github.com/Kianuni/Lokey-Audit>
 
@@ -10,9 +10,9 @@
 
 ## 中文版
 
-欢迎使用 **Lokey（落键）**（宿主应用 Bundle ID：`com.kianuni.lokey`，键盘扩展 Bundle ID：`com.kianuni.lokey.keyboard`）。
+欢迎使用 **Lokey**（宿主应用 Bundle ID：`com.kianuni.lokey`，键盘扩展 Bundle ID：`com.kianuni.lokey.keyboard`）。
 
-Lokey 是一款**纯离线、物理级零联网**的 iOS 26 键拼音输入法。我们高度重视您的输入隐私，本隐私政策清晰说明 Lokey 如何处理（以及绝不收集）您的数据。
+Lokey 是一款**纯离线、物理级零联网**的 iOS 26 键拼音（全拼与小鹤/自然码双拼）输入法。我们高度重视您的输入隐私，本隐私政策清晰说明 Lokey 如何处理（以及绝不收集）您的数据。
 
 ### 1. 零数据收集与物理级零联网承诺
 - **不收集、不传输任何个人数据**：Lokey **不会**收集、存储于远端、上传、出售或与任何第三方共享您的击键内容、输入文本、个人自造词、触控校准数据、设备标识符、位置信息或使用遥测。
@@ -24,7 +24,7 @@ Lokey 是一款**纯离线、物理级零联网**的 iOS 26 键拼音输入法�
 
 ### 3. 为什么请求「允许完全访问（Allow Full Access）」？（仅限本机跨进程同步）
 在 iOS 中，「允许完全访问」本身只是开启跨进程系统能力的系统权限开关，并不代表必须联网：
-- **关闭「允许完全访问」（默认即可使用核心功能）**：26 键全拼整句引擎、内置开放许可词库、简繁转换（OpenCC）及 Emoji 候选联想均 **100% 离线正常运行**。
+- **关闭「允许完全访问」（默认即可使用核心功能）**：26 键全拼与双拼整句引擎、内置开放许可词库、简繁转换（OpenCC）及 Emoji 候选联想均 **100% 离线正常运行**。
 - **开启「允许完全访问」（按需可选）**：Lokey **仅将此权限用于本机设备内部的沙盒共享容器（App Group：`group.com.kianuni.lokey`）跨进程数据读写与硬件触感，绝不会发起任何网络通信**。具体仅用于：
   1. 在宿主 App 与键盘扩展之间本机同步您的输入设置（方案、模糊音、按键音与震动强度等）；
   2. 读写本机 SQLite 个人常用词/自造词库及 26 键盲打热区校准参数；
