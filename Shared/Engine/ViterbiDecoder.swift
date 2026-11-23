@@ -201,6 +201,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
     private var cachedDP: [[DPNode]] = []
     private var cachedDPSeedWord: String = ""
     private var cachedDPPrecedingContext: String = ""
+    private var cachedDPTopicMemory: NeuralSentenceScorer.Vec32 = .zero
     private var cachedDPBeamK: Int = 0
     private var cachedSettings: LokeySettings?
     private var cachedSpatialGeneration: UInt64 = 0
@@ -215,6 +216,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         let samples: [TouchSample]
         let settings: LokeySettings
         let precedingContext: String?
+        let topicMemory: NeuralSentenceScorer.Vec32
         let fastCleanSentenceOnly: Bool
         let skipStage5CAssociations: Bool
         let spatialGeneration: UInt64
@@ -234,6 +236,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         let dp: [[DPNode]]
         let dpSeedWord: String
         let dpPrecedingContext: String
+        let dpTopicMemory: NeuralSentenceScorer.Vec32
         let dpBeamK: Int
         let result: DecodeResult
     }
@@ -329,6 +332,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         _ rawInput: String,
         settings: LokeySettings = LokeySettings(),
         precedingContext: String? = nil,
+        topicMemory: NeuralSentenceScorer.Vec32 = .zero,
         fastCleanSentenceOnly: Bool = false,
         skipStage5CAssociations: Bool = false,
         isCancelled: () -> Bool = { false },
@@ -342,6 +346,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             samples: samples,
             settings: settings,
             precedingContext: precedingContext,
+            topicMemory: topicMemory,
             fastCleanSentenceOnly: fastCleanSentenceOnly,
             skipStage5CAssociations: skipStage5CAssociations,
             isCancelled: isCancelled,
@@ -699,6 +704,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         samples: [TouchSample],
         settings: LokeySettings = LokeySettings(),
         precedingContext: String? = nil,
+        topicMemory: NeuralSentenceScorer.Vec32 = .zero,
         fastCleanSentenceOnly: Bool = false,
         skipStage5CAssociations: Bool = false,
         isCancelled: () -> Bool = { false },
@@ -763,6 +769,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 $0.samples == samples
                     && $0.settings == settings
                     && $0.precedingContext == precedingContext
+                    && $0.topicMemory == topicMemory
                     && $0.fastCleanSentenceOnly == fastCleanSentenceOnly
                     && $0.skipStage5CAssociations == skipStage5CAssociations
                     && $0.spatialGeneration == spatialGen
@@ -781,6 +788,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 cachedDP = hit.dp
                 cachedDPSeedWord = hit.dpSeedWord
                 cachedDPPrecedingContext = hit.dpPrecedingContext
+                cachedDPTopicMemory = hit.dpTopicMemory
                 cachedDPBeamK = hit.dpBeamK
                 cachedSettings = hit.settings
                 cachedSpatialGeneration = hit.spatialGeneration
@@ -816,7 +824,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
                       entry.spatialGeneration == spatialGen,
                       entry.userGeneration == curUserGen,
                       entry.supplementaryGeneration == supplementaryGeneration,
-                      entry.precedingContext == precedingContext else {
+                      entry.precedingContext == precedingContext,
+                      entry.topicMemory == topicMemory else {
                     continue
                 }
                 let maxCheck = min(n, entry.samples.count)
@@ -843,6 +852,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 cachedDP = hit.dp
                 cachedDPSeedWord = hit.dpSeedWord
                 cachedDPPrecedingContext = hit.dpPrecedingContext
+                cachedDPTopicMemory = hit.dpTopicMemory
                 cachedDPBeamK = hit.dpBeamK
                 cachedSettings = hit.settings
                 cachedSpatialGeneration = hit.spatialGeneration
@@ -987,6 +997,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                   cachedDPBeamK == activeBeamK,
                   cachedDPSeedWord == seedWord,
                   cachedDPPrecedingContext == contextKey,
+                  cachedDPTopicMemory == topicMemory,
                   !urgentNow || wholeCleanUnchanged,
                   prevN >= 2, n >= 2 else {
                 return 0
@@ -1088,6 +1099,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             maxPosByStart: maxPosByStart,
             userSnapshot: userSnap,
             precedingContext: precedingContext,
+            topicMemory: topicMemory,
             wholeInputClean: currentWholeClean,
             reusableDPBound: reusableDPBound,
             fastCleanSentenceOnly: fastCleanSentenceOnly,
@@ -1652,7 +1664,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
             var choice: String?
             var allowance = 0
             if left.isEmpty {
-                // Standalone conversational acknowledgements and canonical 2-syllable defaults.
+                // Standalone conversational acknowledgements, canonical 2-syllable defaults,
+                // and cross-sentence exponentially decaying topic memory disambiguation (LNS6-v1).
                 if original.syllables.count == 2 {
                     if cleanLower == "zhineng", let zn = fullBufferSpans.first(where: { $0.text == "智能" && $0.penaltyQ8 == 0 }) {
                         choice = zn.text
@@ -1660,6 +1673,42 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     } else if let response = fullBufferSpans.first(where: { Self.standaloneReplies.contains($0.text) }) {
                         choice = response.text
                         allowance = 220
+                    }
+                }
+                if choice == nil,
+                   (2...3).contains(original.syllables.count),
+                   topicMemory != .zero,
+                   lexicon.neuralLM.isSemantic64Loaded {
+                    let origTopicQ8 = lexicon.neuralLM.scoreTopicGateBonusQ8(
+                        hidden: lexicon.neuralLM.hBos,
+                        topicMemory: topicMemory,
+                        record: neuralRecord(for: lead.text)
+                    )
+                    var bestTopicCand: (text: String, topicDelta: Int)? = nil
+                    for sp in fullBufferSpans.prefix(12) {
+                        guard sp.text != lead.text,
+                              sp.penaltyQ8 == 0,
+                              !sp.isUserPhrase,
+                              sp.syllables == original.syllables,
+                              original.scoreQ8 - sp.scoreQ8 <= 820 else {
+                            continue
+                        }
+                        let spTopicQ8 = lexicon.neuralLM.scoreTopicGateBonusQ8(
+                            hidden: lexicon.neuralLM.hBos,
+                            topicMemory: topicMemory,
+                            record: neuralRecord(for: sp.text)
+                        )
+                        let topicDelta = spTopicQ8 - origTopicQ8
+                        if topicDelta >= 140,
+                           sp.scoreQ8 + topicDelta >= original.scoreQ8 + 40 {
+                            if bestTopicCand == nil || (sp.scoreQ8 + topicDelta) > (fullSpanByText[bestTopicCand!.text]?.scoreQ8 ?? Int.min) + bestTopicCand!.topicDelta {
+                                bestTopicCand = (sp.text, topicDelta)
+                            }
+                        }
+                    }
+                    if let winner = bestTopicCand {
+                        choice = winner.text
+                        allowance = winner.topicDelta
                     }
                 }
             } else {
@@ -1873,6 +1922,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             if !urgentNow && n <= 16 {
                 if let dupIdx = recentDecodeHistory.firstIndex(where: {
                     $0.samples == samples && $0.precedingContext == precedingContext
+                        && $0.topicMemory == topicMemory
                         && $0.fastCleanSentenceOnly == fastCleanSentenceOnly
                         && $0.skipStage5CAssociations == skipStage5CAssociations
                 }) {
@@ -1885,6 +1935,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         samples: samples,
                         settings: settings,
                         precedingContext: precedingContext,
+                        topicMemory: topicMemory,
                         fastCleanSentenceOnly: fastCleanSentenceOnly,
                         skipStage5CAssociations: skipStage5CAssociations,
                         spatialGeneration: spatialGen,
@@ -1904,6 +1955,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         dp: cachedDP,
                         dpSeedWord: cachedDPSeedWord,
                         dpPrecedingContext: cachedDPPrecedingContext,
+                        dpTopicMemory: cachedDPTopicMemory,
                         dpBeamK: cachedDPBeamK,
                         result: fastRes
                     )
@@ -2511,6 +2563,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         if !fastCleanSentenceOnly && !urgentNow && n <= 16 {
             if let dupIdx = recentDecodeHistory.firstIndex(where: {
                 $0.samples == samples && $0.precedingContext == precedingContext
+                    && $0.topicMemory == topicMemory
                     && $0.fastCleanSentenceOnly == fastCleanSentenceOnly
                     && $0.skipStage5CAssociations == skipStage5CAssociations
             }) {
@@ -2523,6 +2576,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     samples: samples,
                     settings: settings,
                     precedingContext: precedingContext,
+                    topicMemory: topicMemory,
                     fastCleanSentenceOnly: fastCleanSentenceOnly,
                     skipStage5CAssociations: skipStage5CAssociations,
                     spatialGeneration: spatialGen,
@@ -2542,6 +2596,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     dp: cachedDP,
                     dpSeedWord: cachedDPSeedWord,
                     dpPrecedingContext: cachedDPPrecedingContext,
+                    dpTopicMemory: cachedDPTopicMemory,
                     dpBeamK: cachedDPBeamK,
                     result: decodeResult
                 )
@@ -2576,20 +2631,33 @@ public final class ViterbiDecoder: @unchecked Sendable {
         if let cached = commitPairsByReading[reading] {
             pairs = cached
         } else {
-            pairs = lexicon.lookupAssociations(after: "$" + reading, limit: 4).compactMap { CommitPair($0.text) }
-            if commitPairsByReading.count >= 128 { commitPairsByReading.removeAll(keepingCapacity: true) }
+            pairs = lexicon.lookupAssociations(after: "$" + reading, limit: 14).compactMap { CommitPair($0.text) }
+            if commitPairsByReading.count >= 512 { commitPairsByReading.removeAll(keepingCapacity: true) }
             commitPairsByReading[reading] = pairs
         }
-        guard let pair = pairs.first(where: { $0.first == lead || $0.second == lead }) else { return nil }
+        let matchingPairs = pairs.filter { $0.first == lead || $0.second == lead }
+        guard !matchingPairs.isEmpty else { return nil }
         let suffix = Self.extractTrailingChineseSuffix(from: context, maxChars: 12)
         guard !suffix.isEmpty else { return nil }
-        var features = lexicon.neuralLM.commitContextFeatures(suffix)
-        features.v3[7] = pair.lexicalFeature(suffix)
-        let margin = features.dot(pair.weights) + pair.bias
-        let threshold = margin > 0 ? pair.firstThreshold : pair.secondThreshold
-        guard threshold < 4, abs(margin) >= threshold else { return nil }
-        return .init(text: margin > 0 ? pair.first : pair.second,
-                     scoreQ8: min(900, 480 + Int(min(abs(margin), 1) * 650)))
+        let baseFeatures = lexicon.neuralLM.commitContextFeatures(suffix)
+        var bestHit: (hit: MmapLexicon.WordHit, excess: Float)? = nil
+        for pair in matchingPairs {
+            var features = baseFeatures
+            features.v3[7] = pair.lexicalFeature(suffix)
+            let margin = features.dot(pair.weights) + pair.bias
+            let threshold = margin > 0 ? pair.firstThreshold : pair.secondThreshold
+            guard threshold < 4, abs(margin) >= threshold else { continue }
+            let chosen = margin > 0 ? pair.first : pair.second
+            let excess = abs(margin) - threshold
+            let hit = MmapLexicon.WordHit(
+                text: chosen,
+                scoreQ8: min(900, 480 + Int(min(abs(margin), 1) * 650))
+            )
+            if bestHit == nil || excess > bestHit!.excess {
+                bestHit = (hit, excess)
+            }
+        }
+        return bestHit?.hit
     }
 
     private func shortReadingCue(after left: String, reading: String) -> MmapLexicon.WordHit? {
@@ -6135,6 +6203,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         maxPosByStart: [Int: Int] = [:],
         userSnapshot: UserLexiconStore.DecodeSnapshot,
         precedingContext: String? = nil,
+        topicMemory: NeuralSentenceScorer.Vec32 = .zero,
         wholeInputClean: Bool = false,
         reusableDPBound: Int = 0,
         fastCleanSentenceOnly: Bool = false,
@@ -6165,6 +6234,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             && cachedDPBeamK == beamK
             && cachedDPSeedWord == seedWord
             && cachedDPPrecedingContext == contextKey
+            && cachedDPTopicMemory == topicMemory
             && cachedDP.count > reusableDPBound {
             activeDPBound = reusableDPBound
         } else {
@@ -6654,7 +6724,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
                     if let p = lazyPredictor { return p }
                     let p = lexicon.neuralLM.prepareStepPredictor(
                         lastRecord: curLastRecord,
-                        hidden: cur.hidden
+                        hidden: cur.hidden,
+                        topicMemory: topicMemory
                     )
                     lazyPredictor = p
                     return p
@@ -7032,7 +7103,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         spNeuralRecords[spIdx] = loadedRec
                         spRec = loadedRec
                     }
-                    let isCleanMultiSylEval = n >= 8 && !(n >= 10 && urgentNow) && !curIsOneChar && sp.syllables.count >= 2 && bgBonus == 0
+                    let isCleanMultiSylEval = n >= 8 && !(n >= 10 && urgentNow) && !curIsOneChar && sp.syllables.count >= 2 && bgBonus < 380
                     let isSinglePrefixHomophoneDisambig = !isNoisyTransition
                         && !isCleanMultiSylEval
                         && !spRec.isAccidentalSingleton
@@ -7049,7 +7120,23 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         && isTopSpanAtEnd
                     let neuralBonus: Int
                     if !useNeural {
-                        neuralBonus = 0
+                        if i == firstStart
+                            && cur.lastWord.isEmpty
+                            && topicMemory != .zero
+                            && lexicon.neuralLM.isSemantic64Loaded
+                            && !sp.isEnglishSpan
+                            && sp.syllables.count >= 2
+                            && sp.penaltyQ8 == 0
+                            && isTopSpanAtEnd {
+                            let topicQ8 = lexicon.neuralLM.scoreTopicGateBonusQ8(
+                                hidden: cur.hidden,
+                                topicMemory: topicMemory,
+                                record: spRec
+                            )
+                            neuralBonus = max(-220, min(220, topicQ8))
+                        } else {
+                            neuralBonus = 0
+                        }
                     } else {
                         let pred = getPredictor()
                         let rawNeural = lexicon.neuralLM.scorePreloadedCandidate(
@@ -7089,6 +7176,8 @@ public final class ViterbiDecoder: @unchecked Sendable {
                                 localSpanClean = wholeInputClean
                             }
                             neuralBonus = localSpanClean ? 0 : rawNeural
+                        } else if isCleanMultiSylEval && bgBonus > 0 && rawNeural > 0 {
+                            neuralBonus = max(0, rawNeural - bgBonus)
                         } else {
                             neuralBonus = rawNeural
                         }
@@ -7238,6 +7327,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
             cachedDP = dp
             cachedDPSeedWord = seedWord
             cachedDPPrecedingContext = contextKey
+            cachedDPTopicMemory = topicMemory
             cachedDPBeamK = beamK
         } else {
             cachedDP = []
@@ -7405,9 +7495,9 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 }
             }
 
-            // 4B. Post-DP lightweight whole-sentence bidirectional rerank (`LNBR` v1 + frozen `LNLM-v2`).
-            // Strictly same-segmentation, zero-left-context sentence-start (`slot 0` 2..3-char exact homophone)
-            // reranker so early homophones disambiguated by right context recover cleanly without distorting
+            // 4B. Post-DP lightweight whole-sentence bidirectional rerank (`LNBR` v1/v2 + `LNLM-v2`).
+            // Strictly same-segmentation, zero-left-context sentence-start (`slot 0`, or `slot 1` after a 1-char lead)
+            // reranker so early 2..3-char homophones disambiguated by right context recover cleanly without distorting
             // mid-sentence DP grammatical rules or segmentation lengths.
             if lexicon.neuralLM.isBackwardLoaded,
                !urgentNow,
@@ -7427,99 +7517,127 @@ public final class ViterbiDecoder: @unchecked Sendable {
                ),
                refSegs.count >= 2 {
 
-                let slot0 = refSegs[0]
-                if (2...3).contains(slot0.syls.count),
-                   slot0.word.count == slot0.syls.count,
-                   Self.curClauseSwitchTable[slot0.word] == nil,
-                   spansByStart[firstStart]?.contains(where: { $0.text == slot0.word && $0.isUserPhrase }) != true {
+                @inline(__always)
+                func assocScore(_ prev: String, _ next: String) -> Int {
+                    (assocMap(for: prev)[next] ?? 0) + (userSnapshot.bigramBonuses(after: prev)?[next] ?? 0)
+                }
 
-                    let exactHits = lexicon.lookupExactWords(forSyllables: slot0.syls, limit: 24)
-                    if let origHit = exactHits.first(where: { $0.text == slot0.word }) {
-                        let origLexScore = origHit.scoreQ8
-                        let rightNext = refSegs[1].word
-                        let rightDiv = (rightNext.count == 1) ? 4 : 1
+                struct SentenceStartChallenger {
+                    let text: String
+                    let words: [String]
+                    let lexDelta: Int
+                }
 
-                        @inline(__always)
-                        func assocScore(_ prev: String, _ next: String) -> Int {
-                            (assocMap(for: prev)[next] ?? 0) + (userSnapshot.bigramBonuses(after: prev)?[next] ?? 0)
+                func tryBidirectionalSlotRerank(slotIdx: Int) -> Bool {
+                    guard slotIdx >= 0, slotIdx + 1 < refSegs.count else { return false }
+                    let slot = refSegs[slotIdx]
+                    guard (2...3).contains(slot.syls.count),
+                          slot.word.count == slot.syls.count,
+                          Self.curClauseSwitchTable[slot.word] == nil else {
+                        return false
+                    }
+                    if slotIdx == 0 {
+                        if spansByStart[firstStart]?.contains(where: { $0.text == slot.word && $0.isUserPhrase }) == true {
+                            return false
                         }
-
-                        let oldRightAssoc = assocScore(slot0.word, rightNext) / rightDiv
-                        let refWords = refSegs.map(\.word)
-
-                        struct SentenceStartChallenger {
-                            let text: String
-                            let words: [String]
-                            let lexDelta: Int
+                    } else {
+                        let hasUserSlotPhrase = spansByStart.values.contains { list in
+                            list.contains(where: { $0.text == slot.word && $0.isUserPhrase })
                         }
+                        if hasUserSlotPhrase { return false }
+                    }
 
-                        var challengers: [SentenceStartChallenger] = []
-                        challengers.reserveCapacity(6)
-                        var seenChallengers = Set<String>([ref.text])
+                    let exactHits = lexicon.lookupExactWords(forSyllables: slot.syls, limit: 24)
+                    guard let origHit = exactHits.first(where: { $0.text == slot.word }) else { return false }
+                    let origLexScore = origHit.scoreQ8
 
-                        for hit in exactHits {
-                            guard challengers.count < 6 else { break }
-                            guard hit.text != slot0.word,
-                                  hit.text.count == slot0.syls.count,
-                                  origLexScore - hit.scoreQ8 <= 1100 else {
-                                continue
-                            }
-                            var chWords = refWords
-                            chWords[0] = hit.text
-                            let chText = chWords.joined()
-                            guard seenChallengers.insert(chText).inserted else { continue }
-                            let newRightAssoc = assocScore(hit.text, rightNext) / rightDiv
-                            let lexDelta = (hit.scoreQ8 - origLexScore) + (newRightAssoc - oldRightAssoc)
-                            challengers.append(SentenceStartChallenger(text: chText, words: chWords, lexDelta: lexDelta))
+                    let leftPrev: String? = slotIdx > 0 ? refSegs[slotIdx - 1].word : nil
+                    let leftDiv = (leftPrev?.count == 1) ? 4 : 1
+                    let oldLeftAssoc = leftPrev.map { assocScore($0, slot.word) / leftDiv } ?? 0
+
+                    let rightNext = refSegs[slotIdx + 1].word
+                    let rightDiv = (rightNext.count == 1) ? 4 : 1
+                    let oldRightAssoc = assocScore(slot.word, rightNext) / rightDiv
+                    let refWords = refSegs.map(\.word)
+
+                    var challengers: [SentenceStartChallenger] = []
+                    challengers.reserveCapacity(6)
+                    var seenChallengers = Set<String>([ref.text])
+
+                    for hit in exactHits {
+                        guard challengers.count < 6 else { break }
+                        guard hit.text != slot.word,
+                              hit.text.count == slot.syls.count,
+                              origLexScore - hit.scoreQ8 <= 1100 else {
+                            continue
                         }
+                        if hit.text == "只能" && (rightNext == "不能" || rightNext == "能" || rightNext == "可以") {
+                            continue
+                        }
+                        var chWords = refWords
+                        chWords[slotIdx] = hit.text
+                        let chText = chWords.joined()
+                        guard seenChallengers.insert(chText).inserted else { continue }
+                        let newLeftAssoc = leftPrev.map { assocScore($0, hit.text) / leftDiv } ?? 0
+                        let newRightAssoc = assocScore(hit.text, rightNext) / rightDiv
+                        let lexDelta = (hit.scoreQ8 - origLexScore) + (newLeftAssoc - oldLeftAssoc) + (newRightAssoc - oldRightAssoc)
+                        challengers.append(SentenceStartChallenger(text: chText, words: chWords, lexDelta: lexDelta))
+                    }
 
-                        if !challengers.isEmpty {
-                            let refFwdQ8 = lexicon.neuralLM.scoreWholeSentence(words: refWords, precedingContext: nil)
-                            let refBwdQ8 = lexicon.neuralLM.scoreBackwardSentence(words: refWords)
+                    guard !challengers.isEmpty else { return false }
+                    let refFwdQ8 = lexicon.neuralLM.scoreWholeSentence(words: refWords, precedingContext: nil, topicMemory: topicMemory)
+                    let refBwdQ8 = lexicon.neuralLM.scoreBackwardSentence(words: refWords)
 
-                            var bestWinner: (cand: SentenceStartChallenger, fwdQ8: Int, bwdQ8: Int, netDelta: Int)? = nil
-                            for ch in challengers {
-                                let chFwdQ8 = lexicon.neuralLM.scoreWholeSentence(words: ch.words, precedingContext: nil)
-                                let chBwdQ8 = lexicon.neuralLM.scoreBackwardSentence(words: ch.words)
-                                let fwdDelta = chFwdQ8 - refFwdQ8
-                                let bwdDelta = chBwdQ8 - refBwdQ8
-                                let netDelta = ch.lexDelta + fwdDelta + bwdDelta
-                                if bwdDelta >= 140,
-                                   fwdDelta >= -80,
-                                   netDelta >= 180 {
-                                    if bestWinner == nil || netDelta > bestWinner!.netDelta {
-                                        bestWinner = (ch, chFwdQ8, chBwdQ8, netDelta)
-                                    }
-                                }
-                            }
-
-                            if let winner = bestWinner {
-                                let deltaLead = min(300, max(1, winner.netDelta))
-                                let promoted = DPNode(
-                                    scoreQ8: ref.scoreQ8 + deltaLead,
-                                    penaltyQ8: 0,
-                                    lastSpanPenaltyQ8: 0,
-                                    neuralScoreQ8: winner.fwdQ8 + winner.bwdQ8,
-                                    textFingerprint: nil,
-                                    text: winner.cand.text,
-                                    prevWord: winner.cand.words.dropLast().last ?? "",
-                                    lastWord: winner.cand.words.last ?? "",
-                                    syllables: ref.syllables,
-                                    singleCharRun: 0,
-                                    maxOneCharRun: ref.maxOneCharRun,
-                                    hasKeySubstitution: false,
-                                    keySubstitutionCount: 0,
-                                    isPureCleanOrJianpin: true,
-                                    hasAccidentalSingleton: false,
-                                    hidden: ref.hidden,
-                                    wordCharEnds: ref.wordCharEnds,
-                                    wordSylEnds: ref.wordSylEnds
-                                )
-                                ordered.removeAll { $0.text == winner.cand.text }
-                                ordered.insert(promoted, at: 0)
+                    let minBwdDelta = (slotIdx == 0) ? 140 : 240
+                    let minFwdDelta = (slotIdx == 0) ? -80 : -220
+                    var bestWinner: (cand: SentenceStartChallenger, fwdQ8: Int, bwdQ8: Int, netDelta: Int)? = nil
+                    for ch in challengers {
+                        let chFwdQ8 = lexicon.neuralLM.scoreWholeSentence(words: ch.words, precedingContext: nil, topicMemory: topicMemory)
+                        let chBwdQ8 = lexicon.neuralLM.scoreBackwardSentence(words: ch.words)
+                        let fwdDelta = chFwdQ8 - refFwdQ8
+                        let bwdDelta = chBwdQ8 - refBwdQ8
+                        let netDelta = ch.lexDelta + fwdDelta + bwdDelta
+                        if bwdDelta >= minBwdDelta,
+                           fwdDelta >= minFwdDelta,
+                           netDelta >= 180 {
+                            if bestWinner == nil || netDelta > bestWinner!.netDelta {
+                                bestWinner = (ch, chFwdQ8, chBwdQ8, netDelta)
                             }
                         }
                     }
+
+                    guard let winner = bestWinner else { return false }
+                    let deltaLead = min(300, max(1, winner.netDelta))
+                    let promoted = DPNode(
+                        scoreQ8: ref.scoreQ8 + deltaLead,
+                        penaltyQ8: 0,
+                        lastSpanPenaltyQ8: 0,
+                        neuralScoreQ8: winner.fwdQ8 + winner.bwdQ8,
+                        textFingerprint: nil,
+                        text: winner.cand.text,
+                        prevWord: winner.cand.words.dropLast().last ?? "",
+                        lastWord: winner.cand.words.last ?? "",
+                        syllables: ref.syllables,
+                        singleCharRun: 0,
+                        maxOneCharRun: ref.maxOneCharRun,
+                        hasKeySubstitution: false,
+                        keySubstitutionCount: 0,
+                        isPureCleanOrJianpin: true,
+                        hasAccidentalSingleton: false,
+                        hidden: ref.hidden,
+                        wordCharEnds: ref.wordCharEnds,
+                        wordSylEnds: ref.wordSylEnds
+                    )
+                    ordered.removeAll { $0.text == winner.cand.text }
+                    ordered.insert(promoted, at: 0)
+                    return true
+                }
+
+                if !tryBidirectionalSlotRerank(slotIdx: 0),
+                   refSegs.count >= 3,
+                   refSegs[0].word.count == 1,
+                   refSegs[0].syls.count == 1 {
+                    _ = tryBidirectionalSlotRerank(slotIdx: 1)
                 }
             }
             return ordered.prefix(4).map { full in

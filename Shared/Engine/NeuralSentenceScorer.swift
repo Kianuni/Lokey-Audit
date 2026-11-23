@@ -71,6 +71,41 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         public let eosCtxScore: Float
         public let charCount: Int
         public let isAccidentalSingleton: Bool
+        /// Asymmetric 64-dim semantic upper-half (`dims[32..<64]`) + pre-projected `W_sem * semCtx`.
+        public let semCtx: Vec32
+        public let semTgt: Vec32
+        public let semPred: Vec32
+
+        @inline(__always)
+        public init(
+            ctx: Vec32,
+            tanhCtx: Vec32,
+            tgt: Vec32,
+            firstCharTgt: Vec32,
+            wx: Vec32,
+            bd: Vec32,
+            cp: Vec32,
+            eosCtxScore: Float,
+            charCount: Int,
+            isAccidentalSingleton: Bool,
+            semCtx: Vec32 = .zero,
+            semTgt: Vec32 = .zero,
+            semPred: Vec32 = .zero
+        ) {
+            self.ctx = ctx
+            self.tanhCtx = tanhCtx
+            self.tgt = tgt
+            self.firstCharTgt = firstCharTgt
+            self.wx = wx
+            self.bd = bd
+            self.cp = cp
+            self.eosCtxScore = eosCtxScore
+            self.charCount = charCount
+            self.isAccidentalSingleton = isAccidentalSingleton
+            self.semCtx = semCtx
+            self.semTgt = semTgt
+            self.semPred = semPred
+        }
 
         public static let empty = WordNeuralRecord(
             ctx: .zero,
@@ -93,6 +128,27 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         public let prevHidden: Vec32
         public let lastCtx: Vec32
         public let hasContext: Bool
+        /// Combined asymmetric 64-dim semantic + gated cross-sentence topic predictor (`semScale * W_sem * semCtx + topicScale * gate * W_topic * topicMemory`).
+        public let semPred: Vec32
+
+        @inline(__always)
+        public init(
+            wordPred: Vec32,
+            charPred: Vec32,
+            z: Vec32,
+            prevHidden: Vec32,
+            lastCtx: Vec32,
+            hasContext: Bool,
+            semPred: Vec32 = .zero
+        ) {
+            self.wordPred = wordPred
+            self.charPred = charPred
+            self.z = z
+            self.prevHidden = prevHidden
+            self.lastCtx = lastCtx
+            self.hasContext = hasContext
+            self.semPred = semPred
+        }
     }
 
     private let backingData: NSData
@@ -122,8 +178,17 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     private let wEos: Vec32
     private let uEos: Vec32
 
-    // L1-cache-resident 32x32 backward rerank head (`LNBR` v1, 25.3 KB total, shares frozen embeddings)
+    // L1-cache-resident 32x32 backward rerank head (`LNBR` v1/v2, 25.3 KB core + optional Int8 backward target residuals)
     private let hasBackwardHead: Bool
+    private let bwdVersion: UInt32
+    private let bwdBackingData: NSData?
+    private let bwdRawBuffer: UnsafeRawBufferPointer
+    private let bwdCharResCount: Int
+    private let bwdCharResOffset: Int
+    private let bwdWordResCount: Int
+    private let bwdWordResOffset: Int
+    private let bwdWordPoolOffset: Int
+    private let bwdWordPoolSize: Int
     private let bwdWCtxRows: [Vec32]
     private let bwdWRecRows: [Vec32]
     private let bwdB1: Vec32
@@ -138,6 +203,43 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     private let bwdWBos: Vec32
     private let bwdUBos: Vec32
 
+    // Zero-copy `mmap` Int8 2-layer SiLU blind-typing typo reranker (`LNTR` v1, 46,768 bytes)
+    private let hasTypoReranker: Bool
+    private let lntrBackingData: NSData?
+    private let lntrRawBuffer: UnsafeRawBufferPointer
+    private let lntrScale1: [Float]
+    private let lntrB1: [Float]
+    private let lntrScale2: [SIMD8<Float>]
+    private let lntrB2: [SIMD8<Float>]
+    private let lntrW3: [SIMD8<Float>]
+    private let lntrResLin0: SIMD8<Float>
+    private let lntrResLin1: SIMD8<Float>
+    private let lntrB3: Float
+    private let lntrMaxDeltaQ8: Int
+
+    // Asymmetric 64-dim (`Float16` / `Int8`) semantic dual embeddings + cross-sentence decaying topic memory gate (`LNS6` v1)
+    private let hasSemantic64: Bool
+    private let sem64QuantMode: UInt32
+    private let sem64BackingData: NSData?
+    private let sem64RawBuffer: UnsafeRawBufferPointer
+    private let sem64CharCount: Int
+    private let sem64CharMapOffset: Int
+    private let sem64CharEmbOffset: Int
+    private let sem64WordCount: Int
+    private let sem64WordTableOffset: Int
+    private let sem64PoolOffset: Int
+    private let sem64PoolSize: Int
+    private let sem64WSemRows: [Vec32]
+    private let sem64WTopicRows: [Vec32]
+    private let sem64WGateH: Vec32
+    private let sem64WGateTopic: Vec32
+    private let sem64BGate: Float
+    private let sem64SemScale: Float
+    private let sem64TopicScale: Float
+    private let sem64ClauseDecay: Float
+    private let sem64SentenceDecay: Float
+    private let sem64MaxBonusQ8: Int
+
     // Consolidated in-memory cache for hot word records (single lock acquisition per unique word)
     private var cacheLock = os_unfair_lock_s()
     private var wordRecordCache: [String: WordNeuralRecord] = [:]
@@ -147,13 +249,83 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     public static let magicLNLM: UInt32 = 0x4D4C4E4C // "LNLM"
     public static let magicLNBR: UInt32 = 0x52424E4C // "LNBR"
+    public static let magicLNTR: UInt32 = 0x52544E4C // "LNTR"
+    public static let magicLNS6: UInt32 = 0x36534E4C // "LNS6"
+    public static let magicLKEX: UInt32 = 0x58454B4C // "LKEX"
     public static let backwardBinaryByteSize: Int = 16 + 6336 * 4
+    public static let typoRerankerByteSize: Int = 46_768
+    public static let typoFeatureDim: Int = 64
     public static let maxBonusQ8: Int = 520
     public static let minBonusQ8: Int = -560
 
     public enum LNLMValidationError: Error, Equatable {
         case invalidFooter
         case invalidHeader
+    }
+
+    /// Parses and validates an optional embedded `LKEX` v1 neural extension container (`LNBR`, `LNTR`, `LNS6`)
+    /// located between `endOfLNLM` (`off + sz`) and `footerOff` (`raw.count - 16`) inside a single `.lokeypack`.
+    public static func parseEmbeddedLKEXRanges(
+        in raw: UnsafeRawBufferPointer,
+        endOfLNLM: Int,
+        footerOffset: Int,
+        validatePayloads: Bool
+    ) throws -> (bwd: Range<Int>?, lntr: Range<Int>?, sem64: Range<Int>?)? {
+        guard footerOffset >= endOfLNLM, footerOffset - endOfLNLM >= 32 else {
+            return nil
+        }
+        let lkexOff = footerOffset - 32
+        guard loadU32(raw, at: lkexOff) == magicLKEX else {
+            return nil
+        }
+        let lkexVer = loadU32(raw, at: lkexOff + 4)
+        guard lkexVer == 1 else {
+            throw LNLMValidationError.invalidHeader
+        }
+        let bwdOff = Int(loadU32(raw, at: lkexOff + 8))
+        let bwdLen = Int(loadU32(raw, at: lkexOff + 12))
+        let lntrOff = Int(loadU32(raw, at: lkexOff + 16))
+        let lntrLen = Int(loadU32(raw, at: lkexOff + 20))
+        let sem64Off = Int(loadU32(raw, at: lkexOff + 24))
+        let sem64Len = Int(loadU32(raw, at: lkexOff + 28))
+
+        func checkRange(_ rOff: Int, _ rLen: Int) throws -> Range<Int>? {
+            if rLen == 0 {
+                guard rOff == 0 else { throw LNLMValidationError.invalidHeader }
+                return nil
+            }
+            guard rLen > 0, rOff >= endOfLNLM, rOff <= lkexOff - rLen else {
+                throw LNLMValidationError.invalidHeader
+            }
+            return rOff..<(rOff + rLen)
+        }
+
+        let rBwd = try checkRange(bwdOff, bwdLen)
+        let rLntr = try checkRange(lntrOff, lntrLen)
+        let rSem64 = try checkRange(sem64Off, sem64Len)
+
+        let active = [rBwd, rLntr, rSem64].compactMap { $0 }.sorted { $0.lowerBound < $1.lowerBound }
+        for i in 1..<active.count {
+            if active[i - 1].upperBound > active[i].lowerBound {
+                throw LNLMValidationError.invalidHeader
+            }
+        }
+
+        if validatePayloads, let base = raw.baseAddress {
+            if let r = rBwd {
+                let slice = NSData(bytesNoCopy: UnsafeMutableRawPointer(mutating: base.advanced(by: r.lowerBound)), length: r.count, freeWhenDone: false)
+                guard parseBackwardHead(slice).loaded else { throw LNLMValidationError.invalidHeader }
+            }
+            if let r = rLntr {
+                let slice = NSData(bytesNoCopy: UnsafeMutableRawPointer(mutating: base.advanced(by: r.lowerBound)), length: r.count, freeWhenDone: false)
+                guard parseTypoReranker(slice).loaded else { throw LNLMValidationError.invalidHeader }
+            }
+            if let r = rSem64 {
+                let slice = NSData(bytesNoCopy: UnsafeMutableRawPointer(mutating: base.advanced(by: r.lowerBound)), length: r.count, freeWhenDone: false)
+                guard parseSemantic64(slice).loaded else { throw LNLMValidationError.invalidHeader }
+            }
+        }
+        return (rBwd, rLntr, rSem64)
     }
 
     public static func validateLNLMv2(
@@ -205,11 +377,26 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
                 throw LNLMValidationError.invalidHeader
             }
         }
+        _ = try parseEmbeddedLKEXRanges(
+            in: raw,
+            endOfLNLM: endBound,
+            footerOffset: footerOff,
+            validatePayloads: true
+        )
         return (offset: off, size: sz, charCount: cCount, wordCount: wCount)
     }
 
     private struct ParsedBackwardHead {
         let loaded: Bool
+        let version: UInt32
+        let backingData: NSData?
+        let rawBuffer: UnsafeRawBufferPointer
+        let charResCount: Int
+        let charResOffset: Int
+        let wordResCount: Int
+        let wordResOffset: Int
+        let wordPoolOffset: Int
+        let wordPoolSize: Int
         let wCtxRows: [Vec32]
         let wRecRows: [Vec32]
         let b1: Vec32
@@ -234,6 +421,15 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             )
             return ParsedBackwardHead(
                 loaded: false,
+                version: 0,
+                backingData: nil,
+                rawBuffer: UnsafeRawBufferPointer(start: nil, count: 0),
+                charResCount: 0,
+                charResOffset: 0,
+                wordResCount: 0,
+                wordResOffset: 0,
+                wordPoolOffset: 0,
+                wordPoolSize: 0,
                 wCtxRows: zeroRows,
                 wRecRows: zeroRows,
                 b1: .zero,
@@ -251,6 +447,24 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         }
     }
 
+    @inline(__always)
+    private static func compareStaticBytes(
+        _ raw: UnsafeRawBufferPointer,
+        offsetA: Int,
+        lenA: Int,
+        offsetB: Int,
+        lenB: Int
+    ) -> Int {
+        guard let base = raw.baseAddress else { return -1 }
+        let n = min(lenA, lenB)
+        if n > 0 {
+            let c = memcmp(base.advanced(by: offsetA), base.advanced(by: offsetB), n)
+            if c != 0 { return c < 0 ? -1 : 1 }
+        }
+        if lenA == lenB { return 0 }
+        return lenA < lenB ? -1 : 1
+    }
+
     private static func parseBackwardHead(_ data: NSData?) -> ParsedBackwardHead {
         guard let data, data.length >= backwardBinaryByteSize else {
             return .empty
@@ -260,24 +474,94 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         let ver = loadU32(raw, at: 4)
         let dim = loadU32(raw, at: 8)
         let floatCount = loadU32(raw, at: 12)
-        guard magic == magicLNBR, ver == 1, dim == 32, floatCount == 6336 else {
+        guard magic == magicLNBR, (ver == 1 || ver == 2), dim == 32, floatCount == 6336 else {
             return .empty
         }
+
+        let mlpStart = (ver == 2) ? 32 : 16
+        guard raw.count >= mlpStart + 6336 * 4 else {
+            return .empty
+        }
+
+        var charResCount = 0
+        var charResOffset = 0
+        var wordResCount = 0
+        var wordResOffset = 0
+        var wordPoolOffset = 0
+        var wordPoolSize = 0
+
+        if ver == 2 {
+            let cCount = Int(loadU32(raw, at: 16))
+            let cOff = Int(loadU32(raw, at: 20))
+            let wCount = Int(loadU32(raw, at: 24))
+            let wOff = Int(loadU32(raw, at: 28))
+            let minTableOff = 32 + 6336 * 4
+            guard cCount >= 0, cCount <= 20992,
+                  wCount >= 0, wCount <= Int(UInt16.max),
+                  (cCount == 0 || (cOff >= minTableOff && cOff <= raw.count && cCount * 36 <= raw.count - cOff)),
+                  (wCount == 0 || (wOff >= minTableOff && wOff <= raw.count && wCount * 40 <= raw.count - wOff)) else {
+                return .empty
+            }
+            if cCount > 0 && wCount > 0 {
+                let cEnd = cOff + cCount * 36
+                guard cEnd <= wOff else { return .empty }
+            }
+            if cCount > 0 {
+                var prevCode = -1
+                for i in 0..<cCount {
+                    let codeOff = Int(loadU16(raw, at: cOff + i * 36))
+                    guard codeOff > prevCode && codeOff < 20992 else { return .empty }
+                    prevCode = codeOff
+                }
+            }
+            let pOff = wCount > 0 ? (wOff + wCount * 40) : raw.count
+            guard pOff <= raw.count else { return .empty }
+            let pSize = raw.count - pOff
+            if wCount > 0 {
+                var prevOff = 0
+                var prevLen = 0
+                for i in 0..<wCount {
+                    let rec = wOff + i * 40
+                    let sOff = Int(loadU32(raw, at: rec))
+                    let sLen = Int(loadU16(raw, at: rec + 4))
+                    guard sLen > 0, sOff <= pSize, sLen <= pSize - sOff else { return .empty }
+                    if i > 0 {
+                        let cmp = compareStaticBytes(
+                            raw,
+                            offsetA: pOff + prevOff,
+                            lenA: prevLen,
+                            offsetB: pOff + sOff,
+                            lenB: sLen
+                        )
+                        guard cmp < 0 else { return .empty }
+                    }
+                    prevOff = sOff
+                    prevLen = sLen
+                }
+            }
+            charResCount = cCount
+            charResOffset = cOff
+            wordResCount = wCount
+            wordResOffset = wOff
+            wordPoolOffset = pOff
+            wordPoolSize = pSize
+        }
+
         for i in 0..<6336 {
-            let weight = Float(bitPattern: loadU32(raw, at: 16 + i * 4))
+            let weight = Float(bitPattern: loadU32(raw, at: mlpStart + i * 4))
             guard weight.isFinite, abs(weight) <= 100.0 else {
                 return .empty
             }
         }
         // `bwd_alpha` occupies indices [6208..<6240]
         for i in 6208..<6240 {
-            let a = Float(bitPattern: loadU32(raw, at: 16 + i * 4))
+            let a = Float(bitPattern: loadU32(raw, at: mlpStart + i * 4))
             guard a >= 0.01, a <= 0.99 else {
                 return .empty
             }
         }
 
-        var cursor = 16
+        var cursor = mlpStart
         func readVec32() -> Vec32 {
             let v0 = loadSIMD8F32(raw, at: cursor)
             let v1 = loadSIMD8F32(raw, at: cursor + 32)
@@ -316,6 +600,15 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
         return ParsedBackwardHead(
             loaded: true,
+            version: ver,
+            backingData: ver == 2 ? data : nil,
+            rawBuffer: ver == 2 ? raw : UnsafeRawBufferPointer(start: nil, count: 0),
+            charResCount: charResCount,
+            charResOffset: charResOffset,
+            wordResCount: wordResCount,
+            wordResOffset: wordResOffset,
+            wordPoolOffset: wordPoolOffset,
+            wordPoolSize: wordPoolSize,
             wCtxRows: transpose32x32(wCtx),
             wRecRows: transpose32x32(wRec),
             b1: b1Vec,
@@ -332,17 +625,325 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         )
     }
 
+    private struct ParsedTypoReranker {
+        let loaded: Bool
+        let backingData: NSData?
+        let rawBuffer: UnsafeRawBufferPointer
+        let scale1: [Float]
+        let b1: [Float]
+        let scale2: [SIMD8<Float>]
+        let b2: [SIMD8<Float>]
+        let w3: [SIMD8<Float>]
+        let resLin0: SIMD8<Float>
+        let resLin1: SIMD8<Float>
+        let b3: Float
+        let maxDeltaQ8: Int
+
+        static var empty: ParsedTypoReranker {
+            ParsedTypoReranker(
+                loaded: false,
+                backingData: nil,
+                rawBuffer: UnsafeRawBufferPointer(start: nil, count: 0),
+                scale1: [],
+                b1: [],
+                scale2: [],
+                b2: [],
+                w3: [],
+                resLin0: .zero,
+                resLin1: .zero,
+                b3: 0.0,
+                maxDeltaQ8: 0
+            )
+        }
+    }
+
+    private static func parseTypoReranker(_ data: NSData?) -> ParsedTypoReranker {
+        guard let data, data.length >= typoRerankerByteSize else {
+            return .empty
+        }
+        let raw = UnsafeRawBufferPointer(start: data.bytes, count: data.length)
+        let magic = loadU32(raw, at: 0)
+        let ver = loadU32(raw, at: 4)
+        let dIn = loadU32(raw, at: 8)
+        let h1 = loadU32(raw, at: 12)
+        let h2 = loadU32(raw, at: 16)
+        let payloadSz = loadU32(raw, at: 28)
+        guard magic == magicLNTR, ver == 1, dIn == 64, h1 == 384, h2 == 48,
+              Int(payloadSz) == typoRerankerByteSize - 32 else {
+            return .empty
+        }
+
+        // Float table starts right after W1 (384*64 = 24,576):
+        // scale1 (384) + b1 (384) = 768 floats, then W2 (48*384 = 18,432 bytes),
+        // then scale2 (48) + b2 (48) + w3 (48) + resLin (16) + tail (4) = 164 floats.
+        let scale1Off = 32 + 24_576
+        let b1Off = scale1Off + 384 * 4
+        let w2Off = b1Off + 384 * 4
+        let scale2Off = w2Off + 18_432
+        let totalFloatsAfterW2 = 48 + 48 + 48 + 16 + 4 // 164 floats = 656 bytes
+        guard scale2Off + totalFloatsAfterW2 * 4 == typoRerankerByteSize else {
+            return .empty
+        }
+
+        var s1 = [Float]()
+        s1.reserveCapacity(384)
+        var bias1 = [Float]()
+        bias1.reserveCapacity(384)
+        for i in 0..<384 {
+            let sv = Float(bitPattern: loadU32(raw, at: scale1Off + i * 4))
+            let bv = Float(bitPattern: loadU32(raw, at: b1Off + i * 4))
+            guard sv.isFinite, bv.isFinite, abs(sv) <= 10.0, abs(bv) <= 50.0 else {
+                return .empty
+            }
+            s1.append(sv)
+            bias1.append(bv)
+        }
+
+        for i in 0..<totalFloatsAfterW2 {
+            let fv = Float(bitPattern: loadU32(raw, at: scale2Off + i * 4))
+            guard fv.isFinite, abs(fv) <= 2000.0 else {
+                return .empty
+            }
+        }
+
+        var cursor = scale2Off
+        func readVec8Group(_ count: Int) -> [SIMD8<Float>] {
+            var out = [SIMD8<Float>]()
+            out.reserveCapacity(count)
+            for _ in 0..<count {
+                out.append(loadSIMD8F32(raw, at: cursor))
+                cursor += 32
+            }
+            return out
+        }
+
+        let s2Vecs = readVec8Group(6)   // 48 floats
+        let b2Vecs = readVec8Group(6)   // 48 floats
+        let w3Vecs = readVec8Group(6)   // 48 floats
+        let rl0 = loadSIMD8F32(raw, at: cursor); cursor += 32
+        let rl1 = loadSIMD8F32(raw, at: cursor); cursor += 32
+        let b3Val = Float(bitPattern: loadU32(raw, at: cursor))
+        let maxDQ8 = Float(bitPattern: loadU32(raw, at: cursor + 4))
+        guard abs(b3Val) <= 50.0, maxDQ8 >= 10.0, maxDQ8 <= 1200.0 else {
+            return .empty
+        }
+
+        return ParsedTypoReranker(
+            loaded: true,
+            backingData: data,
+            rawBuffer: raw,
+            scale1: s1,
+            b1: bias1,
+            scale2: s2Vecs,
+            b2: b2Vecs,
+            w3: w3Vecs,
+            resLin0: rl0,
+            resLin1: rl1,
+            b3: b3Val,
+            maxDeltaQ8: Int(maxDQ8.rounded())
+        )
+    }
+
+    private struct ParsedSemantic64 {
+        let loaded: Bool
+        let quantMode: UInt32
+        let backingData: NSData?
+        let rawBuffer: UnsafeRawBufferPointer
+        let charCount: Int
+        let charMapOffset: Int
+        let charEmbOffset: Int
+        let wordCount: Int
+        let wordTableOffset: Int
+        let poolOffset: Int
+        let poolSize: Int
+        let wSemRows: [Vec32]
+        let wTopicRows: [Vec32]
+        let wGateH: Vec32
+        let wGateTopic: Vec32
+        let bGate: Float
+        let semScale: Float
+        let topicScale: Float
+        let clauseDecay: Float
+        let sentenceDecay: Float
+        let maxBonusQ8: Int
+
+        static var empty: ParsedSemantic64 {
+            let zeroRows = Array(repeating: Vec32.zero, count: 32)
+            return ParsedSemantic64(
+                loaded: false,
+                quantMode: 0,
+                backingData: nil,
+                rawBuffer: UnsafeRawBufferPointer(start: nil, count: 0),
+                charCount: 0,
+                charMapOffset: 0,
+                charEmbOffset: 0,
+                wordCount: 0,
+                wordTableOffset: 0,
+                poolOffset: 0,
+                poolSize: 0,
+                wSemRows: zeroRows,
+                wTopicRows: zeroRows,
+                wGateH: .zero,
+                wGateTopic: .zero,
+                bGate: 0.0,
+                semScale: 0.0,
+                topicScale: 0.0,
+                clauseDecay: 0.82,
+                sentenceDecay: 0.68,
+                maxBonusQ8: 0
+            )
+        }
+    }
+
+    private static func parseSemantic64(_ data: NSData?) -> ParsedSemantic64 {
+        guard let data, data.length >= 48 + 41_984 + 8_480 else {
+            return .empty
+        }
+        let raw = UnsafeRawBufferPointer(start: data.bytes, count: data.length)
+        let magic = loadU32(raw, at: 0)
+        let ver = loadU32(raw, at: 4)
+        let semDim = loadU32(raw, at: 8)
+        let qMode = loadU32(raw, at: 12)
+        guard magic == magicLNS6, ver == 1, semDim == 32, (qMode == 1 || qMode == 2) else {
+            return .empty
+        }
+
+        let pairBytes = (qMode == 1) ? 64 : 128
+        let wordRecBytes = 8 + pairBytes
+        let cCount = Int(loadU32(raw, at: 16))
+        let cMapOff = Int(loadU32(raw, at: 20))
+        let cEmbOff = Int(loadU32(raw, at: 24))
+        let wCount = Int(loadU32(raw, at: 28))
+        let wTabOff = Int(loadU32(raw, at: 32))
+        let poolOff = Int(loadU32(raw, at: 36))
+        let poolSz = Int(loadU32(raw, at: 40))
+        let projOff = Int(loadU32(raw, at: 44))
+        let totalLen = raw.count
+
+        guard cCount >= 0, cCount <= 20992,
+              wCount >= 0, wCount <= Int(UInt16.max),
+              poolSz >= 0,
+              cMapOff >= 48, cMapOff <= totalLen - 41_984,
+              cEmbOff >= cMapOff + 41_984, cEmbOff <= totalLen - (cCount + 1) * pairBytes,
+              wTabOff >= cEmbOff + (cCount + 1) * pairBytes, wTabOff <= totalLen - wCount * wordRecBytes,
+              poolOff >= wTabOff + wCount * wordRecBytes, poolOff <= totalLen - poolSz,
+              projOff >= poolOff + poolSz, projOff <= totalLen - 8_480 else {
+            return .empty
+        }
+
+        if wCount > 0 {
+            guard let base = raw.baseAddress else { return .empty }
+            let poolBase = base.advanced(by: poolOff)
+            var recPtr = base.advanced(by: wTabOff)
+            var prevOff = 0
+            var prevLen = 0
+            var i = 0
+            while i < wCount {
+                let sOff = Int(UInt32(littleEndian: recPtr.loadUnaligned(as: UInt32.self)))
+                let sLen = Int(UInt16(littleEndian: recPtr.advanced(by: 4).loadUnaligned(as: UInt16.self)))
+                guard sLen > 0, sOff <= poolSz, sLen <= poolSz - sOff else { return .empty }
+                if i > 0 {
+                    let n = prevLen < sLen ? prevLen : sLen
+                    let c = memcmp(poolBase.advanced(by: prevOff), poolBase.advanced(by: sOff), n)
+                    if c > 0 || (c == 0 && prevLen >= sLen) {
+                        return .empty
+                    }
+                }
+                prevOff = sOff
+                prevLen = sLen
+                recPtr = recPtr.advanced(by: wordRecBytes)
+                i &+= 1
+            }
+        }
+
+        if let base = raw.baseAddress {
+            var fPtr = base.advanced(by: projOff)
+            var j = 0
+            while j < 2120 {
+                let fv = Float(bitPattern: UInt32(littleEndian: fPtr.loadUnaligned(as: UInt32.self)))
+                guard fv.isFinite, abs(fv) <= 1000.0 else { return .empty }
+                fPtr = fPtr.advanced(by: 4)
+                j &+= 1
+            }
+        } else {
+            return .empty
+        }
+
+        var cursor = projOff
+        func readVec32() -> Vec32 {
+            let v0 = loadSIMD8F32(raw, at: cursor)
+            let v1 = loadSIMD8F32(raw, at: cursor + 32)
+            let v2 = loadSIMD8F32(raw, at: cursor + 64)
+            let v3 = loadSIMD8F32(raw, at: cursor + 96)
+            cursor += 128
+            return Vec32(v0: v0, v1: v1, v2: v2, v3: v3)
+        }
+        func readMatrix32x32() -> [Vec32] {
+            var rows: [Vec32] = []
+            rows.reserveCapacity(32)
+            for _ in 0..<32 { rows.append(readVec32()) }
+            return rows
+        }
+
+        let wSem = readMatrix32x32()
+        let wTopic = readMatrix32x32()
+        let gH = readVec32()
+        let gT = readVec32()
+        let bGate = Float(bitPattern: loadU32(raw, at: cursor))
+        let semScale = Float(bitPattern: loadU32(raw, at: cursor + 4))
+        let topicScale = Float(bitPattern: loadU32(raw, at: cursor + 8))
+        let clauseDecay = Float(bitPattern: loadU32(raw, at: cursor + 12))
+        let sentenceDecay = Float(bitPattern: loadU32(raw, at: cursor + 16))
+        let maxBonus = Float(bitPattern: loadU32(raw, at: cursor + 20))
+        guard abs(bGate) <= 20.0,
+              semScale >= 0.0, semScale <= 4.0,
+              topicScale >= 0.0, topicScale <= 4.0,
+              clauseDecay >= 0.0, clauseDecay <= 0.99,
+              sentenceDecay >= 0.0, sentenceDecay <= 0.99,
+              maxBonus >= 0.0, maxBonus <= 600.0 else {
+            return .empty
+        }
+
+        return ParsedSemantic64(
+            loaded: true,
+            quantMode: qMode,
+            backingData: data,
+            rawBuffer: raw,
+            charCount: cCount,
+            charMapOffset: cMapOff,
+            charEmbOffset: cEmbOff,
+            wordCount: wCount,
+            wordTableOffset: wTabOff,
+            poolOffset: poolOff,
+            poolSize: poolSz,
+            wSemRows: transpose32x32(wSem),
+            wTopicRows: transpose32x32(wTopic),
+            wGateH: gH,
+            wGateTopic: gT,
+            bGate: bGate,
+            semScale: semScale,
+            topicScale: topicScale,
+            clauseDecay: clauseDecay,
+            sentenceDecay: sentenceDecay,
+            maxBonusQ8: Int(maxBonus.rounded())
+        )
+    }
+
     public convenience init(
         data: Data,
         stringPoolOffset: Int,
         stringPoolSize: Int,
-        backwardData: Data? = nil
+        backwardData: Data? = nil,
+        typoRerankerData: Data? = nil,
+        semantic64Data: Data? = nil
     ) {
         self.init(
             nsData: data as NSData,
             stringPoolOffset: stringPoolOffset,
             stringPoolSize: stringPoolSize,
-            backwardData: backwardData as NSData?
+            backwardData: backwardData as NSData?,
+            typoRerankerData: typoRerankerData as NSData?,
+            semantic64Data: semantic64Data as NSData?
         )
     }
 
@@ -350,10 +951,21 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         nsData: NSData,
         stringPoolOffset: Int,
         stringPoolSize: Int,
-        backwardData: NSData? = nil
+        backwardData: NSData? = nil,
+        typoRerankerData: NSData? = nil,
+        semantic64Data: NSData? = nil
     ) {
         let parsedBwd = Self.parseBackwardHead(backwardData)
         self.hasBackwardHead = parsedBwd.loaded
+        self.bwdVersion = parsedBwd.version
+        self.bwdBackingData = parsedBwd.backingData
+        self.bwdRawBuffer = parsedBwd.rawBuffer
+        self.bwdCharResCount = parsedBwd.charResCount
+        self.bwdCharResOffset = parsedBwd.charResOffset
+        self.bwdWordResCount = parsedBwd.wordResCount
+        self.bwdWordResOffset = parsedBwd.wordResOffset
+        self.bwdWordPoolOffset = parsedBwd.wordPoolOffset
+        self.bwdWordPoolSize = parsedBwd.wordPoolSize
         self.bwdWCtxRows = parsedBwd.wCtxRows
         self.bwdWRecRows = parsedBwd.wRecRows
         self.bwdB1 = parsedBwd.b1
@@ -367,6 +979,43 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         self.bwdHEos = parsedBwd.hEos
         self.bwdWBos = parsedBwd.wBos
         self.bwdUBos = parsedBwd.uBos
+
+        let parsedLNTR = Self.parseTypoReranker(typoRerankerData)
+        self.hasTypoReranker = parsedLNTR.loaded
+        self.lntrBackingData = parsedLNTR.backingData
+        self.lntrRawBuffer = parsedLNTR.rawBuffer
+        self.lntrScale1 = parsedLNTR.scale1
+        self.lntrB1 = parsedLNTR.b1
+        self.lntrScale2 = parsedLNTR.scale2
+        self.lntrB2 = parsedLNTR.b2
+        self.lntrW3 = parsedLNTR.w3
+        self.lntrResLin0 = parsedLNTR.resLin0
+        self.lntrResLin1 = parsedLNTR.resLin1
+        self.lntrB3 = parsedLNTR.b3
+        self.lntrMaxDeltaQ8 = parsedLNTR.maxDeltaQ8
+
+        let parsedSem = Self.parseSemantic64(semantic64Data)
+        self.hasSemantic64 = parsedSem.loaded
+        self.sem64QuantMode = parsedSem.quantMode
+        self.sem64BackingData = parsedSem.backingData
+        self.sem64RawBuffer = parsedSem.rawBuffer
+        self.sem64CharCount = parsedSem.charCount
+        self.sem64CharMapOffset = parsedSem.charMapOffset
+        self.sem64CharEmbOffset = parsedSem.charEmbOffset
+        self.sem64WordCount = parsedSem.wordCount
+        self.sem64WordTableOffset = parsedSem.wordTableOffset
+        self.sem64PoolOffset = parsedSem.poolOffset
+        self.sem64PoolSize = parsedSem.poolSize
+        self.sem64WSemRows = parsedSem.wSemRows
+        self.sem64WTopicRows = parsedSem.wTopicRows
+        self.sem64WGateH = parsedSem.wGateH
+        self.sem64WGateTopic = parsedSem.wGateTopic
+        self.sem64BGate = parsedSem.bGate
+        self.sem64SemScale = parsedSem.semScale
+        self.sem64TopicScale = parsedSem.topicScale
+        self.sem64ClauseDecay = parsedSem.clauseDecay
+        self.sem64SentenceDecay = parsedSem.sentenceDecay
+        self.sem64MaxBonusQ8 = parsedSem.maxBonusQ8
 
         self.backingData = nsData
         let raw = UnsafeRawBufferPointer(start: nsData.bytes, count: nsData.length)
@@ -591,6 +1240,10 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
 
     public var isLoaded: Bool { hasBinarySection }
     public var isBackwardLoaded: Bool { hasBinarySection && hasBackwardHead }
+    public var backwardVersion: UInt32 { hasBinarySection && hasBackwardHead ? bwdVersion : 0 }
+    public var isTypoRerankerLoaded: Bool { hasBinarySection && hasTypoReranker }
+    public var isSemantic64Loaded: Bool { hasBinarySection && hasSemantic64 }
+    public var semantic64QuantMode: UInt32 { hasBinarySection && hasSemantic64 ? sem64QuantMode : 0 }
     public var version: UInt32 { modelVersion }
 
     // MARK: - Recurrent Neural Forward Pass (`SIMD8<Float> x 4`)
@@ -669,7 +1322,11 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     }
 
     @inline(__always)
-    public func prepareStepPredictor(lastWord: String, hidden: Vec32) -> StepPredictor {
+    public func prepareStepPredictor(
+        lastWord: String,
+        hidden: Vec32,
+        topicMemory: Vec32 = .zero
+    ) -> StepPredictor {
         guard hasBinarySection, !lastWord.isEmpty else {
             return StepPredictor(
                 wordPred: .zero,
@@ -680,11 +1337,15 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
                 hasContext: false
             )
         }
-        return prepareStepPredictor(lastRecord: wordRecord(for: lastWord), hidden: hidden)
+        return prepareStepPredictor(lastRecord: wordRecord(for: lastWord), hidden: hidden, topicMemory: topicMemory)
     }
 
     @inline(__always)
-    public func prepareStepPredictor(lastRecord: WordNeuralRecord, hidden: Vec32) -> StepPredictor {
+    public func prepareStepPredictor(
+        lastRecord: WordNeuralRecord,
+        hidden: Vec32,
+        topicMemory: Vec32 = .zero
+    ) -> StepPredictor {
         guard hasBinarySection, lastRecord.charCount > 0 else {
             return StepPredictor(
                 wordPred: .zero,
@@ -705,13 +1366,25 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         let bs = Self.matVec32(bSkipRows, x: hidden)
         let wordPred = wp + lastRecord.bd + bs + b2
 
+        var semCombined = Vec32.zero
+        if hasSemantic64 {
+            semCombined = sem64SemScale * lastRecord.semPred
+            if topicMemory != .zero && sem64TopicScale > 0 {
+                let gArg = sem64WGateH.dot(hidden) + sem64WGateTopic.dot(topicMemory) + sem64BGate
+                let gate = Self.approxSigmoidScalar(gArg)
+                let tProj = Self.matVec32(sem64WTopicRows, x: topicMemory)
+                semCombined = semCombined + (sem64TopicScale * gate) * tProj
+            }
+        }
+
         return StepPredictor(
             wordPred: wordPred,
             charPred: lastRecord.cp,
             z: z,
             prevHidden: hidden,
             lastCtx: lastRecord.ctx,
-            hasContext: true
+            hasContext: true,
+            semPred: semCombined
         )
     }
 
@@ -730,6 +1403,13 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         let wordDot = predictor.wordPred.dot(record.tgt)
         let charDot = predictor.charPred.dot(record.firstCharTgt)
         var raw = wordDot + 0.30 * charDot
+        if hasSemantic64 && predictor.semPred != .zero {
+            let semDot = predictor.semPred.dot(record.semTgt)
+            if semDot.isFinite {
+                let maxSemRaw = Float(sem64MaxBonusQ8) / 170.0
+                raw += min(maxSemRaw, max(-maxSemRaw, semDot))
+            }
+        }
 
         if isEndOfSentence {
             let nextH = alpha * predictor.prevHidden + oneMinusAlpha * Self.tanh32(record.ctx + 0.35 * predictor.z)
@@ -794,8 +1474,69 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         return alpha * baseHidden + oneMinusAlpha * record.tanhCtx
     }
 
+    /// Evaluates cross-sentence topic memory gate bonus (`Q8`) for a standalone / sentence-start word.
+    @inline(__always)
+    public func scoreTopicGateBonusQ8(hidden: Vec32, topicMemory: Vec32, record: WordNeuralRecord) -> Int {
+        guard hasBinarySection, hasSemantic64, sem64MaxBonusQ8 > 0,
+              topicMemory != .zero, record.charCount > 0 else {
+            return 0
+        }
+        let gArg = sem64WGateH.dot(hidden) + sem64WGateTopic.dot(topicMemory) + sem64BGate
+        let gate = Self.approxSigmoidScalar(gArg)
+        let tProj = Self.matVec32(sem64WTopicRows, x: topicMemory)
+        let raw = sem64TopicScale * gate * tProj.dot(record.semTgt)
+        guard raw.isFinite else { return 0 }
+        let scaled = (raw * 170.0).rounded()
+        guard scaled.isFinite else { return raw > 0 ? sem64MaxBonusQ8 : -sem64MaxBonusQ8 }
+        let cap = Float(sem64MaxBonusQ8)
+        return Int(min(cap, max(-cap, scaled)))
+    }
+
+    /// Encodes a committed phrase/sentence into a normalized 32-dim semantic topic summary vector.
+    public func encodeTopicSummary(words: [String]) -> Vec32 {
+        guard hasBinarySection, !words.isEmpty else { return .zero }
+        var acc = Vec32.zero
+        var totalWeight: Float = 0.0
+        for w in words where !w.isEmpty {
+            let rec = wordRecord(for: w)
+            guard rec.charCount > 0 else { continue }
+            let vec = hasSemantic64 ? rec.semCtx : rec.ctx
+            let wt: Float = (rec.charCount >= 2) ? 1.0 : 0.25
+            acc = acc + wt * vec
+            totalWeight += wt
+        }
+        guard totalWeight > 0 else { return .zero }
+        let meanVec = (1.0 / totalWeight) * acc
+        let normSq = meanVec.dot(meanVec)
+        guard normSq.isFinite, normSq > 1e-8 else { return .zero }
+        let invNorm = min(Float(1.5), 1.0 / sqrt(max(Float(0.25), normSq)))
+        return invNorm * meanVec
+    }
+
+    /// Exponentially decays cross-sentence topic memory (`γ * current + (1 - γ) * summary` when `words` is non-empty,
+    /// or pure boundary decay `γ * current` across punctuation breaks).
+    public func decayTopicMemory(_ current: Vec32, committedWords: [String], isSentenceBreak: Bool) -> Vec32 {
+        let gamma: Float = isSentenceBreak
+            ? (hasSemantic64 ? sem64SentenceDecay : 0.68)
+            : (hasSemantic64 ? sem64ClauseDecay : 0.82)
+        if committedWords.isEmpty {
+            let next = gamma * current
+            return next.dot(next) < 1e-6 ? .zero : next
+        }
+        let summary = encodeTopicSummary(words: committedWords)
+        guard summary != .zero else {
+            let next = gamma * current
+            return next.dot(next) < 1e-6 ? .zero : next
+        }
+        return gamma * current + (1.0 - gamma) * summary
+    }
+
     /// Evaluates total neural sentence coherence across a segmented word sequence `words`.
-    public func scoreWholeSentence(words: [String], precedingContext: String? = nil) -> Int {
+    public func scoreWholeSentence(
+        words: [String],
+        precedingContext: String? = nil,
+        topicMemory: Vec32 = .zero
+    ) -> Int {
         guard hasBinarySection, !words.isEmpty else { return 0 }
         var hidden = initialHiddenState(precedingContext: precedingContext)
         var prevWord = ViterbiDecoder.extractTrailingChineseSuffix(from: precedingContext ?? "", maxChars: 3)
@@ -807,7 +1548,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             let wRec = wordRecord(for: w)
             if !prevWord.isEmpty {
                 let prevRec = wordRecord(for: prevWord)
-                let pred = prepareStepPredictor(lastRecord: prevRec, hidden: hidden)
+                let pred = prepareStepPredictor(lastRecord: prevRec, hidden: hidden, topicMemory: topicMemory)
                 totalQ8 += scorePreloadedCandidate(
                     predictor: pred,
                     record: wRec,
@@ -816,6 +1557,9 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
                 )
                 hidden = advanceHiddenState(predictor: pred, record: wRec)
             } else {
+                if topicMemory != .zero && hasSemantic64 {
+                    totalQ8 += scoreTopicGateBonusQ8(hidden: hidden, topicMemory: topicMemory, record: wRec)
+                }
                 hidden = advanceHiddenStateFromBOS(record: wRec, baseHidden: hidden)
             }
             if wRec.charCount == 1 {
@@ -828,14 +1572,17 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         return totalQ8
     }
 
-    /// Evaluates right-to-left (`LNBR` v1) coherence across a segmented word sequence `words`.
-    /// Reuses frozen `LNLM-v2` character/word embeddings while disambiguating early words from later context.
+    /// Evaluates right-to-left (`LNBR` v1 / v2) coherence across a segmented word sequence `words`.
+    /// `LNBR v1` reuses frozen `LNLM-v2` embeddings; `LNBR v2` adds dedicated Int8 backward target residuals.
     public func scoreBackwardSentence(words: [String]) -> Int {
         guard hasBinarySection, hasBackwardHead, words.count >= 2 else { return 0 }
         var rightWord = words[words.count - 1]
         var rightRec = wordRecord(for: rightWord)
         guard rightRec.charCount > 0 else { return 0 }
         var hidden = bwdAlpha * bwdHEos + bwdOneMinusAlpha * rightRec.tanhCtx
+        let hasV2Residuals = (bwdVersion >= 2) && (bwdWordResCount > 0 || bwdCharResCount > 0)
+        let minEmb = SIMD8<Float>(repeating: -127.0 / 32.0)
+        let maxEmb = SIMD8<Float>(repeating: 127.0 / 32.0)
 
         var totalQ8 = 0
         for idx in stride(from: words.count - 2, through: 0, by: -1) {
@@ -853,10 +1600,22 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             let wordPred = wp + bd + bs + bwdB2
 
             let rightFirstCtx = rightWord.first.map { embedding(forChar: $0).ctx } ?? .zero
-            let leftLastTgt = leftWord.last.map { embedding(forChar: $0).tgt } ?? .zero
+            let baseLeftLastTgt = leftWord.last.map { embedding(forChar: $0).tgt } ?? .zero
             let charPred = Self.matVec32(bwdWCharRows, x: rightFirstCtx)
 
-            var raw = wordPred.dot(leftRec.tgt) + 0.30 * charPred.dot(leftLastTgt)
+            let effWordTgt: Vec32
+            let effLastCharTgt: Vec32
+            if hasV2Residuals {
+                let wDelta = lookupBackwardWordDelta(leftWord)
+                effWordTgt = (wDelta == .zero) ? leftRec.tgt : Self.clampVec32(leftRec.tgt + wDelta, lower: minEmb, upper: maxEmb)
+                let cDelta = leftWord.last.map { lookupBackwardCharDelta($0) } ?? .zero
+                effLastCharTgt = (cDelta == .zero) ? baseLeftLastTgt : Self.clampVec32(baseLeftLastTgt + cDelta, lower: minEmb, upper: maxEmb)
+            } else {
+                effWordTgt = leftRec.tgt
+                effLastCharTgt = baseLeftLastTgt
+            }
+
+            var raw = wordPred.dot(effWordTgt) + 0.30 * charPred.dot(effLastCharTgt)
             let nextHidden = bwdAlpha * hidden + bwdOneMinusAlpha * Self.tanh32(leftRec.ctx + 0.35 * z)
             if idx == 0 {
                 raw += 0.25 * (bwdWBos.dot(nextHidden) + bwdUBos.dot(leftRec.ctx))
@@ -882,7 +1641,289 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         return totalQ8
     }
 
+    // MARK: - On-Device Blind-Typing Typo Reranker (`LNTR` v1, 64 -> 384 -> 48 -> 1 Int8 SiLU MLP)
+
+    /// Builds the canonical 64-dim feature vector shared identically between Swift (`NoisyChannelRefiner`) and offline model training.
+    public func extractTypoFeatures(
+        typedCount: Int,
+        intendedCount: Int,
+        syllableCount: Int,
+        alignCostQ8: Int,
+        substCount: Int,
+        omitCount: Int,
+        transposeCount: Int,
+        deleteCount: Int,
+        maxPrimaryDriftQ8: Int,
+        matchedTouchGainQ8: Int,
+        viterbiScoreQ8: Int,
+        cleanLatticeQ8: Int,
+        fwdNeuralQ8: Int,
+        bwdNeuralQ8: Int,
+        spellingLL: Int?,
+        spellingBoundary: Int,
+        words: [String]
+    ) -> [Float] {
+        @inline(__always)
+        func clampF(_ v: Float, _ lo: Float, _ hi: Float) -> Float {
+            guard v.isFinite else { return 0.0 }
+            return min(hi, max(lo, v))
+        }
+
+        let sF = Float(max(1, syllableCount))
+        let wF = Float(max(1, words.count))
+        var charTotal = 0
+        var oneCharWords = 0
+        var meanCtx = Vec32.zero
+        for w in words where !w.isEmpty {
+            charTotal += w.count
+            if w.count == 1 { oneCharWords += 1 }
+            meanCtx = meanCtx + wordRecord(for: w).ctx
+        }
+        if !words.isEmpty {
+            meanCtx = (1.0 / wF) * meanCtx
+        }
+        let cF = Float(max(1, charTotal))
+
+        var out = [Float](repeating: 0.0, count: Self.typoFeatureDim)
+        out[0] = clampF(Float(typedCount) / 24.0, -4.0, 4.0)
+        out[1] = clampF(Float(intendedCount - typedCount) / 4.0, -4.0, 4.0)
+        out[2] = clampF(Float(alignCostQ8) / 800.0, -4.0, 4.0)
+        out[3] = clampF(Float(substCount) / 3.0, -4.0, 4.0)
+        out[4] = clampF(Float(omitCount) / 3.0, -4.0, 4.0)
+        out[5] = clampF(Float(transposeCount) / 2.0, -4.0, 4.0)
+        out[6] = clampF(Float(deleteCount) / 2.0, -4.0, 4.0)
+        out[7] = clampF(Float(maxPrimaryDriftQ8) / 300.0, -4.0, 4.0)
+        out[8] = clampF(Float(matchedTouchGainQ8) / 300.0, -4.0, 4.0)
+        out[9] = clampF((Float(viterbiScoreQ8) / sF) / 1200.0, -6.0, 6.0)
+        out[10] = clampF((Float(cleanLatticeQ8) / sF) / 1200.0, -6.0, 6.0)
+        out[11] = clampF((Float(fwdNeuralQ8) / wF) / 400.0, -4.0, 4.0)
+        out[12] = clampF((Float(bwdNeuralQ8) / wF) / 400.0, -4.0, 4.0)
+        out[13] = spellingLL.map { clampF((Float($0) / cF) / 900.0, -6.0, 6.0) } ?? 0.0
+        out[14] = clampF(Float(spellingBoundary) / 400.0, -4.0, 4.0)
+        out[15] = clampF(Float(oneCharWords) / wF, 0.0, 1.0)
+
+        for k in 0..<8 {
+            out[16 + k] = meanCtx.v0[k]
+            out[24 + k] = meanCtx.v1[k]
+            out[32 + k] = meanCtx.v2[k]
+            out[40 + k] = meanCtx.v3[k]
+        }
+        if let firstW = words.first, !firstW.isEmpty {
+            let fTgt = wordRecord(for: firstW).tgt.v0
+            for k in 0..<8 { out[48 + k] = fTgt[k] }
+        }
+        if let lastW = words.last, !lastW.isEmpty {
+            let lCtx = wordRecord(for: lastW).ctx.v0
+            for k in 0..<8 { out[56 + k] = lCtx[k] }
+        }
+        return out
+    }
+
+    /// Evaluates the 46.7 KB Int8 2-layer SiLU MLP (`LNTR` v1) in Apple Silicon SIMD registers (`~0.9 µs`).
+    public func scoreTypoCandidateQ8(features: [Float]) -> Int {
+        guard hasBinarySection, hasTypoReranker, features.count == Self.typoFeatureDim,
+              let basePtr = lntrRawBuffer.baseAddress else {
+            return 0
+        }
+
+        var xVecs = [SIMD8<Float>](repeating: .zero, count: 8)
+        let lo8 = SIMD8<Float>(repeating: -8.0)
+        let hi8 = SIMD8<Float>(repeating: 8.0)
+        for g in 0..<8 {
+            let off = g * 8
+            let raw8 = SIMD8<Float>(
+                features[off].isFinite ? features[off] : 0,
+                features[off + 1].isFinite ? features[off + 1] : 0,
+                features[off + 2].isFinite ? features[off + 2] : 0,
+                features[off + 3].isFinite ? features[off + 3] : 0,
+                features[off + 4].isFinite ? features[off + 4] : 0,
+                features[off + 5].isFinite ? features[off + 5] : 0,
+                features[off + 6].isFinite ? features[off + 6] : 0,
+                features[off + 7].isFinite ? features[off + 7] : 0
+            )
+            xVecs[g] = raw8.clamped(lowerBound: lo8, upperBound: hi8)
+        }
+
+        let w1Ptr = basePtr.advanced(by: 32).assumingMemoryBound(to: Int8.self)
+        var h1Vecs = [SIMD8<Float>](repeating: .zero, count: 48)
+        for blk in 0..<48 {
+            var pre8 = SIMD8<Float>.zero
+            for lane in 0..<8 {
+                let row = blk * 8 + lane
+                let rPtr = w1Ptr.advanced(by: row * 64)
+                var acc = SIMD8<Float>.zero
+                for g in 0..<8 {
+                    let gOff = g * 8
+                    let w8 = SIMD8<Float>(
+                        Float(rPtr[gOff]), Float(rPtr[gOff + 1]), Float(rPtr[gOff + 2]), Float(rPtr[gOff + 3]),
+                        Float(rPtr[gOff + 4]), Float(rPtr[gOff + 5]), Float(rPtr[gOff + 6]), Float(rPtr[gOff + 7])
+                    )
+                    acc += w8 * xVecs[g]
+                }
+                pre8[lane] = acc.sum() * lntrScale1[row] + lntrB1[row]
+            }
+            h1Vecs[blk] = Self.silu8(pre8)
+        }
+
+        let w2Offset = 32 + 24_576 + 768 * 4
+        let w2Ptr = basePtr.advanced(by: w2Offset).assumingMemoryBound(to: Int8.self)
+        var outDot: Float = 0.0
+        for blk2 in 0..<6 {
+            var pre2 = SIMD8<Float>.zero
+            for lane in 0..<8 {
+                let row2 = blk2 * 8 + lane
+                let rPtr2 = w2Ptr.advanced(by: row2 * 384)
+                var acc2 = SIMD8<Float>.zero
+                for b1Idx in 0..<48 {
+                    let gOff = b1Idx * 8
+                    let w8 = SIMD8<Float>(
+                        Float(rPtr2[gOff]), Float(rPtr2[gOff + 1]), Float(rPtr2[gOff + 2]), Float(rPtr2[gOff + 3]),
+                        Float(rPtr2[gOff + 4]), Float(rPtr2[gOff + 5]), Float(rPtr2[gOff + 6]), Float(rPtr2[gOff + 7])
+                    )
+                    acc2 += w8 * h1Vecs[b1Idx]
+                }
+                pre2[lane] = acc2.sum()
+            }
+            let h2 = Self.silu8(pre2 * lntrScale2[blk2] + lntrB2[blk2])
+            outDot += (h2 * lntrW3[blk2]).sum()
+        }
+
+        let skipDot = (lntrResLin0 * xVecs[0] + lntrResLin1 * xVecs[1]).sum()
+        let rawOut = outDot + skipDot + lntrB3
+        guard rawOut.isFinite else { return 0 }
+        let scaled = (rawOut * 170.0).rounded()
+        guard scaled.isFinite else { return rawOut > 0 ? lntrMaxDeltaQ8 : -lntrMaxDeltaQ8 }
+        let cap = Float(lntrMaxDeltaQ8)
+        return Int(min(cap, max(-cap, scaled)))
+    }
+
+    @inline(__always)
+    public func scoreTypoDeltaQ8(challenger: [Float], incumbent: [Float]) -> Int {
+        guard hasBinarySection, hasTypoReranker else { return 0 }
+        let diff = scoreTypoCandidateQ8(features: challenger) - scoreTypoCandidateQ8(features: incumbent)
+        return min(lntrMaxDeltaQ8, max(-lntrMaxDeltaQ8, diff))
+    }
+
     // MARK: - Zero-Copy `mmap` Embedding & Consolidated Word Record Lookups
+
+    private func lookupBackwardCharDelta(_ ch: Character) -> Vec32 {
+        guard bwdCharResCount > 0, let scalar = ch.unicodeScalars.first else { return .zero }
+        let v = Int(scalar.value)
+        guard v >= 0x4E00 && v < 0xA000 else { return .zero }
+        let targetCode = v - 0x4E00
+        var lo = 0
+        var hi = bwdCharResCount - 1
+        while lo <= hi {
+            let mid = (lo + hi) >> 1
+            let recOff = bwdCharResOffset + mid * 36
+            let code = Int(Self.loadU16(bwdRawBuffer, at: recOff))
+            if code == targetCode {
+                return Self.loadQuantizedVec32(bwdRawBuffer, at: recOff + 4)
+            } else if code < targetCode {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return .zero
+    }
+
+    private func lookupBackwardWordDelta(_ word: String) -> Vec32 {
+        guard bwdWordResCount > 0 else { return .zero }
+        var query = word
+        return query.withUTF8 { queryBuf -> Vec32 in
+            guard !queryBuf.isEmpty else { return .zero }
+            var lo = 0
+            var hi = bwdWordResCount - 1
+            while lo <= hi {
+                let mid = (lo + hi) >> 1
+                let recOff = bwdWordResOffset + mid * 40
+                let sOff = Int(Self.loadU32(bwdRawBuffer, at: recOff))
+                let sLen = Int(Self.loadU16(bwdRawBuffer, at: recOff + 4))
+                let cmp = Self.compareArbitraryPoolBytes(
+                    bwdRawBuffer,
+                    poolOffset: bwdWordPoolOffset,
+                    poolSize: bwdWordPoolSize,
+                    offset: sOff,
+                    length: sLen,
+                    against: queryBuf
+                )
+                if cmp == 0 {
+                    return Self.loadQuantizedVec32(bwdRawBuffer, at: recOff + 8)
+                } else if cmp < 0 {
+                    lo = mid + 1
+                } else {
+                    hi = mid - 1
+                }
+            }
+            return .zero
+        }
+    }
+
+    private func semanticEmbedding(forChar ch: Character) -> EmbeddingPair {
+        guard hasSemantic64, let scalar = ch.unicodeScalars.first else { return .zero }
+        let v = Int(scalar.value)
+        guard v >= 0x4E00 && v < 0xA000 else { return .zero }
+        let cid = Int(Self.loadU16(sem64RawBuffer, at: sem64CharMapOffset + (v - 0x4E00) * 2))
+        guard cid > 0 && cid <= sem64CharCount else { return .zero }
+        if sem64QuantMode == 1 {
+            let off = sem64CharEmbOffset + cid * 64
+            return EmbeddingPair(
+                ctx: Self.loadQuantizedVec32(sem64RawBuffer, at: off),
+                tgt: Self.loadQuantizedVec32(sem64RawBuffer, at: off + 32)
+            )
+        } else {
+            let off = sem64CharEmbOffset + cid * 128
+            return EmbeddingPair(
+                ctx: Self.loadFloat16Vec32(sem64RawBuffer, at: off),
+                tgt: Self.loadFloat16Vec32(sem64RawBuffer, at: off + 64)
+            )
+        }
+    }
+
+    private func lookupSemanticWordEmbedding(_ word: String) -> EmbeddingPair? {
+        guard hasSemantic64, sem64WordCount > 0 else { return nil }
+        let pairBytes = (sem64QuantMode == 1) ? 64 : 128
+        let strideBytes = 8 + pairBytes
+        var query = word
+        return query.withUTF8 { queryBuf -> EmbeddingPair? in
+            guard !queryBuf.isEmpty else { return nil }
+            var lo = 0
+            var hi = sem64WordCount - 1
+            while lo <= hi {
+                let mid = (lo + hi) >> 1
+                let recOff = sem64WordTableOffset + mid * strideBytes
+                let sOff = Int(Self.loadU32(sem64RawBuffer, at: recOff))
+                let sLen = Int(Self.loadU16(sem64RawBuffer, at: recOff + 4))
+                let cmp = Self.compareArbitraryPoolBytes(
+                    sem64RawBuffer,
+                    poolOffset: sem64PoolOffset,
+                    poolSize: sem64PoolSize,
+                    offset: sOff,
+                    length: sLen,
+                    against: queryBuf
+                )
+                if cmp == 0 {
+                    if sem64QuantMode == 1 {
+                        return EmbeddingPair(
+                            ctx: Self.loadQuantizedVec32(sem64RawBuffer, at: recOff + 8),
+                            tgt: Self.loadQuantizedVec32(sem64RawBuffer, at: recOff + 40)
+                        )
+                    } else {
+                        return EmbeddingPair(
+                            ctx: Self.loadFloat16Vec32(sem64RawBuffer, at: recOff + 8),
+                            tgt: Self.loadFloat16Vec32(sem64RawBuffer, at: recOff + 72)
+                        )
+                    }
+                } else if cmp < 0 {
+                    lo = mid + 1
+                } else {
+                    hi = mid - 1
+                }
+            }
+            return nil
+        }
+    }
 
     @inline(__always)
     public func embedding(forChar ch: Character) -> EmbeddingPair {
@@ -950,6 +1991,27 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             resolvedEmb = EmbeddingPair(ctx: cV, tgt: tV)
         }
 
+        var sCtx = Vec32.zero
+        var sTgt = Vec32.zero
+        var sPred = Vec32.zero
+        if hasSemantic64 {
+            if let semHit = lookupSemanticWordEmbedding(word) {
+                sCtx = semHit.ctx
+                sTgt = semHit.tgt
+            } else {
+                let fSem = semanticEmbedding(forChar: firstCh)
+                if cCount == 1 {
+                    sCtx = fSem.ctx
+                    sTgt = fSem.tgt
+                } else {
+                    let lSem = semanticEmbedding(forChar: lastCh)
+                    sCtx = 0.35 * fSem.ctx + 0.65 * lSem.ctx
+                    sTgt = 0.65 * fSem.tgt + 0.35 * lSem.tgt
+                }
+            }
+            sPred = Self.matVec32(sem64WSemRows, x: sCtx)
+        }
+
         let built = WordNeuralRecord(
             ctx: resolvedEmb.ctx,
             tanhCtx: Self.tanh32(resolvedEmb.ctx),
@@ -960,7 +2022,10 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
             cp: Self.matVec32(wCharRows, x: lastCharEmb.ctx),
             eosCtxScore: uEos.dot(resolvedEmb.ctx),
             charCount: cCount,
-            isAccidentalSingleton: cCount == 1 && resolvedEmb.tgt.v3[6] > 0.5
+            isAccidentalSingleton: cCount == 1 && resolvedEmb.tgt.v3[6] > 0.5,
+            semCtx: sCtx,
+            semTgt: sTgt,
+            semPred: sPred
         )
 
         os_unfair_lock_lock(&cacheLock)
@@ -982,7 +2047,7 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         return built
     }
 
-    private func lookupWordTableEmbedding(_ word: String) -> EmbeddingPair? {
+    func lookupWordTableEmbedding(_ word: String) -> EmbeddingPair? {
         guard wordVocabCount > 0 else { return nil }
         let raw = rawBuffer
         let strideBytes = (modelVersion >= 2) ? 72 : 40
@@ -1081,6 +2146,25 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     }
 
     @inline(__always)
+    private static func clampVec32(_ x: Vec32, lower: SIMD8<Float>, upper: SIMD8<Float>) -> Vec32 {
+        Vec32(
+            v0: x.v0.clamped(lowerBound: lower, upperBound: upper),
+            v1: x.v1.clamped(lowerBound: lower, upperBound: upper),
+            v2: x.v2.clamped(lowerBound: lower, upperBound: upper),
+            v3: x.v3.clamped(lowerBound: lower, upperBound: upper)
+        )
+    }
+
+    @inline(__always)
+    private static func approxSigmoidScalar(_ x: Float) -> Float {
+        guard x.isFinite else { return 0.5 }
+        let ax = abs(x)
+        let x2 = x * x
+        let denom: Float = 1.0 + ax + 0.27 * x2 + 0.035 * ax * x2
+        return 0.5 + (0.5 * x) / denom
+    }
+
+    @inline(__always)
     private static func silu32(_ x: Vec32) -> Vec32 {
         Vec32(v0: silu8(x.v0), v1: silu8(x.v1), v2: silu8(x.v2), v3: silu8(x.v3))
     }
@@ -1112,6 +2196,45 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         let c27 = SIMD8<Float>(repeating: 27.0)
         let c9 = SIMD8<Float>(repeating: 9.0)
         return clamped * (c27 + x2) / (c27 + c9 * x2)
+    }
+
+    @inline(__always)
+    private static func halfBitsToFloat(_ h: UInt16) -> Float {
+        let sign = UInt32(h & 0x8000) << 16
+        let exp = Int((h >> 10) & 0x1F)
+        let mant = UInt32(h & 0x03FF)
+        if exp == 0 {
+            if mant == 0 { return Float(bitPattern: sign) }
+            let s: Float = (h & 0x8000) != 0 ? -1.0 : 1.0
+            return s * Float(mant) * (1.0 / 16_777_216.0)
+        }
+        if exp == 31 {
+            return 0.0
+        }
+        return Float(bitPattern: sign | (UInt32(exp + 112) << 23) | (mant << 13))
+    }
+
+    @inline(__always)
+    private static func loadFloat16Vec32(_ raw: UnsafeRawBufferPointer, at offset: Int) -> Vec32 {
+        @inline(__always)
+        func lane8(_ baseOff: Int) -> SIMD8<Float> {
+            SIMD8<Float>(
+                halfBitsToFloat(loadU16(raw, at: baseOff)),
+                halfBitsToFloat(loadU16(raw, at: baseOff + 2)),
+                halfBitsToFloat(loadU16(raw, at: baseOff + 4)),
+                halfBitsToFloat(loadU16(raw, at: baseOff + 6)),
+                halfBitsToFloat(loadU16(raw, at: baseOff + 8)),
+                halfBitsToFloat(loadU16(raw, at: baseOff + 10)),
+                halfBitsToFloat(loadU16(raw, at: baseOff + 12)),
+                halfBitsToFloat(loadU16(raw, at: baseOff + 14))
+            )
+        }
+        return Vec32(
+            v0: lane8(offset),
+            v1: lane8(offset + 16),
+            v2: lane8(offset + 32),
+            v3: lane8(offset + 48)
+        )
     }
 
     @inline(__always)
@@ -1178,10 +2301,17 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
     }
 
     @inline(__always)
-    private func comparePoolBytes(_ raw: UnsafeRawBufferPointer, offset: Int, length: Int, against rhs: UnsafeBufferPointer<UInt8>) -> Int {
+    private static func compareArbitraryPoolBytes(
+        _ raw: UnsafeRawBufferPointer,
+        poolOffset: Int,
+        poolSize: Int,
+        offset: Int,
+        length: Int,
+        against rhs: UnsafeBufferPointer<UInt8>
+    ) -> Int {
         guard let base = raw.baseAddress,
-              offset >= 0 && length > 0 && offset + length <= stringPoolSize else { return -1 }
-        let ptr = base.advanced(by: stringPoolOffset + offset).assumingMemoryBound(to: UInt8.self)
+              offset >= 0 && length > 0 && offset <= poolSize && length <= poolSize - offset else { return -1 }
+        let ptr = base.advanced(by: poolOffset + offset).assumingMemoryBound(to: UInt8.self)
         let n = min(length, rhs.count)
         for i in 0..<n {
             let a = ptr[i]
@@ -1190,5 +2320,17 @@ public final class NeuralSentenceScorer: @unchecked Sendable {
         }
         if length == rhs.count { return 0 }
         return length < rhs.count ? -1 : 1
+    }
+
+    @inline(__always)
+    private func comparePoolBytes(_ raw: UnsafeRawBufferPointer, offset: Int, length: Int, against rhs: UnsafeBufferPointer<UInt8>) -> Int {
+        Self.compareArbitraryPoolBytes(
+            raw,
+            poolOffset: stringPoolOffset,
+            poolSize: stringPoolSize,
+            offset: offset,
+            length: length,
+            against: rhs
+        )
     }
 }

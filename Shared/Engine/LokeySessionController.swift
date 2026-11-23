@@ -191,6 +191,7 @@ public final class LokeySessionController {
     private struct CompletedPrefixSnapshot {
         let samples: [TouchSample]
         let contextSeed: String?
+        let topicMemory: NeuralSentenceScorer.Vec32
         let settings: LokeySettings
         let rawResult: DecodeResult
     }
@@ -258,17 +259,27 @@ public final class LokeySessionController {
     /// Soft semantic context (up to 6 trailing Han characters) preserved across `，` / `、` pauses without chaining cross-comma bigrams.
     public private(set) var lastClauseContextSuffix: String = ""
 
+    /// Cross-sentence exponentially decaying 32-dim semantic topic memory (`LNS6-v1`).
+    /// Zeroed immediately whenever `isSecureContext` is toggled or `resetTopicMemory()` is called.
+    public private(set) var topicMemoryVector: NeuralSentenceScorer.Vec32 = .zero
+
     /// Live document text immediately preceding the composing insertion point, supplied by `KeyboardViewController`.
     public var externalContextBeforeInput: String? = nil
 
-    /// Password fields: no learning, no prediction, no diagnostics. Toggling resets composition.
+    /// Password fields: no learning, no prediction, no diagnostics. Toggling resets composition and topic memory.
     public var isSecureContext = false {
         didSet {
             if isSecureContext != oldValue {
+                topicMemoryVector = .zero
                 resetComposing()
                 notifyContextBreak()
             }
         }
+    }
+
+    public func resetTopicMemory() {
+        topicMemoryVector = .zero
+        completedPrefixSnapshots.removeAll(keepingCapacity: true)
     }
 
     /// Runs `NoisyChannelRefiner` after each background decode (dropped / swapped / neighbor keys across the
@@ -446,8 +457,9 @@ public final class LokeySessionController {
                 completedPrefixSnapshots.removeAll(keepingCapacity: true)
             }
             let ctx = currentContextSeed()
+            let activeTopic = isSecureContext ? NeuralSentenceScorer.Vec32.zero : topicMemoryVector
             if let snapIdx = completedPrefixSnapshots.lastIndex(where: {
-                $0.samples == samples && $0.contextSeed == ctx && $0.settings == settings
+                $0.samples == samples && $0.contextSeed == ctx && $0.topicMemory == activeTopic && $0.settings == settings
             }) {
                 pendingDecode?.cancel()
                 pendingDecode = nil
@@ -670,12 +682,22 @@ public final class LokeySessionController {
         updateChineseContextFlag(for: text)
     }
 
-    /// Clears clause-level word history when punctuation, space, newline, or cursor jump breaks continuity.
+    /// Clears clause-level word history when punctuation, space, newline, or cursor jump breaks continuity,
+    /// while applying sentence-boundary exponential decay to `topicMemoryVector` (or zeroing in secure contexts).
     public func notifyContextBreak() {
         lastCommittedChineseWord = ""
         lastClauseContextSuffix = ""
         externalContextBeforeInput = nil
         recentCommittedDisplayToCanonical.removeAll(keepingCapacity: true)
+        if isSecureContext {
+            topicMemoryVector = .zero
+        } else if topicMemoryVector != .zero && decoder.lexicon.neuralLM.isSemantic64Loaded {
+            topicMemoryVector = decoder.lexicon.neuralLM.decayTopicMemory(
+                topicMemoryVector,
+                committedWords: [],
+                isSentenceBreak: true
+            )
+        }
     }
 
     /// Called on pause punctuation (`，` / `、`): clears immediate bigram chaining so
@@ -1017,10 +1039,12 @@ public final class LokeySessionController {
                     urgentSettings.enableEmojiCandidates = false
                     cleanFastOnly = true
                 }
+                let activeTopicMemory = isSecureContext ? NeuralSentenceScorer.Vec32.zero : topicMemoryVector
                 result = decoder.decode(
                     samples: samples,
                     settings: urgentSettings,
                     precedingContext: contextSeed,
+                    topicMemory: activeTopicMemory,
                     fastCleanSentenceOnly: cleanFastOnly,
                     isCancelled: { DispatchTime.now().uptimeNanoseconds >= baseDecodeDeadline },
                     isUrgentCommit: { !isShortUnsegmentedNoisy || (DispatchTime.now().uptimeNanoseconds &- waitStart) >= 3_800_000 }
@@ -1044,12 +1068,14 @@ public final class LokeySessionController {
             && !result.candidates.isEmpty
             && nowAfterBase + softMargin + minSoftBudgetNs < hardDeadline {
             let softDeadline = hardDeadline - softMargin
+            let activeTopicForRefine = isSecureContext ? NeuralSentenceScorer.Vec32.zero : topicMemoryVector
             result = commitRefiner.refine(
                 samples: samples,
                 base: result,
                 settings: settings,
                 spatialModel: decoder.spatialModel,
                 precedingContext: contextSeed,
+                topicMemory: activeTopicForRefine,
                 precomputedHyps: decoder.fullHypothesesIfMatching(samples: samples, settings: settings),
                 isCancelled: { DispatchTime.now().uptimeNanoseconds >= hardDeadline },
                 isPastDeadline: { DispatchTime.now().uptimeNanoseconds >= softDeadline },
@@ -1084,6 +1110,7 @@ public final class LokeySessionController {
         pendingDecode?.cancel()
         pendingDecode = nil
         let contextSeed = currentContextSeed()
+        let activeTopicMemory = isSecureContext ? NeuralSentenceScorer.Vec32.zero : topicMemoryVector
         if deferCandidates, let worker = candidateWorker {
             let samples = self.samples, settings = self.settings
             let model = decoder.spatialModel
@@ -1111,6 +1138,7 @@ public final class LokeySessionController {
                     samples: samples,
                     settings: settings,
                     precedingContext: contextSeed,
+                    topicMemory: activeTopicMemory,
                     isCancelled: { isCancelled() || !worker.isCurrentGeneration(jobGen) },
                     isUrgentCommit: isUrgentCommit
                 )
@@ -1126,6 +1154,7 @@ public final class LokeySessionController {
                     settings: settings,
                     spatialModel: worker.decoder.spatialModel,
                     precedingContext: contextSeed,
+                    topicMemory: activeTopicMemory,
                     precomputedHyps: worker.decoder.fullHypothesesIfMatching(samples: samples, settings: settings),
                     isCancelled: { isCancelled() || !worker.isCurrentGeneration(jobGen) },
                     isPastDeadline: isPastDeadline,
@@ -1206,7 +1235,7 @@ public final class LokeySessionController {
             currentDecode = DecodeResult(preeditDisplay: preedit, candidates: visible)
             return
         }
-        installDecode(decoder.decode(samples: samples, settings: settings, precedingContext: contextSeed))
+        installDecode(decoder.decode(samples: samples, settings: settings, precedingContext: contextSeed, topicMemory: activeTopicMemory))
     }
 
     // Show an exact one- or two-syllable word before the full spatial/LM ranking arrives.
@@ -1277,8 +1306,9 @@ public final class LokeySessionController {
         }
         if !samples.isEmpty && samples.count <= 36 {
             let ctx = currentContextSeed()
+            let activeTopic = isSecureContext ? NeuralSentenceScorer.Vec32.zero : topicMemoryVector
             if let existingIdx = completedPrefixSnapshots.firstIndex(where: {
-                $0.samples == samples && $0.contextSeed == ctx && $0.settings == settings
+                $0.samples == samples && $0.contextSeed == ctx && $0.topicMemory == activeTopic && $0.settings == settings
             }) {
                 completedPrefixSnapshots.remove(at: existingIdx)
             } else if completedPrefixSnapshots.count >= 24 {
@@ -1288,6 +1318,7 @@ public final class LokeySessionController {
                 CompletedPrefixSnapshot(
                     samples: samples,
                     contextSeed: ctx,
+                    topicMemory: activeTopic,
                     settings: settings,
                     rawResult: rawResult
                 )
@@ -1741,6 +1772,40 @@ public final class LokeySessionController {
         return true
     }
 
+    private func segmentCommittedWordsForTopicMemory(_ text: String, trailingWord: String?) -> [String] {
+        let chars = Array(text)
+        guard !chars.isEmpty else { return [] }
+        let lockedTailLen: Int
+        if let tw = trailingWord, !tw.isEmpty, tw.count < chars.count, text.hasSuffix(tw) {
+            lockedTailLen = tw.count
+        } else {
+            lockedTailLen = 0
+        }
+        let bodyCount = chars.count - lockedTailLen
+        var out: [String] = []
+        out.reserveCapacity(min(8, max(1, chars.count / 2 + 1)))
+        var pos = max(0, bodyCount - 16)
+        while pos < bodyCount && out.count < 8 {
+            var matchedLen = 1
+            let maxLen = min(4, bodyCount - pos)
+            if maxLen >= 2 {
+                for len in stride(from: maxLen, through: 2, by: -1) {
+                    let piece = String(chars[pos..<(pos + len)])
+                    if decoder.lexicon.neuralLM.lookupWordTableEmbedding(piece) != nil {
+                        matchedLen = len
+                        break
+                    }
+                }
+            }
+            out.append(String(chars[pos..<(pos + matchedLen)]))
+            pos += matchedLen
+        }
+        if lockedTailLen > 0, let tw = trailingWord {
+            out.append(tw)
+        }
+        return out
+    }
+
     private func recordCommittedSurfaceForBigram(
         _ text: String,
         kind: LokeyCandidate.Kind,
@@ -1751,7 +1816,21 @@ public final class LokeySessionController {
         }
         guard !isSecureContext, !text.isEmpty, text.allSatisfy({ ViterbiDecoder.isCJKIdeograph($0) }) else {
             lastCommittedChineseWord = ""
+            if isSecureContext {
+                topicMemoryVector = .zero
+            }
             return
+        }
+
+        if decoder.lexicon.neuralLM.isSemantic64Loaded {
+            let topicWords = segmentCommittedWordsForTopicMemory(text, trailingWord: trailingWord)
+            if !topicWords.isEmpty {
+                topicMemoryVector = decoder.lexicon.neuralLM.decayTopicMemory(
+                    topicMemoryVector,
+                    committedWords: topicWords,
+                    isSentenceBreak: false
+                )
+            }
         }
 
         if kind != .sentence

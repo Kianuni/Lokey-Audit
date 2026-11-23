@@ -704,14 +704,14 @@ def generate_pbxproj() -> None:
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = AuditDemoApp/AuditDemoApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 82;
+				CURRENT_PROJECT_VERSION = 83;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AuditDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.9.4;
+				MARKETING_VERSION = 0.9.5;
 				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kianuni.lokey.audit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -724,14 +724,14 @@ def generate_pbxproj() -> None:
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = AuditDemoApp/AuditDemoApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 82;
+				CURRENT_PROJECT_VERSION = 83;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AuditDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.9.4;
+				MARKETING_VERSION = 0.9.5;
 				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kianuni.lokey.audit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -744,7 +744,7 @@ def generate_pbxproj() -> None:
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = KeyboardExtension/LokeyKeyboard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 82;
+				CURRENT_PROJECT_VERSION = 83;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = KeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -752,7 +752,7 @@ def generate_pbxproj() -> None:
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.4;
+				MARKETING_VERSION = 0.9.5;
 				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kianuni.lokey.audit.keyboard;
 				PRODUCT_NAME = LokeyKeyboard;
@@ -766,7 +766,7 @@ def generate_pbxproj() -> None:
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = KeyboardExtension/LokeyKeyboard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 82;
+				CURRENT_PROJECT_VERSION = 83;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = KeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -774,7 +774,7 @@ def generate_pbxproj() -> None:
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.4;
+				MARKETING_VERSION = 0.9.5;
 				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kianuni.lokey.audit.keyboard;
 				PRODUCT_NAME = LokeyKeyboard;
@@ -787,7 +787,7 @@ def generate_pbxproj() -> None:
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 82;
+				CURRENT_PROJECT_VERSION = 83;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LokeyAuditTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -795,7 +795,7 @@ def generate_pbxproj() -> None:
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.9.4;
+				MARKETING_VERSION = 0.9.5;
 				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kianuni.lokey.audit.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -808,7 +808,7 @@ def generate_pbxproj() -> None:
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 82;
+				CURRENT_PROJECT_VERSION = 83;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LokeyAuditTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -816,7 +816,7 @@ def generate_pbxproj() -> None:
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.9.4;
+				MARKETING_VERSION = 0.9.5;
 				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kianuni.lokey.audit.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -190,25 +190,61 @@ public final class MmapLexicon: @unchecked Sendable {
 
     public convenience init(contentsOf url: URL) throws {
         let mapped = try NSData(contentsOf: url, options: [.mappedIfSafe])
-        let siblingEmojiURL = url.deletingLastPathComponent().appendingPathComponent("lokey_emoji.bin")
+        let dir = url.deletingLastPathComponent()
+        let isPackFile = url.pathExtension.lowercased() == "lokeypack"
+        let siblingEmojiURL = dir.appendingPathComponent("lokey_emoji.bin")
         let emojiMapped = try? NSData(contentsOf: siblingEmojiURL, options: [.mappedIfSafe])
-        let spellingURL = url.deletingLastPathComponent().appendingPathComponent("lokey_spelling.bin")
-        let bwdURL = url.deletingLastPathComponent().appendingPathComponent("lokey_lnlm_bwd.bin")
-        try self.init(nsData: mapped, emojiData: emojiMapped,
-                      spellingData: try? NSData(contentsOf: spellingURL, options: [.mappedIfSafe]),
-                      backwardNeuralData: try? NSData(contentsOf: bwdURL, options: [.mappedIfSafe]))
+        let spellingURL = dir.appendingPathComponent("lokey_spelling.bin")
+        let packBwdURL = URL(fileURLWithPath: url.path + ".bwd")
+        let bwdURL: URL? = FileManager.default.isReadableFile(atPath: packBwdURL.path)
+            ? packBwdURL
+            : (isPackFile ? nil : dir.appendingPathComponent("lokey_lnlm_bwd.bin"))
+        let packLntrURL = URL(fileURLWithPath: url.path + ".lntr")
+        let lntrURL: URL? = FileManager.default.isReadableFile(atPath: packLntrURL.path)
+            ? packLntrURL
+            : (isPackFile ? nil : dir.appendingPathComponent("lokey_lntr.bin"))
+        let packSem64URL = URL(fileURLWithPath: url.path + ".sem64")
+        let sem64URL: URL? = FileManager.default.isReadableFile(atPath: packSem64URL.path)
+            ? packSem64URL
+            : (isPackFile ? nil : dir.appendingPathComponent("lokey_lnlm_sem64.bin"))
+        try self.init(
+            nsData: mapped,
+            emojiData: emojiMapped,
+            spellingData: try? NSData(contentsOf: spellingURL, options: [.mappedIfSafe]),
+            backwardNeuralData: bwdURL.flatMap { try? NSData(contentsOf: $0, options: [.mappedIfSafe]) },
+            typoRerankerData: lntrURL.flatMap { try? NSData(contentsOf: $0, options: [.mappedIfSafe]) },
+            semantic64Data: sem64URL.flatMap { try? NSData(contentsOf: $0, options: [.mappedIfSafe]) }
+        )
     }
 
     public convenience init(data: Data) throws {
         try self.init(nsData: data as NSData, emojiData: nil)
     }
 
-    public init(nsData: NSData, emojiData: NSData? = nil, spellingData: NSData? = nil, backwardNeuralData: NSData? = nil) throws {
+    public init(
+        nsData: NSData,
+        emojiData: NSData? = nil,
+        spellingData: NSData? = nil,
+        backwardNeuralData: NSData? = nil,
+        typoRerankerData: NSData? = nil,
+        semantic64Data: NSData? = nil
+    ) throws {
         guard nsData.length >= 64 else { throw LexiconError.fileTooSmall }
         self.backingData = nsData
         let raw = UnsafeRawBufferPointer(start: nsData.bytes, count: nsData.length)
         self.rawBuffer = raw
-        let resolvedBwdData = backwardNeuralData ?? Self.discoverResource("lokey_lnlm_bwd")
+        let embedded = (backwardNeuralData == nil || typoRerankerData == nil || semantic64Data == nil)
+            ? Self.extractEmbeddedLKEXSlices(from: nsData, raw: raw)
+            : (bwd: nil, lntr: nil, sem64: nil)
+        let bwdCandidate = backwardNeuralData ?? embedded.bwd
+        let lntrCandidate = typoRerankerData ?? embedded.lntr
+        let sem64Candidate = semantic64Data ?? embedded.sem64
+        let sharesBackbone = (bwdCandidate == nil || lntrCandidate == nil || sem64Candidate == nil)
+            ? Self.sharesBundledNeuralBackbone(raw)
+            : false
+        let resolvedBwdData = bwdCandidate ?? (sharesBackbone ? Self.discoverResource("lokey_lnlm_bwd") : nil)
+        let resolvedLntrData = lntrCandidate ?? (sharesBackbone ? Self.discoverResource("lokey_lntr") : nil)
+        let resolvedSem64Data = sem64Candidate ?? (sharesBackbone ? Self.discoverResource("lokey_lnlm_sem64") : nil)
 
         let spelling = spellingData ?? Self.discoverResource("lokey_spelling")
         self.spellingData = spelling
@@ -311,7 +347,9 @@ public final class MmapLexicon: @unchecked Sendable {
             nsData: nsData,
             stringPoolOffset: headerVals.15,
             stringPoolSize: headerVals.14,
-            backwardData: resolvedBwdData
+            backwardData: resolvedBwdData,
+            typoRerankerData: resolvedLntrData,
+            semantic64Data: resolvedSem64Data
         )
 
         // Only the existing "=" namespace contains complete spoken readings. Bucket its
@@ -3152,6 +3190,90 @@ public final class MmapLexicon: @unchecked Sendable {
         return nil
     }
 
+    private static let cachedBundledMLPBytes: Data? = {
+        guard let lexData = discoverResource("lokey_lexicon") else { return nil }
+        let raw = UnsafeRawBufferPointer(start: lexData.bytes, count: lexData.length)
+        guard let slice = lnlmMLPSlice(in: raw), let base = raw.baseAddress else { return nil }
+        return Data(bytes: base.advanced(by: slice.offset), count: slice.length)
+    }()
+
+    private static func lnlmMLPSlice(in raw: UnsafeRawBufferPointer) -> (offset: Int, length: Int)? {
+        guard raw.count >= 72 + 25_376 + 16 else { return nil }
+        let footerOff = raw.count - 16
+        guard loadU32(raw, at: footerOff) == NeuralSentenceScorer.magicLNLM,
+              loadU32(raw, at: footerOff + 4) == 2 else {
+            return nil
+        }
+        let off = Int(loadU32(raw, at: footerOff + 8))
+        let sz = Int(loadU32(raw, at: footerOff + 12))
+        guard off >= 72, sz >= 25_376, off <= footerOff - sz else { return nil }
+        guard loadU32(raw, at: off) == NeuralSentenceScorer.magicLNLM,
+              loadU32(raw, at: off + 4) == 32 else {
+            return nil
+        }
+        let mlpOff = Int(loadU32(raw, at: off + 28))
+        let mlpLen = 6336 * 4
+        guard mlpOff >= off + 32, mlpOff <= off + sz - mlpLen else { return nil }
+        return (mlpOff, mlpLen)
+    }
+
+    private static func sharesBundledNeuralBackbone(_ raw: UnsafeRawBufferPointer) -> Bool {
+        guard let slice = lnlmMLPSlice(in: raw), let rawBase = raw.baseAddress else {
+            return false
+        }
+        guard let bundled = cachedBundledMLPBytes else {
+            return true
+        }
+        guard bundled.count == slice.length else { return false }
+        return bundled.withUnsafeBytes { bPtr -> Bool in
+            guard let bBase = bPtr.baseAddress else { return false }
+            return memcmp(rawBase.advanced(by: slice.offset), bBase, slice.length) == 0
+        }
+    }
+
+    private static func extractEmbeddedLKEXSlices(
+        from nsData: NSData,
+        raw: UnsafeRawBufferPointer
+    ) -> (bwd: NSData?, lntr: NSData?, sem64: NSData?) {
+        guard raw.count >= 72 + 25_376 + 48, let base = raw.baseAddress else {
+            return (nil, nil, nil)
+        }
+        let footerOff = raw.count - 16
+        guard loadU32(raw, at: footerOff) == NeuralSentenceScorer.magicLNLM,
+              loadU32(raw, at: footerOff + 4) == 2 else {
+            return (nil, nil, nil)
+        }
+        let off = Int(loadU32(raw, at: footerOff + 8))
+        let sz = Int(loadU32(raw, at: footerOff + 12))
+        guard off >= 72, sz >= 25_376, off <= footerOff - sz else {
+            return (nil, nil, nil)
+        }
+        guard let unwrapped = try? NeuralSentenceScorer.parseEmbeddedLKEXRanges(
+            in: raw,
+            endOfLNLM: off + sz,
+            footerOffset: footerOff,
+            validatePayloads: false
+        ) else {
+            return (nil, nil, nil)
+        }
+
+        func zeroCopySlice(_ range: Range<Int>?) -> NSData? {
+            guard let r = range, r.count > 0 else { return nil }
+            let d = Data(
+                bytesNoCopy: UnsafeMutableRawPointer(mutating: base.advanced(by: r.lowerBound)),
+                count: r.count,
+                deallocator: .custom { _, _ in withExtendedLifetime(nsData) {} }
+            )
+            return d as NSData
+        }
+
+        return (
+            zeroCopySlice(unwrapped.bwd),
+            zeroCopySlice(unwrapped.lntr),
+            zeroCopySlice(unwrapped.sem64)
+        )
+    }
+
     // MARK: - Low-Level Raw Pointer Helpers
 
     @inline(__always)
@@ -3810,6 +3932,24 @@ public enum LokeyLexiconPackManager {
             try fm.moveItem(at: stagingPackURL, to: destPackURL)
         }
 
+        for ext in [".bwd", ".lntr", ".sem64"] {
+            let dstSidecar = URL(fileURLWithPath: destPackURL.path + ext)
+            if !isInboxURL(sourceURL) {
+                let srcSidecar = URL(fileURLWithPath: sourceURL.path + ext)
+                if srcSidecar.standardizedFileURL == dstSidecar.standardizedFileURL {
+                    continue
+                }
+                if fm.isReadableFile(atPath: srcSidecar.path),
+                   let sidecarData = try? NSData(contentsOf: srcSidecar, options: [.mappedIfSafe]),
+                   sidecarData.length > 0,
+                   sidecarData.length <= 16 * 1024 * 1024 {
+                    try? sidecarData.write(to: dstSidecar, options: [.atomic])
+                    continue
+                }
+            }
+            try? fm.removeItem(at: dstSidecar)
+        }
+
         if activate {
             let activeCfg = LokeyLexiconPackActiveConfig(activeFileName: fileName, sha256: summary.sha256)
             let activeData = try encoder.encode(activeCfg)
@@ -3950,6 +4090,9 @@ public enum LokeyLexiconPackManager {
         let wasActive = configuredActiveFileName(in: dir, defaults: defaults) == safeFile
         try? fm.removeItem(at: dir.appendingPathComponent(safeFile))
         try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".json"))
+        try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".bwd"))
+        try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".lntr"))
+        try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".sem64"))
         if wasActive {
             activateBuiltInLexicon(in: lexiconsDirectory, defaults: defaults)
         }

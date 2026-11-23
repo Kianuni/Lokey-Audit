@@ -725,6 +725,7 @@ public final class KeyboardViewController: UIInputViewController {
     internal var onAdvanceToNextInputModeForTesting: (() -> Void)?
     internal var onSuperHandleInputModeListForTesting: ((UIView, UIEvent) -> Void)?
     internal var activeDecoderLexiconForTesting: MmapLexicon? { session?.decoder.lexicon }
+    internal var activeSessionForTesting: LokeySessionController? { session }
     internal var isBaseLexiconReloadPendingForTesting: Bool { pendingBaseLexiconReload }
     internal static func resetSharedLexiconCacheForTesting() {
         SharedLexiconHolder.resetForTesting()
@@ -831,7 +832,7 @@ public final class KeyboardViewController: UIInputViewController {
         let canQueryHostXPCOnLoad = !isRunningInExtensionProcess || customTextDocumentProxyForTesting != nil
         if canQueryHostXPCOnLoad {
             cachedHasFullAccess = hasFullAccess
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
             if cachedHasFullAccess {
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -926,7 +927,7 @@ public final class KeyboardViewController: UIInputViewController {
         refreshCachedHostTopPadding()
         updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
         if cachedHasFullAccess {
-            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
+            let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
             publishExtensionVisibility(isVisible: true)
             Self.extensionStateIOQueue.async {
                 LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
@@ -947,6 +948,7 @@ public final class KeyboardViewController: UIInputViewController {
         composingContextAnchor = ""
         let appearBefore = textDocumentProxy.documentContextBeforeInput
         contextTracker.reset(proxyBefore: appearBefore)
+        session?.resetTopicMemory()
         session?.notifyContextBreak()
         reloadPreferencesFromAppGroup(refreshFullAccess: false)
         reloadBaseLexiconIfNeeded()
@@ -1071,6 +1073,7 @@ public final class KeyboardViewController: UIInputViewController {
         activeDocumentGeneration &+= 1
         composingContextAnchor = ""
         contextTracker.reset(proxyBefore: nil)
+        session?.resetTopicMemory()
         session?.notifyContextBreak()
         session?.decoder.spatialModel.flushCalibrationToDiskIfNeeded(force: true)
         LokeyDiagnosticLogger.shared.flushAsync()
@@ -1361,7 +1364,7 @@ public final class KeyboardViewController: UIInputViewController {
            shouldSuppressHostChangeEcho(at: now) {
             if pendingSelfEchoMaySwitchField {
                 let currentDocID = currentDocumentIdentifier()
-                let didSwitchDoc = activeDocumentID != nil && currentDocID != nil && activeDocumentID != currentDocID
+                let didSwitchDoc = didSwitchDocumentIdentifier(to: currentDocID)
                 let secure = textDocumentProxy.isSecureTextEntry == true
                 if !didSwitchDoc && secure == session?.isSecureContext {
                     pendingSelfEchoCount -= 1
@@ -1376,7 +1379,7 @@ public final class KeyboardViewController: UIInputViewController {
             }
         }
         let currentDocID = currentDocumentIdentifier()
-        let didSwitchDoc = activeDocumentID != nil && currentDocID != nil && activeDocumentID != currentDocID
+        let didSwitchDoc = didSwitchDocumentIdentifier(to: currentDocID)
         let secure = textDocumentProxy.isSecureTextEntry == true
         if didSwitchDoc || secure != session?.isSecureContext {
             // A delayed echo from the previous field must never publish its pending text in the new one.
@@ -1390,13 +1393,18 @@ public final class KeyboardViewController: UIInputViewController {
             composingContextAnchor = ""
             contextTracker.reset(proxyBefore: nil)
             session?.resetComposing()
+            session?.resetTopicMemory()
             session?.notifyContextBreak()
             candidateBar.resetTouchTracking()
             keyGrid.resetTransientInteractions()
             if didSwitchDoc { hasSyncedTraitsForActiveDocument = false }
             flushPendingBaseLexiconReloadIfNeeded()
         }
-        if let currentDocID { activeDocumentID = currentDocID }
+        if let currentDocID {
+            activeDocumentID = currentDocID
+        } else if didSwitchDoc {
+            activeDocumentID = nil
+        }
         setSecureContext(secure)
 
         if session?.isComposing == true {
@@ -1468,6 +1476,9 @@ public final class KeyboardViewController: UIInputViewController {
             isComposing: isComposing
         )
         if didBreak || didSwitchDoc {
+            if didSwitchDoc {
+                session?.resetTopicMemory()
+            }
             session?.notifyContextBreak()
         }
         if !isComposing {
@@ -1510,6 +1521,7 @@ public final class KeyboardViewController: UIInputViewController {
         guard let lexicon = lexiconOverride ?? SharedLexiconHolder.currentLexicon() else { return nil }
         let prevSecure = self.session?.isSecureContext ?? false
         let prevExternalContext = self.session?.externalContextBeforeInput
+        self.session?.resetTopicMemory()
         self.activeLexiconObjectID = ObjectIdentifier(lexicon)
         let cachedCal = SharedLexiconHolder.cachedCalibrationSnapshot()
         self.lastCalibrationMTime = cachedCal?.mtime ?? -2
@@ -1531,6 +1543,7 @@ public final class KeyboardViewController: UIInputViewController {
         )
         newSession.isSecureContext = prevSecure
         newSession.externalContextBeforeInput = prevExternalContext
+        newSession.resetTopicMemory()
         self.session = newSession
         self.session?.prewarmEngineAsync()
         if refreshCalibration {
@@ -1675,6 +1688,8 @@ public final class KeyboardViewController: UIInputViewController {
         ) { [weak self] _ in
             self?.didReceiveHostResignOrBackground = true
             self?.pendingGlobeSwitchDeparture = false
+            self?.session?.resetTopicMemory()
+            self?.session?.notifyContextBreak()
             LokeyDiagnosticLogger.shared.flushAsync()
             LokeySelectionFeedbackLogger.shared.flushAsync()
         }
@@ -1730,6 +1745,7 @@ public final class KeyboardViewController: UIInputViewController {
                     self.pendingBaseLexiconReloadDefaults = defaults
                     return
                 }
+                self.session?.resetTopicMemory()
                 let latestSettings = self.setupEngine(lexiconOverride: newLexicon)
                 self.applyPreferences(latestSettings ?? LokeySettings.load())
                 self.syncModeUI()
@@ -1786,7 +1802,7 @@ public final class KeyboardViewController: UIInputViewController {
             let wasFullAccess = cachedHasFullAccess
             cachedHasFullAccess = self.hasFullAccess
             if cachedHasFullAccess && !wasFullAccess {
-                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.4"
+                let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
                 DispatchQueue.global(qos: .utility).async {
                     LokeyAppGroup.writeExtensionHeartbeat(hasFullAccess: true, bundleVersion: shortVer)
                 }
@@ -2240,6 +2256,16 @@ public final class KeyboardViewController: UIInputViewController {
         Self.safeDocumentIdentifier(from: self.textDocumentProxy)
     }
 
+    private func didSwitchDocumentIdentifier(to currentDocID: UUID?) -> Bool {
+        if let prev = activeDocumentID {
+            return currentDocID != prev
+        }
+        if currentDocID != nil, let session, session.topicMemoryVector != .zero {
+            return true
+        }
+        return false
+    }
+
     // MARK: - State Synchronization
 
     private func effectiveContextBeforeInput() -> String {
@@ -2265,6 +2291,18 @@ public final class KeyboardViewController: UIInputViewController {
                 return
             }
             let proxy = self.textDocumentProxy
+            let liveDocID = self.currentDocumentIdentifier()
+            let switchedDuringEcho = self.didSwitchDocumentIdentifier(to: liveDocID)
+            if let liveDocID {
+                self.activeDocumentID = liveDocID
+            } else if switchedDuringEcho {
+                self.activeDocumentID = nil
+            }
+            if switchedDuringEcho {
+                self.hasSyncedTraitsForActiveDocument = false
+                self.session?.resetTopicMemory()
+                self.session?.notifyContextBreak()
+            }
             self.setSecureContext(proxy.isSecureTextEntry == true)
             let rawLiveBefore = proxy.documentContextBeforeInput
             let effectiveLiveBefore: String?
@@ -2279,7 +2317,7 @@ public final class KeyboardViewController: UIInputViewController {
                 isComposing: false,
                 now: now
             )
-            if didBreak {
+            if didBreak && !switchedDuringEcho {
                 self.session?.notifyContextBreak()
             }
             let beforeEmpty = (effectiveLiveBefore ?? "").isEmpty

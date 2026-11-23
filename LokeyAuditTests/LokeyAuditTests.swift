@@ -247,8 +247,8 @@ final class LokeyAuditTests: XCTestCase {
         let hostBundle = Bundle.main
         XCTAssertEqual(hostBundle.bundleIdentifier, "com.kianuni.lokey.audit")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.4")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "82")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "83")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool, false)
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool, false)
         XCTAssertNil(hostBundle.object(forInfoDictionaryKey: "CFBundleDocumentTypes"))
@@ -258,8 +258,8 @@ final class LokeyAuditTests: XCTestCase {
         let extBundle = try XCTUnwrap(Bundle(url: extURL))
         XCTAssertEqual(extBundle.bundleIdentifier, "com.kianuni.lokey.audit.keyboard")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.4")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "82")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "83")
 
         XCTAssertEqual(Bundle(for: LokeyAuditTests.self).bundleIdentifier, "com.kianuni.lokey.audit.tests")
 
@@ -549,8 +549,18 @@ final class LokeyAuditTests: XCTestCase {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
         XCTAssertTrue((proxy.documentContextBeforeInput ?? "").contains("w"))
 
+        proxy.documentIdentifier = UUID()
+        proxy.documentContextBeforeInput = ""
+        vc.textDidChange(nil)
+        XCTAssertEqual(vc.activeSessionForTesting?.topicMemoryVector, .zero)
+
+        NotificationCenter.default.post(name: NSNotification.Name.NSExtensionHostDidEnterBackground, object: nil)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        XCTAssertEqual(vc.activeSessionForTesting?.topicMemoryVector, .zero)
+
         vc.didReceiveMemoryWarning()
         vc.beginAppearanceTransition(false, animated: false)
         vc.endAppearanceTransition()
+        XCTAssertEqual(vc.activeSessionForTesting?.topicMemoryVector, .zero)
     }
 }

@@ -124,6 +124,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         let preedit: String
         let topCandidate: LokeyCandidate
         let precedingContext: String?
+        let topicMemory: NeuralSentenceScorer.Vec32
         let settings: LokeySettings
         let result: DecodeResult
     }
@@ -162,6 +163,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         settings: LokeySettings,
         spatialModel: SpatialTouchModel,
         precedingContext: String?,
+        topicMemory: NeuralSentenceScorer.Vec32 = .zero,
         precomputedHyps: [[KeyHypothesis]]? = nil,
         isCancelled: () -> Bool = { false },
         isPastDeadline: () -> Bool = { false },
@@ -173,6 +175,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             settings: settings,
             spatialModel: spatialModel,
             precedingContext: precedingContext,
+            topicMemory: topicMemory,
             precomputedHyps: precomputedHyps,
             isCancelled: isCancelled,
             isPastDeadline: isPastDeadline,
@@ -189,6 +192,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         settings: LokeySettings,
         spatialModel: SpatialTouchModel,
         precedingContext: String?,
+        topicMemory: NeuralSentenceScorer.Vec32 = .zero,
         precomputedHyps: [[KeyHypothesis]]? = nil,
         isCancelled: () -> Bool = { false },
         isPastDeadline: () -> Bool = { false },
@@ -204,6 +208,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                    && $0.preedit == base.preeditDisplay
                    && $0.topCandidate == top
                    && $0.precedingContext == precedingContext
+                   && $0.topicMemory == topicMemory
                    && $0.settings == settings
            }) {
             return hit.result
@@ -215,6 +220,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             settings: settings,
             spatialModel: spatialModel,
             precedingContext: precedingContext,
+            topicMemory: topicMemory,
             precomputedHyps: precomputedHyps,
             isCancelled: isCancelled,
             isPastDeadline: isPastDeadline,
@@ -222,7 +228,10 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         )
         if !isCancelled() && !isUrgentCommit() {
             if let dupIdx = recentRefineHistory.firstIndex(where: {
-                $0.samples == samples && $0.preedit == base.preeditDisplay && $0.precedingContext == precedingContext
+                $0.samples == samples
+                    && $0.preedit == base.preeditDisplay
+                    && $0.precedingContext == precedingContext
+                    && $0.topicMemory == topicMemory
             }) {
                 recentRefineHistory.remove(at: dupIdx)
             } else if recentRefineHistory.count >= 24 {
@@ -234,6 +243,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                     preedit: base.preeditDisplay,
                     topCandidate: top,
                     precedingContext: precedingContext,
+                    topicMemory: topicMemory,
                     settings: settings,
                     result: refined
                 )
@@ -249,6 +259,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         settings: LokeySettings,
         spatialModel: SpatialTouchModel,
         precedingContext: String?,
+        topicMemory: NeuralSentenceScorer.Vec32,
         precomputedHyps: [[KeyHypothesis]]?,
         isCancelled: () -> Bool,
         isPastDeadline: () -> Bool,
@@ -373,7 +384,15 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             return false
         }()
 
-        let effectiveLiteral = preLiteral || preActivePrefixTail || hasIncompleteConsonantTail
+        let lntrActive = lexicon.neuralLM.isTypoRerankerLoaded
+        let hasMidVowelIsland = top.matchedSyllables.dropFirst().contains(where: { $0 == "o" || $0 == "e" })
+        let isFracturedVowelIslandLiteral = preLiteral
+            && hasMidVowelIsland
+            && top.matchedSyllables.count >= 4
+            && top.scoreQ8 < top.matchedSyllables.count * -1420
+        let effectiveLiteral = (preLiteral && !(lntrActive && isFracturedVowelIslandLiteral))
+            || preActivePrefixTail
+            || hasIncompleteConsonantTail
         if effectiveLiteral && n >= 22 && top.scoreQ8 >= top.matchedSyllables.count * -1820 {
             return base
         }
@@ -453,7 +472,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         let cleanReferenceScore = cleanScore(decoderPinyin)
         let decoderLattice = cleanReferenceScore ?? (top.scoreQ8 + decoderCost)
 
-        let literal = preLiteral
+        let literal = preLiteral && !(lntrActive && isFracturedVowelIslandLiteral)
         let maxPrimaryDrift = precomputedMaxDrift ?? hyps.reduce(0) { acc, list in
             max(acc, list.first?.penaltyQ8 ?? 0)
         }
@@ -653,6 +672,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                 spelling,
                 settings: cleanSettings,
                 precedingContext: precedingContext,
+                topicMemory: topicMemory,
                 fastCleanSentenceOnly: true,
                 skipStage5CAssociations: true,
                 isCancelled: cancelOrHardExpired,
@@ -680,13 +700,39 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             ? max(rawReferenceTotal, top.scoreQ8)
             : rawReferenceTotal
         var incumbentTotal = referenceTotal
-        var classical: (candidate: LokeyCandidate, total: Int, cost: Int)?
+        var rawIncumbentTotal = referenceTotal
+        var classical: (candidate: LokeyCandidate, total: Int, rawTotal: Int, cost: Int)?
         var surfaces: [String: (candidate: LokeyCandidate, score: Int, cost: Int)] = [:]
+        let allowedSylSlack = (cleanReferenceScore == nil || (lntrActive && isFracturedVowelIslandLiteral)) ? 1 : 0
+        var typoFeatCache: [String: [Float]] = [:]
+
+        func typoFeatures(for cand: LokeyCandidate, readingBytes: [UInt8], cost: Int) -> [Float] {
+            let cacheKey = "\(cand.text)\0\(cost)"
+            if let existing = typoFeatCache[cacheKey] {
+                return existing
+            }
+            let feat = computeTypoCandidateFeatures(
+                cand: cand,
+                readingBytes: readingBytes,
+                cost: cost,
+                typed: typed,
+                hyps: hyps,
+                maxPrimaryDrift: maxPrimaryDrift,
+                precedingContext: precedingContext,
+                topicMemory: topicMemory
+            )
+            typoFeatCache[cacheKey] = feat
+            return feat
+        }
+
+        let refTypoFeat: [Float] = lntrActive
+            ? typoFeatures(for: reference, readingBytes: decoderPinyin, cost: decoderCost)
+            : []
 
         func collect(_ c: LokeyCandidate, score: Int, cost: Int) {
             guard inspectSpelling, c.kind == .sentence || c.kind == .lexiconPhrase,
                   c.matchedSyllables.allSatisfy({ lexicon.syllableToID[$0] != nil }),
-                  c.matchedSyllables.count >= reference.matchedSyllables.count - (cleanReferenceScore == nil ? 1 : 0),
+                  c.matchedSyllables.count >= reference.matchedSyllables.count - allowedSylSlack,
                   score > (surfaces[c.text]?.score ?? Int.min) else { return }
             surfaces[c.text] = (c, score, cost)
         }
@@ -708,10 +754,28 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                first.consumedInputCount == alt.count, !first.matchedSyllables.isEmpty,
                first.kind == .sentence || first.kind == .lexiconPhrase || first.kind == .userPhrase,
                first.text.allSatisfy({ ViterbiDecoder.isCJKIdeograph($0) }),
-               first.matchedSyllables.count >= reference.matchedSyllables.count {
-                let total = first.scoreQ8 - cost
+               first.matchedSyllables.count >= reference.matchedSyllables.count - allowedSylSlack {
+                let lntrBonus: Int
+                if lntrActive && first.text != reference.text {
+                    let firstFeat = typoFeatures(for: first, readingBytes: alt, cost: cost)
+                    var rawBonus = lexicon.neuralLM.scoreTypoDeltaQ8(challenger: firstFeat, incumbent: refTypoFeat)
+                    if decoderCost == 0 && cost > 0 && typedIsClean && !isFracturedVowelIslandLiteral && cleanReferenceScore != nil {
+                        rawBonus = min(0, rawBonus)
+                    } else if rawBonus < 0, cost <= decoderCost + costs.deletion,
+                              let fLL = lexicon.spellingLikelihood(first.text),
+                              let rLL = lexicon.spellingLikelihood(reference.text),
+                              fLL - rLL >= 1400 {
+                        rawBonus = 0
+                    }
+                    lntrBonus = rawBonus
+                } else {
+                    lntrBonus = 0
+                }
+                let rawTotal = first.scoreQ8 - cost
+                let total = rawTotal + lntrBonus
                 if first.text == top.text {
                     incumbentTotal = max(incumbentTotal, total)
+                    rawIncumbentTotal = max(rawIncumbentTotal, rawTotal)
                 } else {
                     let extraEditOverConfirmedPrimary = confirmedPrimary && cost >= decoderCost + costs.transposition
                     let effectiveRefTotal = extraEditOverConfirmedPrimary ? max(referenceTotal, top.scoreQ8) : referenceTotal
@@ -720,7 +784,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                             // Never overwrite an exact mixed-Jianpin subsequence expansion (`yjfalexinbanle -> 已经发了新版了`)
                             // with a non-subsequence key substitution (`引发了新版了`).
                         } else {
-                            classical = (first, total, cost)
+                            classical = (first, total, rawTotal, cost)
                         }
                     }
                 }
@@ -734,7 +798,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                 }
             }
         }
-        let traditional = classical.flatMap { cand -> (candidate: LokeyCandidate, total: Int, cost: Int)? in
+        let traditional = classical.flatMap { cand -> (candidate: LokeyCandidate, total: Int, rawTotal: Int, cost: Int)? in
             let extraEditOverConfirmedPrimary = confirmedPrimary && cand.cost >= decoderCost + costs.transposition
             let effectiveIncumbent = extraEditOverConfirmedPrimary ? max(incumbentTotal, top.scoreQ8) : incumbentTotal
             return cand.total > effectiveIncumbent + margin ? cand : nil
@@ -760,10 +824,14 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
         }
         if inspectSpelling, let prior = lexicon.spellingLikelihood(incumbent.text) {
             let entry = surfaces[incumbent.text]
-            let baselineScore = incumbent.text == top.text ? incumbentTotal : (promoted?.total ?? incumbentTotal)
+            let baselineScore = incumbent.text == top.text ? rawIncumbentTotal : (promoted?.rawTotal ?? rawIncumbentTotal)
             let score = max(entry?.score ?? Int.min, baselineScore)
             let cost = entry?.cost ?? (promoted?.cost ?? decoderCost)
             let boundary = lexicon.spellingBoundary(incumbent.text, trailingWord: incumbent.trailingWord)
+            let incReadingBytes = Array(incumbent.matchedSyllables.joined().utf8)
+            let incTypoFeat: [Float] = lntrActive
+                ? typoFeatures(for: incumbent, readingBytes: incReadingBytes, cost: cost)
+                : []
             var alternatives: [(candidate: LokeyCandidate, gain: Int, cost: Int, boundaryGain: Int)] = []
             for (text, other) in surfaces where text != incumbent.text {
                 if other.score <= score - 5200 { continue }
@@ -781,21 +849,42 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                     return incTail.count >= 2 ? lexicon.spellingBoundary(incumbent.text, trailingWord: incTail) : boundary
                 }()
                 let boundaryDelta = (sharedBoundary ? 5 : 1) * (evidence - incumbentBoundaryAtSplit)
-                let clampedDelta = (!sharedBoundary && typedIsClean && n <= 10 && cleanReferenceScore != nil && other.score < score + 220)
+                let clampedDelta = (!sharedBoundary && typedIsClean && !isFracturedVowelIslandLiteral && n <= 10 && cleanReferenceScore != nil && other.score < score + 220)
                     ? max(-2200, min(160, delta))
                     : max(-2200, min(2200, delta))
-                let gain = other.score - score + clampedDelta + min(1800, max(-1800, boundaryDelta))
+                let lntrDelta: Int
+                if lntrActive {
+                    let otherBytes = Array(other.candidate.matchedSyllables.joined().utf8)
+                    let otherFeat = typoFeatures(for: other.candidate, readingBytes: otherBytes, cost: other.cost)
+                    var rawDelta = lexicon.neuralLM.scoreTypoDeltaQ8(challenger: otherFeat, incumbent: incTypoFeat)
+                    if cost == 0 && other.cost > 0 && typedIsClean && !isFracturedVowelIslandLiteral && cleanReferenceScore != nil {
+                        rawDelta = min(0, rawDelta)
+                    } else if other.cost <= cost + costs.deletion && (ll - prior) >= 1400 {
+                        rawDelta = max(0, rawDelta)
+                    }
+                    lntrDelta = rawDelta
+                } else {
+                    lntrDelta = 0
+                }
+                let gain = other.score - score + clampedDelta + min(1800, max(-1800, boundaryDelta)) + lntrDelta
                 if gain > -1200 { alternatives.append((other.candidate, gain, other.cost, evidence - boundary)) }
             }
             alternatives.sort { $0.gain != $1.gain ? $0.gain > $1.gain : $0.candidate.text < $1.candidate.text }
             trace?("incumbent \(incumbent.text) cost \(cost) prior \(prior) boundary \(boundary) candidates " +
                 alternatives.prefix(12).map { "\($0.candidate.text):\($0.gain)/\($0.cost)/\($0.candidate.trailingWord ?? "-")" }.joined(separator: " "))
-            if let first = alternatives.first,
-               first.candidate.text.count == incumbent.text.count
-                   || first.candidate.text.count == top.text.count
-                   || cleanReferenceScore == nil
-                   || (!typedIsClean && first.gain >= 1400 && first.cost <= cost + 480),
-               first.cost <= cost + 620 {
+            for (altIdx, first) in alternatives.prefix(2).enumerated() {
+                if altIdx == 1 {
+                    guard out.isEmpty,
+                          let skipped = alternatives.first,
+                          skipped.candidate.text.count != incumbent.text.count,
+                          skipped.candidate.text.count != top.text.count else { break }
+                }
+                guard first.candidate.text.count == incumbent.text.count
+                        || first.candidate.text.count == top.text.count
+                        || cleanReferenceScore == nil
+                        || (!typedIsClean && first.gain >= 1400 && first.cost <= cost + 480)
+                        || (lntrActive && isFracturedVowelIslandLiteral && first.candidate.text.count == top.text.count - 1 && first.gain >= 800),
+                      first.cost <= cost + 620 else { continue }
                 // When a second edit would alter a different part of the sentence,
                 // require independent word-boundary support (or overwhelming >= 1800 gain
                 // with strictly adjacent edits) before displacing #0.
@@ -810,6 +899,7 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
                 let withinCostLimit = first.cost <= cost + costs.insertion || strongAdjacentGain
                 if !introducesFarSub && withinCostLimit && first.gain > threshold && (!extraEdit || supportedBoundary || strongAdjacentGain) {
                     append(first.candidate)
+                    break
                 }
             }
             if out.isEmpty && incumbent.text == top.text { out.append(top) } else { append(incumbent) }
@@ -1851,5 +1941,199 @@ public final class NoisyChannelRefiner: @unchecked Sendable {
             words.reverse()
             return (words.joined(), words.last)
         }
+    }
+
+    // MARK: - Neural Blind-Typing Typo Reranker (`LNTR-v1`) Feature Helpers
+
+    private func segmentCandidateWords(_ text: String, syllables: [String], trailingWord: String?) -> [String] {
+        let chars = Array(text)
+        guard !chars.isEmpty else { return [] }
+        let hasMatchedSyls = (chars.count == syllables.count)
+        let lockedTailLen: Int
+        if let tw = trailingWord, !tw.isEmpty, tw.count < chars.count, text.hasSuffix(tw) {
+            lockedTailLen = tw.count
+        } else {
+            lockedTailLen = 0
+        }
+        let bodyCount = chars.count - lockedTailLen
+        var out: [String] = []
+        out.reserveCapacity(max(1, chars.count / 2 + 1))
+        var pos = 0
+        while pos < bodyCount {
+            var matchedLen = 1
+            let maxLen = min(4, bodyCount - pos)
+            if maxLen >= 2 {
+                for len in stride(from: maxLen, through: 2, by: -1) {
+                    let piece = String(chars[pos..<(pos + len)])
+                    if hasMatchedSyls {
+                        let subSyls = Array(syllables[pos..<(pos + len)])
+                        if lexicon.lookupExactWords(forSyllables: subSyls, limit: 8).contains(where: { $0.text == piece }) {
+                            matchedLen = len
+                            break
+                        }
+                    } else if lexicon.neuralLM.lookupWordTableEmbedding(piece) != nil {
+                        matchedLen = len
+                        break
+                    }
+                }
+            }
+            out.append(String(chars[pos..<(pos + matchedLen)]))
+            pos += matchedLen
+        }
+        if lockedTailLen > 0, let tw = trailingWord {
+            out.append(tw)
+        }
+        return out
+    }
+
+    private func typoAlignmentBreakdown(
+        typed: [UInt8],
+        intended: [UInt8],
+        hyps: [[KeyHypothesis]]
+    ) -> (subst: Int, omit: Int, trans: Int, del: Int, matchedGainQ8: Int) {
+        let n = typed.count, m = intended.count
+        guard n > 0, m > 0 else {
+            return (0, m, 0, n, 0)
+        }
+        let stride = m + 1
+        var dp = [Int](repeating: Int.max / 4, count: (n + 1) * stride)
+        var backOp = [UInt8](repeating: 0, count: (n + 1) * stride) // 0=match, 1=sub, 2=ins(omit), 3=del, 4=trans
+        let insCost = costs.insertion
+        let delCost = costs.deletion
+        let dupDelCost = costs.duplicateDeletion
+        let transCost = costs.transposition
+        let farCost = costs.farSubstitution
+
+        dp[0] = 0
+        for i in 1...n {
+            dp[i * stride] = i * delCost
+            backOp[i * stride] = 3
+        }
+        for j in 1...m {
+            dp[j] = j * insCost
+            backOp[j] = 2
+        }
+        for i in 1...n {
+            let t = typed[i - 1]
+            let dup = (i >= 2 && typed[i - 2] == t) || (i < n && typed[i] == t)
+            let extraKeyCost = dup ? dupDelCost : delCost
+            let hypBase = (i - 1 < hyps.count) ? (i - 1) * 26 : -1
+            for j in 1...m {
+                let w = intended[j - 1]
+                let idx = i * stride + j
+                if t == w {
+                    dp[idx] = dp[(i - 1) * stride + (j - 1)]
+                    backOp[idx] = 0
+                } else {
+                    let subCost = (hypBase >= 0 && w >= 0x61 && w <= 0x7A)
+                        ? hypCostBuf[hypBase + Int(w - 0x61)]
+                        : farCost
+                    dp[idx] = dp[(i - 1) * stride + (j - 1)] + subCost
+                    backOp[idx] = 1
+                }
+                let delCand = dp[(i - 1) * stride + j] + extraKeyCost
+                if delCand < dp[idx] {
+                    dp[idx] = delCand
+                    backOp[idx] = 3
+                }
+                let stepInsCost = (w == 0x67 && j >= 2 && intended[j - 2] == 0x6E && t == 0x6E)
+                    ? max(240, insCost - 140)
+                    : insCost
+                let insCand = dp[i * stride + (j - 1)] + stepInsCost
+                if insCand < dp[idx] {
+                    dp[idx] = insCand
+                    backOp[idx] = 2
+                }
+                if i >= 2, j >= 2, t == intended[j - 2], typed[i - 2] == w, t != w {
+                    let trCand = dp[(i - 2) * stride + (j - 2)] + transCost
+                    if trCand < dp[idx] {
+                        dp[idx] = trCand
+                        backOp[idx] = 4
+                    }
+                }
+            }
+        }
+
+        var subst = 0, omit = 0, trans = 0, del = 0, matchedGainQ8 = 0
+        var ci = n, cj = m
+        while ci > 0 || cj > 0 {
+            let op = backOp[ci * stride + cj]
+            switch op {
+            case 0:
+                if ci - 1 < hyps.count {
+                    let target = Character(UnicodeScalar(intended[cj - 1]))
+                    let pPen = hyps[ci - 1].first(where: { $0.char == target })?.penaltyQ8 ?? 0
+                    matchedGainQ8 += max(0, 260 - pPen)
+                }
+                ci -= 1
+                cj -= 1
+            case 1:
+                subst += 1
+                if ci - 1 < hyps.count {
+                    let target = Character(UnicodeScalar(intended[cj - 1]))
+                    if let h = hyps[ci - 1].first(where: { $0.char == target }) {
+                        matchedGainQ8 += max(0, 340 - h.penaltyQ8)
+                    }
+                }
+                ci -= 1
+                cj -= 1
+            case 2:
+                omit += 1
+                cj -= 1
+            case 3:
+                del += 1
+                ci -= 1
+            case 4:
+                trans += 1
+                ci -= 2
+                cj -= 2
+            default:
+                if ci > 0 { ci -= 1 }
+                if cj > 0 { cj -= 1 }
+            }
+        }
+        return (subst, omit, trans, del, matchedGainQ8)
+    }
+
+    private func computeTypoCandidateFeatures(
+        cand: LokeyCandidate,
+        readingBytes: [UInt8],
+        cost: Int,
+        typed: [UInt8],
+        hyps: [[KeyHypothesis]],
+        maxPrimaryDrift: Int,
+        precedingContext: String?,
+        topicMemory: NeuralSentenceScorer.Vec32 = .zero
+    ) -> [Float] {
+        let words = segmentCandidateWords(cand.text, syllables: cand.matchedSyllables, trailingWord: cand.trailingWord)
+        let stats = typoAlignmentBreakdown(typed: typed, intended: readingBytes, hyps: hyps)
+        let spellingLL = lexicon.spellingLikelihood(cand.text)
+        let boundaryQ8 = lexicon.spellingBoundary(cand.text, trailingWord: cand.trailingWord)
+        let cleanLatQ8 = cleanScore(readingBytes) ?? (cand.scoreQ8 + cost)
+        let fwdQ8 = lexicon.neuralLM.scoreWholeSentence(
+            words: words,
+            precedingContext: precedingContext,
+            topicMemory: topicMemory
+        )
+        let bwdQ8 = lexicon.neuralLM.isBackwardLoaded ? lexicon.neuralLM.scoreBackwardSentence(words: words) : 0
+        return lexicon.neuralLM.extractTypoFeatures(
+            typedCount: typed.count,
+            intendedCount: readingBytes.count,
+            syllableCount: cand.matchedSyllables.count,
+            alignCostQ8: cost,
+            substCount: stats.subst,
+            omitCount: stats.omit,
+            transposeCount: stats.trans,
+            deleteCount: stats.del,
+            maxPrimaryDriftQ8: maxPrimaryDrift,
+            matchedTouchGainQ8: stats.matchedGainQ8,
+            viterbiScoreQ8: cand.scoreQ8,
+            cleanLatticeQ8: cleanLatQ8,
+            fwdNeuralQ8: fwdQ8,
+            bwdNeuralQ8: bwdQ8,
+            spellingLL: spellingLL,
+            spellingBoundary: boundaryQ8,
+            words: words
+        )
     }
 }
