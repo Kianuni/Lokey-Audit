@@ -1,4 +1,4 @@
-# Lokey-Audit (v0.9.5 · Build 83)
+# Lokey-Audit (v0.9.5 · Build 84)
 
 **Lokey Security Audit Repository · 纯离线零联网安全审计仓库**
 
@@ -78,7 +78,7 @@ Lokey 内置 100% 开放许可的基础词库（开箱即用，无需联网）�
 ### 1. 社区开源扩展词库参考（独立仓库）
 - **`Kianuni/lokey-frost-pack`**（独立 `GPL-3.0` 开源词库与离线编译仓库）：
   - 仓库主页：<https://github.com/Kianuni/lokey-frost-pack>
-  - 最新预编译 Release 下载：<https://github.com/Kianuni/lokey-frost-pack/releases/latest>（下载其中的 `rime-frost.lokeypack`；约 `44.19 MB`，含 `553,351` 条中文词条、单文件内嵌端侧神经打分/盲打纠错/语境记忆权重及可独立校验的 `.sha256` 文件）
+  - 最新预编译 Release 下载：<https://github.com/Kianuni/lokey-frost-pack/releases/latest>（下载其中的 `rime-frost.lokeypack`；约 `44.32 MB`，含 `553,352` 条中文词条、单文件内嵌端侧神经打分/盲打纠错/语境记忆权重及可独立校验的 `.sha256` 文件）
 
 ### 2. iOS 设备导入步骤
 1. **下载保存至「文件」App**：用系统浏览器打开上方 Releases 页面下载 `*.lokeypack` 文件至 iPhone「文件」App（或从 Mac 隔空投送 AirDrop 到 iPhone）。
