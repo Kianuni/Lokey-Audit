@@ -4,146 +4,297 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Lokey · 落键 — 原生手感、零学习成本的物理零联网 iOS 中文输入法</title>
-  <meta name="description" content="Lokey（落键）是一款 1:1 还原 iOS 26 Liquid Glass 原生手感、无需学习适应成本的纯离线物理零联网中文输入法：支持 26 键全拼与小鹤/自然码双拼、CoreHaptics 无级震动、个人盲打热区校准与 .lokeypack 零拷贝词库热挂载。" />
+  <meta name="description" content="Lokey（落键）是一款 1:1 对齐 iOS 26 原生手感、零学习适应成本的纯离线物理零联网中文输入法：搭载落墨 Inkstone 离线引擎、CoreHaptics 无级震动、26 键个人盲打热区校准与只读 mmap .lokeypack 词库热挂载。" />
   <link rel="icon" type="image/png" href="./assets/icon.png" />
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <div class="container">
+    <!-- Top Floating Capsule Navigation -->
     <header class="topbar">
       <a class="brand" href="#top">
         <img class="brand-icon" src="./assets/icon.png" alt="Lokey Icon" />
         <span>Lokey <span class="brand-sub" data-i18n="brandSub">· 落键</span></span>
       </a>
-      <div class="topbar-actions">
-        <button id="langToggle" class="pill-btn" type="button">EN / 中文</button>
-        <a class="pill-btn" href="https://github.com/Kianuni/Lokey-Audit" target="_blank" rel="noopener" data-i18n="navAudit">审计仓库</a>
-        <a class="pill-btn" href="https://github.com/Kianuni/lokey-frost-pack" target="_blank" rel="noopener" data-i18n="navPack">白霜词库包</a>
-        <a class="pill-btn" href="https://github.com/Kianuni" target="_blank" rel="noopener">Kianuni</a>
+
+      <div class="topbar-right">
+        <div class="seg-track" role="group" aria-label="Language">
+          <button id="langZhBtn" class="seg-btn active" type="button">中</button>
+          <button id="langEnBtn" class="seg-btn" type="button">EN</button>
+        </div>
+
+        <div class="seg-track" role="group" aria-label="Appearance">
+          <button id="themeLightBtn" class="seg-btn" type="button" data-i18n="themeLight">浅色</button>
+          <button id="themeDarkBtn" class="seg-btn" type="button" data-i18n="themeDark">深色</button>
+        </div>
+
+        <a class="nav-pill" href="https://github.com/Kianuni/Lokey-Audit" target="_blank" rel="noopener">Lokey-Audit</a>
+        <a class="nav-pill" href="https://github.com/Kianuni/lokey-frost-pack" target="_blank" rel="noopener" data-i18n="navPack">白霜包</a>
+        <a class="nav-pill" href="https://github.com/Kianuni" target="_blank" rel="noopener">Kianuni</a>
       </div>
     </header>
 
     <main id="top">
-      <!-- Hero -->
-      <section class="hero">
-        <div class="status-pill">
-          <span class="status-dot"></span>
-          <span data-i18n="heroBadge">0 网络框架 · 源码字节级可审计 · 无需开启「允许完全访问」</span>
-        </div>
-
-        <h1 data-i18n="heroTitle">原生手感，零学习成本。<br />物理零联网的 iOS 中文输入法。</h1>
-
-        <p class="hero-sub" data-i18n="heroSub">
-          从系统自带键盘切过来，手指不需要任何适应时间。1:1 延续 iOS 26 Liquid Glass 键位几何与肌肉记忆，搭载自研「落墨 · Inkstone」离线引擎——二进制层面彻底剔除网络能力，却依然聪明跟手。
-        </p>
-
-        <div class="cta-row">
-          <a class="btn btn-primary" href="https://github.com/Kianuni/Lokey-Audit" target="_blank" rel="noopener" data-i18n="ctaAudit">查看零联网审计仓库 →</a>
-          <a class="btn btn-secondary" href="https://github.com/Kianuni/lokey-frost-pack" target="_blank" rel="noopener" data-i18n="ctaPack">获取 55 万词白霜扩展包</a>
-          <a class="btn btn-ghost" href="#feel" data-i18n="ctaExplore">先看核心体验 ↓</a>
-        </div>
-
-        <div class="metrics-grid">
-          <div class="metric-card">
-            <div class="metric-value" data-i18n="m1Val">1:1 原生</div>
-            <div class="metric-label" data-i18n="m1Desc">iOS 26 Liquid Glass 视觉几何与交互肌肉记忆，零适应门槛</div>
+      <!-- Hero Split: Claim + 1:1 LokeyInkstoneHeroCard Replica -->
+      <section class="hero-split">
+        <div class="hero-copy">
+          <div class="status-line">
+            <span class="status-dot"></span>
+            <span data-i18n="heroKicker">物理级零联网 · 18 份核心源码字节级可审计</span>
           </div>
-          <div class="metric-card">
-            <div class="metric-value" data-i18n="m2Val">0 联网符号</div>
-            <div class="metric-label" data-i18n="m2Desc">不链接网络框架，不请求 Socket，关闭「完全访问」照样满血</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-value" data-i18n="m3Val">50.6 万+ 词</div>
-            <div class="metric-label" data-i18n="m3Desc">内置纯净基础词库 + 只读 mmap 零拷贝热挂载外置 .lokeypack</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-value" data-i18n="m4Val">全拼 &amp; 双拼</div>
-            <div class="metric-label" data-i18n="m4Desc">26 键全拼、小鹤 / 自然码双拼与简繁实时切换</div>
+
+          <h1 data-i18n="heroTitle">原生手感，零学习成本。<br />物理零联网的 iOS 中文输入法。</h1>
+
+          <p class="hero-sub" data-i18n="heroSub">
+            从系统自带键盘切换过来，手指无需任何适应时间。1:1 延续 iOS 26 液态玻璃键位几何与操作直觉，搭载自研「落墨 · Inkstone」离线引擎——二进制内彻底不含网络能力，却依然聪明跟手。
+          </p>
+
+          <div class="cta-row">
+            <a class="btn btn-primary" href="https://github.com/Kianuni/Lokey-Audit" target="_blank" rel="noopener" data-i18n="ctaAudit">查看零联网审计仓 →</a>
+            <a class="btn btn-secondary" href="https://github.com/Kianuni/lokey-frost-pack" target="_blank" rel="noopener" data-i18n="ctaPack">获取 55 万词白霜包</a>
           </div>
         </div>
+
+        <aside class="LokeyInkstoneHeroCard" aria-label="Lokey Inkstone Overview Card">
+          <div class="hero-card-top">
+            <img class="hero-app-icon" src="./assets/icon.png" alt="Lokey" />
+            <div>
+              <div class="hero-title-row">
+                <strong>Lokey</strong>
+                <span class="hero-pill-pill" data-i18n="cardScheme">全拼 / 双拼</span>
+                <span class="hero-pill-ver">Inkstone</span>
+              </div>
+              <div class="hero-engine-sub" data-i18n="cardEngineSub">落墨 · 32 维双向神经整句引擎</div>
+            </div>
+          </div>
+
+          <div class="hero-status-strip">
+            <span class="status-dot"></span>
+            <span data-i18n="cardStatusText">无需「允许完全访问」· 100% 离线盲打</span>
+            <span class="hero-offline-tag" data-i18n="cardOfflineTag">纯离线</span>
+          </div>
+
+          <div class="hero-telemetry-grid">
+            <div class="hero-metric-cell">
+              <span data-i18n="hm1Label">原生手感</span>
+              <strong>1:1</strong>
+              <span data-i18n="hm1Sub">零学习适应成本</span>
+            </div>
+            <div class="hero-metric-cell">
+              <span data-i18n="hm2Label">基础词库</span>
+              <strong data-i18n="hm2Val">50.6万 词</strong>
+              <span data-i18n="hm2Sub">mmap 零拷贝挂载</span>
+            </div>
+            <div class="hero-metric-cell">
+              <span data-i18n="hm3Label">盲打热区</span>
+              <strong data-i18n="hm3Val">26 键</strong>
+              <span data-i18n="hm3Sub">±20% 个人自适应</span>
+            </div>
+          </div>
+
+          <a class="ivory-action-bar" href="#inkstone">
+            <span data-i18n="cardAction">探索下方互动体验台与零联网审计</span>
+            <span>↓</span>
+          </a>
+        </aside>
       </section>
 
-      <!-- Section 1: Native Feel, Zero Learning Cost -->
+      <!-- Section 1: Zero Learning Curve (Gesture Gallery + Grouped Settings List) -->
       <section id="feel" class="section">
         <div class="section-header">
-          <span class="section-eyebrow" data-i18n="feelEyebrow">ZERO LEARNING CURVE</span>
-          <h2 data-i18n="feelTitle">换过来就会用：为什么说 Lokey 没有适应成本？</h2>
+          <div class="section-kicker" data-i18n="feelKicker">手感与交互</div>
+          <h2 data-i18n="feelTitle">换过来就会用：为什么说 Lokey 零学习成本？</h2>
           <p data-i18n="feelSub">
-            第三方输入法最劝退的往往是略微偏移的键帽比例、生硬的动画和陌生的交互逻辑。Lokey 选择先 1:1 复刻系统原生的肌肉记忆，再把聪明劲藏在手指落下之后。
+            第三方输入法最劝退的往往是微偏的键位比例与陌生的交互规则。Lokey 先 1:1 复刻系统原生键盘的肌肉记忆，再把触感调校与纠错能力悄悄做透。
           </p>
         </div>
 
-        <div class="cards-2">
-          <article class="glass-card">
-            <span class="card-tag" data-i18n="f1Tag">视觉与几何</span>
-            <h3 data-i18n="f1Title">1:1 iOS 26 Liquid Glass 与四档屏幕几何</h3>
-            <p data-i18n="f1Desc">
-              键盘根视图透明透出系统原生液态玻璃胶囊底座，精确校准 Max/Plus（268.5pt）、Pro/标准（250.0pt）、Mini/SE（239.0pt）与横屏（197.5pt）四档高度；7.0pt 连续曲率纯白键帽，空闲与输入态保持 0.0pt 光学中心零跳变。
-            </p>
-          </article>
+        <div class="split-2">
+          <!-- Left: 1:1 LokeyGestureGalleryCard -->
+          <div class="lokey-card">
+            <div class="card-head">
+              <span class="lokey-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M6 14l-1.5-1.5a2 2 0 0 0-2.8 2.8L8 21h7a4 4 0 0 0 4-4v-5a2 2 0 0 0-4 0"/></svg>
+              </span>
+              <h3><span data-i18n="gTitle">快捷手势</span></h3>
+              <span class="card-chip" data-i18n="gChip">原生交互</span>
+            </div>
 
-          <article class="glass-card">
-            <span class="card-tag" data-i18n="f2Tag">原生肌肉记忆</span>
-            <h3 data-i18n="f2Title">不改习惯的手势与智能标点</h3>
-            <p data-i18n="f2Desc">
-              空输入框原生高频起始候选（我 / 你 / 在 / 这...）；左滑删除键（⌫）一键清空整段待上屏长句；横拖 Shift 或长按空格微调未上屏拼音光标；数字与时间（12:00、3.14、v1.0、localhost:8080）自动输出半角标点，无需来回切符号页。
-            </p>
-          </article>
+            <div class="gesture-grid">
+              <div class="gesture-tile">
+                <div class="gesture-stage">
+                  <svg class="gesture-icon-sm" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+                  <span class="keycap keycap-ivory" style="min-width: 56px; font-size: 11.5px;" data-i18n="keySpace">空格</span>
+                  <svg class="gesture-icon-sm" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+                </div>
+                <div>
+                  <strong data-i18n="g1Title">长按空格移光标</strong>
+                  <span data-i18n="g1Desc">长按空格滑动正文光标；输入中也可横滑 ⇧ 改拼音</span>
+                </div>
+              </div>
 
-          <article class="glass-card">
-            <span class="card-tag" data-i18n="f3Tag">触感与声学</span>
-            <h3 data-i18n="f3Title">CoreHaptics 无级震动滑块 + 原生按键音</h3>
-            <p data-i18n="f3Desc">
-              基于 Apple CoreHaptics 提供 0%–100% 无级震动强度滑块与「关闭 / 轻柔 / 清脆」三档质感，配合三档系统原生按键音效，在主应用设置后通过 App Group 毫秒级同步至键盘。
-            </p>
-          </article>
+              <div class="gesture-tile">
+                <div class="gesture-stage">
+                  <svg class="gesture-icon-sm" viewBox="0 0 24 24"><path d="M19 12H7"/><path d="M12 7l-5 5 5 5"/><path d="M4 5v14"/></svg>
+                  <span class="keycap keycap-charcoal" style="min-width: 38px; font-size: 13px;">⌫</span>
+                </div>
+                <div>
+                  <strong data-i18n="g2Title">左滑一键清空</strong>
+                  <span data-i18n="g2Desc">在退格键向左轻扫，整句重输不累手</span>
+                </div>
+              </div>
 
-          <article class="glass-card">
-            <span class="card-tag" data-i18n="f4Tag">120Hz 响应</span>
-            <h3 data-i18n="f4Title">全异步防阻塞：手指按下零延迟</h3>
-            <p data-i18n="f4Desc">
-              触控路径严格隔离跨进程 XPC 阻塞，120Hz 键帽气泡先于宿主文本提交响应；原生自适应 Emoji 键盘支持离线标签快筛与 4×8 横滑，快打不掉帧。
-            </p>
-          </article>
+              <div class="gesture-tile">
+                <div class="gesture-stage">
+                  <span class="cand-chip-mini" data-i18n="g3Pill">自选词</span>
+                  <svg class="gesture-icon-sm" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
+                </div>
+                <div>
+                  <strong data-i18n="g3Title">长按候选删词</strong>
+                  <span data-i18n="g3Desc">长按候选栏中的自选词或自造词即可删除</span>
+                </div>
+              </div>
+
+              <div class="gesture-tile">
+                <div class="gesture-stage">
+                  <span class="keycap keycap-ivory keycap-sup" style="font-size: 12px;">Q<sup>1</sup></span>
+                  <span class="keycap keycap-charcoal" style="font-size: 10.5px;">123</span>
+                  <svg class="gesture-icon-sm" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+                </div>
+                <div>
+                  <strong data-i18n="g4Title">上滑数与纯英锁</strong>
+                  <span data-i18n="g4Desc">可选 Q–P 上滑出数字 · 长按 123 锁纯英</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: 1:1 LokeyRowLabel Spec Card -->
+          <div class="lokey-card">
+            <div class="card-head">
+              <span class="lokey-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2" fill="currentColor"/><circle cx="15" cy="12" r="2" fill="currentColor"/><circle cx="11" cy="17" r="2" fill="currentColor"/></svg>
+              </span>
+              <h3><span data-i18n="rTitle">原生系统规格对齐</span></h3>
+              <span class="card-chip">iOS 26</span>
+            </div>
+
+            <div class="row-list">
+              <div class="lokey-row">
+                <span class="lokey-symbol" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M7 10h.01M11 10h.01M15 10h.01M17 10h.01M8 15h8"/></svg>
+                </span>
+                <div class="lokey-row-text">
+                  <span class="lokey-row-title" data-i18n="r1Title">1:1 液态玻璃与四档屏幕几何</span>
+                  <span class="lokey-row-sub" data-i18n="r1Sub">全透明根视图透出原生 Liquid Glass 底座；精确对齐 Max/Plus (268.5pt)、Pro (250.0pt)、Mini/SE (239.0pt) 与横屏 (197.5pt)，空闲/输入态 0.0pt 光学跳变。</span>
+                </div>
+              </div>
+
+              <div class="lokey-row">
+                <span class="lokey-symbol" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M2 12h3M19 12h3M5 8v8M19 8v8"/><rect x="8" y="6" width="8" height="12" rx="2"/></svg>
+                </span>
+                <div class="lokey-row-text">
+                  <span class="lokey-row-title" data-i18n="r2Title">CoreHaptics 无级震动与原生声学</span>
+                  <span class="lokey-row-sub" data-i18n="r2Sub">0%–100% 连续震动滑块（关闭 / 轻柔 / 清脆）配合三档系统原生按键音效，经 App Group 毫秒级同步至键盘。</span>
+                </div>
+              </div>
+
+              <div class="lokey-row">
+                <span class="lokey-symbol" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg>
+                </span>
+                <div class="lokey-row-text">
+                  <span class="lokey-row-title" data-i18n="r3Title">全异步 120Hz 零延迟响应</span>
+                  <span class="lokey-row-sub" data-i18n="r3Sub">触控路径严守零 XPC 阻塞，120Hz 键帽气泡先于宿主文本提交响应；空框内置原生高频起始候选条（我 / 你 / 在 / 这...）。</span>
+                </div>
+              </div>
+
+              <div class="lokey-row">
+                <span class="lokey-symbol" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 10h.01M16 10h.01"/><path d="M8.5 14.5a4 4 0 0 0 7 0"/></svg>
+                </span>
+                <div class="lokey-row-text">
+                  <span class="lokey-row-title" data-i18n="r4Title">智能半角标点与原生 Emoji 面板</span>
+                  <span class="lokey-row-sub" data-i18n="r4Sub">输入 12:00、3.14、v1.0、localhost:8080 自动保持英文半角，中文语境自动全角；自带 4×8 横滑 Emoji 面板与离线标签快筛。</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
-      <!-- Section 2: Interactive Inkstone Engine Demo -->
+      <!-- Section 2: Interactive 26-Key Heatmap + Inkstone Decoder Lab -->
       <section id="inkstone" class="section">
         <div class="section-header">
-          <span class="section-eyebrow" data-i18n="labEyebrow">INKSTONE ENGINE · 落墨离线引擎</span>
-          <h2 data-i18n="labTitle">不联网，也能跟上你的盲打节奏</h2>
+          <div class="section-kicker" data-i18n="labKicker">落墨引擎 · 互动体验</div>
+          <h2 data-i18n="labTitle">不联网，也能默默贴合你的拇指与语境</h2>
           <p data-i18n="labSub">
-            点击下方场景，直观查看 Lokey 如何在完全离线状态下处理邻键误触、句首同音、中英混输与个人拇指落点偏差。
+            点击下方「26 键盲打热区云图」的任意按键查看真实偏移拟合方式，或切换右侧场景查看纯离线整句解码效果。
           </p>
         </div>
 
-        <div class="lab-shell">
-          <div class="tab-row" role="tablist">
-            <button class="lab-tab active" data-case="typo" type="button" data-i18n="tabTypo">邻键盲打纠错</button>
-            <button class="lab-tab" data-case="disambig" type="button" data-i18n="tabDisambig">双向同音消歧</button>
-            <button class="lab-tab" data-case="mixed" type="button" data-i18n="tabMixed">句内中英混输</button>
-            <button class="lab-tab" data-case="habit" type="button" data-i18n="tabHabit">个人热区 &amp; 零适应细节</button>
-          </div>
-
-          <div class="kbd-stage">
-            <div class="kbd-input-line">
-              <div>
-                <span id="labRaw" class="kbd-raw">renfuomeishi</span><span class="kbd-caret"></span>
+        <div class="split-2">
+          <!-- Left: 1:1 LokeyTouchHeatmapCard -->
+          <div class="lokey-card">
+            <div class="card-head">
+              <span class="lokey-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+              </span>
+              <div class="card-head-titles">
+                <h3 data-i18n="hmTitle">26 键盲打热区云图</h3>
+                <span class="card-head-sub" data-i18n="hmSub">示例预览 · 2×2 协方差高斯校准 · 上限 ±20%</span>
               </div>
-              <span id="labBadge" class="kbd-mode-badge">全拼 · 邻键盲打</span>
+              <span class="card-chip" data-i18n="hmChip">点按交互</span>
             </div>
 
-            <div id="labCandidates" class="candidates-bar"></div>
+            <div id="heatmapDeck" class="heatmap-deck" aria-label="Interactive 26-Key Touch Heatmap"></div>
 
-            <div class="lab-explain">
-              <div class="lab-explain-main">
+            <div class="inset-box heatmap-telemetry">
+              <span id="hmSelectedKeycap" class="keycap keycap-ivory" style="min-width: 28px; height: 28px; font-size: 13px;">N</span>
+              <div class="heatmap-telemetry-text">
+                <strong id="hmTelemetryTitle"></strong>
+                <span id="hmTelemetrySub"></span>
+              </div>
+            </div>
+
+            <div class="heatmap-legend">
+              <span class="legend-item"><span class="legend-dot"></span><span data-i18n="hmLegAnchor">实测键心锚点</span></span>
+              <span class="legend-item"><span class="legend-wash"></span><span data-i18n="hmLegWash">键帽墨晕浓淡代表落点频次</span></span>
+              <span class="legend-right" data-i18n="hmLegCount">26/26 键</span>
+            </div>
+          </div>
+
+          <!-- Right: Inkstone Decoder Demo -->
+          <div class="lokey-card inkstone-card">
+            <div class="card-head" style="margin-bottom: 4px;">
+              <span class="lokey-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              </span>
+              <div class="card-head-titles">
+                <h3 data-i18n="inkTitle">落墨 · Inkstone 离线解码</h3>
+                <span class="card-head-sub" data-i18n="inkSub">全拼 · 小鹤/自然码双拼 · OpenCC 简繁</span>
+              </div>
+            </div>
+
+            <div class="seg-track inkstone-tabs" role="tablist">
+              <button class="seg-btn active" data-case="typo" type="button" data-i18n="tabTypo">邻键纠错</button>
+              <button class="seg-btn" data-case="disambig" type="button" data-i18n="tabDisambig">双向消歧</button>
+              <button class="seg-btn" data-case="mixed" type="button" data-i18n="tabMixed">中英混输</button>
+              <button class="seg-btn" data-case="habit" type="button" data-i18n="tabHabit">原生习惯</button>
+            </div>
+
+            <div class="inkstone-stage">
+              <div class="raw-bar">
+                <div><span id="labRaw" class="raw-text"></span><span class="raw-caret"></span></div>
+                <span id="labBadge" class="raw-tag"></span>
+              </div>
+
+              <div id="labCandidates" class="cand-row"></div>
+
+              <div class="inkstone-explain">
                 <h4 id="labExplainTitle"></h4>
                 <p id="labExplainBody"></p>
-              </div>
-              <div class="lab-spec-box">
-                <strong id="labSpecTitle"></strong>
-                <span id="labSpecBody"></span>
               </div>
             </div>
           </div>
@@ -153,93 +304,123 @@
       <!-- Section 3: App Screenshots -->
       <section id="screens" class="section">
         <div class="section-header">
-          <span class="section-eyebrow" data-i18n="scrEyebrow">REAL INTERFACE · 真机界面</span>
-          <h2 data-i18n="scrTitle">克制的设置体验，遵循原生系统语言</h2>
+          <div class="section-kicker" data-i18n="scrKicker">真机外观</div>
+          <h2 data-i18n="scrTitle">与页面一脉相承的冷瓷曜石界面</h2>
           <p data-i18n="scrSub">
-            没有开屏广告，没有花哨皮肤商城。手感调校、盲打热区可视化、词库热挂载与个人记忆管理都在本地一页触达。
+            零开屏广告、零冗余弹窗，完整的手感调校、盲打热区可视化、词库热挂载与个人词条管理全部内置。
           </p>
         </div>
 
         <div class="screens-grid">
-          <figure class="screen-card">
+          <figure class="lokey-card screen-card">
             <div class="phone-frame">
-              <img src="./assets/feel-light.png" alt="Lokey 浅色模式手感设置界面" loading="lazy" />
+              <img src="./assets/feel-light.png" alt="Lokey 浅色手感设置" loading="lazy" />
             </div>
-            <figcaption class="screen-caption">
-              <h4 data-i18n="scr1Title">手感与盲打调校（浅色）</h4>
-              <p data-i18n="scr1Desc">0%–100% 无级震动滑块、全拼/小鹤/自然码切换、简繁标准与 26 键个人热区校准状态。</p>
+            <figcaption>
+              <h4 data-i18n="scr1Title">手感与盲打调校（冷瓷浅色）</h4>
+              <p data-i18n="scr1Desc">0%–100% 无级震动滑块、全拼/小鹤/自然码切换与 26 键个人热区开关。</p>
             </figcaption>
           </figure>
 
-          <figure class="screen-card">
+          <figure class="lokey-card screen-card">
             <div class="phone-frame">
-              <img src="./assets/feel-dark.png" alt="Lokey 深色模式手感设置界面" loading="lazy" />
+              <img src="./assets/feel-dark.png" alt="Lokey 深色手感设置" loading="lazy" />
             </div>
-            <figcaption class="screen-caption">
-              <h4 data-i18n="scr2Title">原汁原味深色适配（深色）</h4>
-              <p data-i18n="scr2Desc">完整遵循 iOS 26 深浅色外观与液态玻璃底栏，夜间微调参数不刺眼。</p>
+            <figcaption>
+              <h4 data-i18n="scr2Title">夜间深色适配（纯黑曜石）</h4>
+              <p data-i18n="scr2Desc">完整适配 iOS 26 深色外观与液态玻璃底栏，夜间调校不刺眼。</p>
             </figcaption>
           </figure>
 
-          <figure class="screen-card">
+          <figure class="lokey-card screen-card">
             <div class="phone-frame">
-              <img src="./assets/lexicon-light.png" alt="Lokey 词库数据与 .lokeypack 热挂载界面" loading="lazy" />
+              <img id="lexiconScreenImg" src="./assets/lexicon-light.png" alt="Lokey 词库数据管理" loading="lazy" />
             </div>
-            <figcaption class="screen-caption">
-              <h4 data-i18n="scr3Title">零拷贝词库与外置包热挂载</h4>
-              <p data-i18n="scr3Desc">实时查看只读 mmap 词库规模，支持秒级导入外部 .lokeypack、个人 Rime 词表与一键切回内置词库。</p>
+            <figcaption>
+              <h4 data-i18n="scr3Title">零拷贝词库与 .lokeypack 热挂载</h4>
+              <p data-i18n="scr3Desc">支持右上角切换页面深/浅外观即时对比，管理本机只读 mmap 词库与 Rime 词表。</p>
             </figcaption>
           </figure>
         </div>
       </section>
 
-      <!-- Section 4: Verifiable Zero-Network Audit -->
+      <!-- Section 4: Zero-Network Attestation + Terminal Audit -->
       <section id="audit" class="section">
         <div class="section-header">
-          <span class="section-eyebrow" data-i18n="auditEyebrow">VERIFIABLE ZERO-NETWORK · 独立可验证</span>
-          <h2 data-i18n="auditTitle">不是「承诺不上传」，而是压根没有联网代码</h2>
+          <div class="section-kicker" data-i18n="auditKicker">独立零联网验证</div>
+          <h2 data-i18n="auditTitle">不是口头承诺隐私，而是二进制里没有联网代码</h2>
           <p data-i18n="auditSub">
-            任何输入法都可以写一句“注重隐私”。Lokey 将 18 个核心引擎与键盘扩展 Swift 文件原样公开至 Lokey-Audit（SHA-256 字节级一致），欢迎直接跑 Mach-O 符号审查。
+            18 份核心引擎与键盘扩展 Swift 文件在 Lokey-Audit 字节级公开，欢迎亲自运行源码扫描与 Mach-O 符号审查。
           </p>
         </div>
 
-        <div class="audit-split">
-          <div class="audit-points">
-            <div class="audit-note">
-              <h4 data-i18n="a1Title">关闭「允许完全访问」即可离线使用</h4>
-              <p data-i18n="a1Desc">
-                全拼/双拼整句解码、内置基础词库、简繁转换与 Emoji 联想在关闭「允许完全访问」时照样 100% 离线工作。
-              </p>
+        <div class="split-2">
+          <!-- 1:1 LokeyZeroNetworkShieldCard -->
+          <div class="shield-card">
+            <div class="shield-head">
+              <div class="shield-icon-box" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+              </div>
+              <div>
+                <h3 data-i18n="shTitle">100% 物理零联网承诺</h3>
+                <p data-i18n="shSub">无网络框架、Socket 系统调用或远端遥测</p>
+              </div>
             </div>
-            <div class="audit-note">
-              <h4 data-i18n="a2Title">开启完全访问仅限本机跨进程同步</h4>
-              <p data-i18n="a2Desc">
-                仅用于 App Group 沙盒（group.com.kianuni.lokey）内的偏好同步、个人 SQLite 自造词记忆与 CoreHaptics 线性震动，依然零网络传输。
-              </p>
+
+            <div class="shield-zero-grid">
+              <div class="shield-zero-cell">
+                <strong>0</strong>
+                <span data-i18n="shZ1">网络权限与框架</span>
+              </div>
+              <div class="shield-zero-cell">
+                <strong>0</strong>
+                <span data-i18n="shZ2">Socket / HTTP 符号</span>
+              </div>
+              <div class="shield-zero-cell">
+                <strong>0</strong>
+                <span data-i18n="shZ3">敏感词过滤干预</span>
+              </div>
             </div>
-            <div class="audit-note">
-              <h4 data-i18n="a3Title">密码框自动隔离保护</h4>
-              <p data-i18n="a3Desc">
-                遇到系统安全文本输入（isSecureTextEntry），自动停止个人词库学习并跳过一切本地日志写入；完整声明详见 PRIVACY.md。
-              </p>
+
+            <div class="shield-perm-box">
+              <div class="shield-perm-row">
+                <div class="shield-perm-row-top">
+                  <strong data-i18n="shP1Title">关闭「允许完全访问」（默认即用）</strong>
+                  <span class="shield-perm-badge" data-i18n="shP1Badge">核心可用</span>
+                </div>
+                <p data-i18n="shP1Desc">26 键全拼/双拼整句、内置词库、OpenCC 简繁与 Emoji 联想 100% 离线生效</p>
+              </div>
+
+              <div class="shield-divider"></div>
+
+              <div class="shield-perm-row">
+                <div class="shield-perm-row-top">
+                  <strong data-i18n="shP2Title">开启「允许完全访问」（按需可选）</strong>
+                  <span class="shield-perm-badge" data-i18n="shP2Badge">仅本机容器</span>
+                </div>
+                <p data-i18n="shP2Desc">仅用于本机 App Group 同步偏好、SQLite 自造词、外部 .lokeypack 与震动音效；安全输入框（isSecureTextEntry）自动隔离</p>
+              </div>
             </div>
+
+            <a class="ivory-action-bar" href="https://github.com/Kianuni/Lokey-Audit" target="_blank" rel="noopener">
+              <span data-i18n="shBtn">前往 Lokey-Audit 审计 18 份核心源码</span>
+              <span>↗</span>
+            </a>
           </div>
 
+          <!-- Terminal Verification Card -->
           <div class="terminal-card">
             <div class="terminal-bar">
-              <div class="terminal-dots">
-                <span></span><span></span><span></span>
-              </div>
               <span>zsh — Kianuni/Lokey-Audit</span>
-              <button id="copyAuditBtn" class="copy-btn" type="button" data-i18n="copyBtn">复制命令</button>
+              <button id="copyAuditBtn" class="copy-pill" type="button" data-i18n="copyBtn">复制审计命令</button>
             </div>
-            <pre class="terminal-pre"><code id="auditCode"><span class="cmd-comment"># 1. 源码、Info.plist 与 Entitlements 零联网审计</span>
+            <pre class="terminal-pre"><code><span class="cmd-comment"># 1. 源码、Info.plist 与 Entitlements 零联网扫描</span>
 git clone https://github.com/Kianuni/Lokey-Audit.git
 cd Lokey-Audit
 ./scripts/audit_zero_network.sh --source-only
-<span class="cmd-ok"># ✓ 0 Network/CFNetwork/WebKit imports · 0 socket calls</span>
+<span class="cmd-ok"># ✓ Source scan passed (0 network frameworks / 0 socket calls)</span>
 
-<span class="cmd-comment"># 2. 编译并对 Mach-O 产物执行 otool -L / nm -u 符号检验</span>
+<span class="cmd-comment"># 2. 编译产物 Mach-O otool -L / nm -u 符号审查与 XCTest</span>
 python3 scripts/build_demo_lexicon.py
 python3 scripts/generate_xcodeproj.py
 xcodebuild test -project LokeyAudit.xcodeproj -scheme LokeyAudit \
@@ -247,44 +428,78 @@ xcodebuild test -project LokeyAudit.xcodeproj -scheme LokeyAudit \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ./scripts/audit_zero_network.sh build/DerivedData
 <span class="cmd-ok"># ✓ 0 URLSession / NWConnection / CFNetwork / socket symbols</span></code></pre>
+            <div class="terminal-foot">
+              <span data-i18n="termFootNote">完整 Apple Privacy Manifest 声明</span>
+              <a href="https://github.com/Kianuni/Lokey-Audit/blob/main/PRIVACY.md" target="_blank" rel="noopener">PRIVACY.md ↗</a>
+            </div>
           </div>
         </div>
       </section>
 
-      <!-- Section 5: External Lexicon Pack -->
+      <!-- Section 5: .lokeypack Card (1:1 Lexicon Tab Card Replica) -->
       <section id="lexicon" class="section">
         <div class="section-header">
-          <span class="section-eyebrow" data-i18n="packEyebrow">OPEN LEXICON &amp; .LOKEYPACK</span>
-          <h2 data-i18n="packTitle">自带纯净词库开箱即用，也拥抱 Rime 白霜生态</h2>
+          <div class="section-kicker" data-i18n="packKicker">词库扩展生态</div>
+          <h2 data-i18n="packTitle">自带纯净基础词库，亦支持 55.3 万词白霜扩展热挂载</h2>
           <p data-i18n="packSub">
-            内置 50.6 万条纯净基础词库，满足日常流畅输入；如果你习惯更大词量或行业词表，可通过「文件」App 或 AirDrop 离线热挂载 .lokeypack 扩展包。
+            外置 .lokeypack 是纯粹的被动静态二进制数据文件；通过「文件」App 或隔空投送导入后在本机校验 SHA-256，并以零拷贝只读 mmap 热挂载，随时一键切回内置词库。
           </p>
         </div>
 
-        <div class="lexicon-banner">
-          <div>
-            <h3 style="margin: 0 0 8px; font-size: 19px;" data-i18n="packCardTitle">Kianuni/lokey-frost-pack · 55.3 万词白霜扩展包</h3>
-            <p style="margin: 0; font-size: 14px; color: var(--text-secondary);" data-i18n="packCardSub">
-              以零拷贝只读 mmap（NSData.mappedIfSafe）直接挂载，脏堆内存趋近于零，稳居 iOS 键盘扩展严苛内存上限之下。不绑定官方签名，支持在多包间毫秒级切换或一键切回内置词库。
-            </p>
-            <ul class="spec-list">
-              <li><span class="spec-dot">•</span><span data-i18n="packLi1">553,352 条中文词条 · 80,443 条简拼索引 · 21,313 条英文/混输词条</span></li>
-              <li><span class="spec-dot">•</span><span data-i18n="packLi2">单文件内嵌 LNLM-v2 + LNBR-v2 + LNTR-v1 + LNS6-v1 四层端侧轻模型</span></li>
-              <li><span class="spec-dot">•</span><span data-i18n="packLi3">零第三方依赖 Python 3 编译器，支持 --extra-dict 合入个人 Rime .dict.yaml</span></li>
-            </ul>
-            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-              <a class="btn btn-primary" href="https://github.com/Kianuni/lokey-frost-pack/releases/latest" target="_blank" rel="noopener" data-i18n="packBtnDl">前往 Releases 下载词库包 →</a>
-              <a class="btn btn-secondary" href="https://github.com/Kianuni/lokey-frost-pack" target="_blank" rel="noopener" data-i18n="packBtnRepo">查看离线编译器仓库</a>
+        <div class="lokey-card">
+          <div class="lexicon-head-strip">
+            <span class="status-dot"></span>
+            <strong data-i18n="packCardHead">Kianuni/lokey-frost-pack · 白霜外置词库包（v0.9.5）</strong>
+            <span class="card-chip" data-i18n="packMmapTag">mmap 零拷贝</span>
+          </div>
+
+          <div class="lexicon-metrics-3">
+            <div class="inset-box lexicon-stat-box">
+              <span data-i18n="pkStat1">中文词条</span>
+              <strong>553,352</strong>
+            </div>
+            <div class="inset-box lexicon-stat-box">
+              <span data-i18n="pkStat2">简拼 · 混输</span>
+              <strong>101,756</strong>
+            </div>
+            <div class="inset-box lexicon-stat-box">
+              <span data-i18n="pkStat3">单文件体积</span>
+              <strong>44.32 MB</strong>
             </div>
           </div>
 
-          <div class="hash-card">
-            <div class="hash-title" data-i18n="hashTitle">当前最新扩展包规格（v0.9.5）</div>
-            <div class="hash-kv">
-              <div><span data-i18n="kvFile">发布文件</span><code>rime-frost.lokeypack</code></div>
-              <div><span data-i18n="kvSize">文件体积</span><code>46,477,184 B (44.32 MB)</code></div>
-              <div><span data-i18n="kvFormat">挂载方式</span><code>LKLF-v2 · Read-Only mmap</code></div>
-              <div><span>SHA-256</span><code>de32f3c0e561026752e56392c2cd5cdd912a73424da2ff9b9fae80d04d4ee348</code></div>
+          <div class="row-list">
+            <a class="lokey-row lokey-row-link" href="https://github.com/Kianuni/lokey-frost-pack/releases/latest" target="_blank" rel="noopener">
+              <span class="lokey-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></svg>
+              </span>
+              <div class="lokey-row-text">
+                <span class="lokey-row-title" data-i18n="pkRow1Title">下载预编译 rime-frost.lokeypack</span>
+                <span class="lokey-row-sub" data-i18n="pkRow1Sub">前往 GitHub Releases 获取成品词库包与 .sha256，内嵌四层端侧神经打分与上下文消歧权重</span>
+              </div>
+              <span class="row-trailing">↗</span>
+            </a>
+
+            <a class="lokey-row lokey-row-link" href="https://github.com/Kianuni/lokey-frost-pack" target="_blank" rel="noopener">
+              <span class="lokey-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              </span>
+              <div class="lokey-row-text">
+                <span class="lokey-row-title" data-i18n="pkRow2Title">零依赖 Python 3 离线编译器与 Rime 定制</span>
+                <span class="lokey-row-sub" data-i18n="pkRow2Sub">使用 --extra-dict 合入个人 Rime .dict.yaml 专业词表；支持在 Lokey 主应用导入 Rime .userdb.txt</span>
+              </div>
+              <span class="row-trailing">↗</span>
+            </a>
+
+            <div class="lokey-row">
+              <span class="lokey-symbol" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              </span>
+              <div class="lokey-row-text">
+                <span class="lokey-row-title">SHA-256（rime-frost.lokeypack · 46,477,184 B）</span>
+                <code class="hash-code">de32f3c0e561026752e56392c2cd5cdd912a73424da2ff9b9fae80d04d4ee348</code>
+              </div>
+              <button id="copyShaBtn" class="inline-action-btn" type="button" data-i18n="copySha">复制</button>
             </div>
           </div>
         </div>
