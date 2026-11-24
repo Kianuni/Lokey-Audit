@@ -1,4 +1,4 @@
-# Lokey-Audit (v0.9.5 · Build 89)
+# Lokey-Audit (v1.0)
 
 **Lokey Security Audit Repository · 纯离线零联网安全审计仓库**
 
@@ -13,8 +13,8 @@
 ### 审计范围与源码一致性
 
 - **`Shared/Engine/*.swift`（12 个文件）与 `KeyboardExtension/**/*.swift`（6 个文件）**：与商业版 `Lokey` 主仓库 **100% 字节级一致（SHA-256 完全匹配）**，未做任何删改或脱敏隐藏。
-- **`AuditDemoApp/`**：极简 SwiftUI 宿主壳应用，仅保留键盘启用状态检测、实时试打沙盒、系统设置引导与零联网声明；省略了商业版的 `.lokeypack` 外部词库管理器、Rime 个人词库导入 UI、诊断日志浏览与 `build_ipa.sh` 打包脚本。
-- **`Shared/Resources/`**：仅包含由 `scripts/build_demo_lexicon.py` 离线编译的最小化开放许可示范词库（`demo_lexicon.bin`约 4,000 词条 + 未调优中性 `LNLM-v2` 占位权重，覆盖全部 416 个标准汉语拼音音节）、最小化 `lokey_emoji.bin` 与 `lokey_opencc.bin`（不含商业版训练权重、`target-deltas.tsv`/`commit-deltas.tsv` 与 `lokey_spelling.bin`，完全不含 GPL/LGPL 数据）。构建时由 Xcode Build Phase 将 `demo_lexicon.bin` 复制为包内的 `lokey_lexicon.bin`，从而在不改动任何核心引擎 Swift 源码的前提下完成完整编译与测试。
+- **`AuditDemoApp/`**：极简 SwiftUI 宿主壳应用，仅保留键盘启用状态检测、实时试打沙盒、系统设置引导与零联网声明；省略了商业版宿主应用的 `StoreKit 2` 买断管理、`.lokeypack` 外部词库管理器、Rime 个人词库导入与备份 UI、诊断日志浏览及打包脚本。
+- **`Shared/Resources/`**：仅包含由 `scripts/build_demo_lexicon.py` 离线编译的最小化开放许可示范词库（`demo_lexicon.bin` 约 4,000 词条 + 中性 `LNLM-v2` 占位权重，覆盖全部 416 个标准汉语拼音音节）、最小化 `lokey_emoji.bin` 与 `lokey_opencc.bin`（不含商业版内置词典与模型参数资源，且完全不含 GPL/LGPL 数据）。构建时由 Xcode Build Phase 将 `demo_lexicon.bin` 复制为包内的 `lokey_lexicon.bin`，从而在不改动任何核心引擎 Swift 源码的前提下完成完整编译与测试。
 
 ### 快速审计与本地验证
 
@@ -98,9 +98,9 @@ Lokey 内置 100% 开放许可的基础词库（开箱即用，无需联网）�
 ### Architecture & Source Parity
 
 - **`Shared/Engine/*.swift` (12 files) & `KeyboardExtension/**/*.swift` (6 files)**: **100% byte-for-byte identical (matching SHA-256)** to the commercial `Lokey` repository, with zero redactions.
-- **`AuditDemoApp/`**: Minimal SwiftUI host shell providing keyboard activation status, a live typing sandbox, iOS Settings onboarding, and zero-network documentation. Commercial `.lokeypack` pack management, Rime importer UI, diagnostic viewer, and `build_ipa.sh` are omitted.
+- **`AuditDemoApp/`**: Minimal SwiftUI host shell providing keyboard activation status, a live typing sandbox, iOS Settings onboarding, and zero-network documentation. Commercial host-only `StoreKit 2` entitlement UI, `.lokeypack` pack management, Rime/backup UI, diagnostic viewer, and packaging scripts are omitted.
 - **`Shared/Resources/`**: Contains minimal permissive demonstration binaries compiled by `scripts/build_demo_lexicon.py`:
-  - `demo_lexicon.bin`: ~4,000 permissive entries covering all 416 canonical Mandarin syllables, basic English words, clean next-word bigrams, and un-tuned neutral `LNLM-v2` weights (zero commercial `target-deltas.tsv`/`commit-deltas.tsv`, zero `lokey_spelling.bin`, zero GPL/LGPL data). Copied as `lokey_lexicon.bin` inside built app/extension/test bundles at build time so all engine & keyboard `.swift` files stay byte-identical.
+  - `demo_lexicon.bin`: ~4,000 permissive entries covering all 416 canonical Mandarin syllables, basic English words, clean next-word bigrams, and neutral `LNLM-v2` placeholder weights (omitting commercial lexicon/model assets and containing zero GPL/LGPL data). Copied as `lokey_lexicon.bin` inside built app/extension/test bundles at build time so all engine & keyboard `.swift` files stay byte-identical.
   - `lokey_emoji.bin` & `lokey_opencc.bin`: Minimal Emoji association and Simplified/Traditional conversion tables.
 
 ### Audit & Verification Commands

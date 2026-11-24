@@ -1,6 +1,6 @@
 # 隐私政策 / Privacy Policy — Lokey
 
-**生效与更新日期 / Effective & Updated Date**：2026-11-23  
+**生效与更新日期 / Effective & Updated Date**：2026-11-24  
 **联系邮箱 / Contact Email**：[Kianuni@proton.me](mailto:Kianuni@proton.me)  
 **安全审计仓库 / Public Security Audit Repository**：<https://github.com/Kianuni/Lokey-Audit>
 
@@ -17,6 +17,7 @@ Lokey 是一款**纯离线、物理级零联网**的 iOS 26 键拼音（全拼�
 ### 1. 零数据收集与物理级零联网承诺
 - **不收集、不传输任何个人数据**：Lokey **不会**收集、存储于远端、上传、出售或与任何第三方共享您的击键内容、输入文本、个人自造词、触控校准数据、设备标识符、位置信息或使用遥测。
 - **物理零联网架构**：无论是否开启「允许完全访问」，Lokey 宿主应用与键盘扩展在源码与编译后 Mach-O 二进制层面均**不含** `Network`、`CFNetwork`、`WebKit`、`SafariServices` 等网络框架，也不调用 `URLSession`、`NWConnection`、`CFSocket` 或 POSIX `socket`/`connect`/`getaddrinfo` 等系统网络符号，亦不包含任何云端服务器或统计 SDK。
+- **应用内购买（StoreKit 2）说明**：商业版宿主应用（`Lokey.app`）仅通过 Apple 系统原生 `StoreKit 2` 框架在设备本地校验可选一次性买断凭证（键盘扩展 `LokeyKeyboard.appex` 不链接 `StoreKit`）；所有交易均由 iOS 系统 App Store 进程直接处理，Lokey 不设任何自有服务器，亦不会接触、接收或存储您的 Apple 账户、支付信息或个人身份数据。
 - **公开可审计**：您可通过公开安全审计仓库 <https://github.com/Kianuni/Lokey-Audit> 独立编译并审计全部核心引擎与键盘扩展源码，验证物理零联网隔离与隐私清单配置。
 
 ### 2. 安全输入框与敏感内容保护
@@ -69,6 +70,7 @@ Lokey is an **offline-only, physically zero-network** iOS 26-key Pinyin keyboard
 ### 1. Zero Data Collection & Physical Zero-Network Isolation
 - **No Collection or Transmission**: Lokey **never** collects, uploads, stores remotely, sells, or shares your keystrokes, typed text, personal phrases, touch-calibration profiles, device identifiers, location data, or usage telemetry with us or any third party.
 - **Physically Air-Gapped Binary**: Both the Lokey host app and keyboard extension contain **zero** networking frameworks (`Network`, `CFNetwork`, `WebKit`, `SafariServices`), **zero** network APIs (`URLSession`, `NWConnection`, `CFSocket`), and **zero** POSIX socket symbols (`socket`, `connect`, `getaddrinfo`, etc.) at both source and compiled Mach-O binary levels.
+- **In-App Purchase (`StoreKit 2`)**: The commercial host app (`Lokey.app`) uses Apple's native system `StoreKit 2` framework solely for on-device JWS entitlement verification of optional one-time purchases (`LokeyKeyboard.appex` does not link `StoreKit`). All transactions are handled directly by iOS App Store system services; Lokey operates zero servers and never receives, accesses, or stores your Apple Account, payment details, or personal identity.
 - **Publicly Auditable**: Anyone can inspect the engine & keyboard source parity and run zero-network Mach-O verification scripts in our source-available security audit repository: <https://github.com/Kianuni/Lokey-Audit>.
 
 ### 2. Secure Text Field Protection
