@@ -2,8 +2,8 @@
   <br>
   <img src="./docs/assets/icon.png" alt="Lokey App Icon" width="120">
   <br>
-  <h1>Lokey · 落键 (Security Audit Repo)</h1>
-  <p><strong>1:1 原生 iOS 26 手感、零学习适应成本的物理级零联网离线中文输入法</strong></p>
+  <h1>Lokey (Security Audit Repo)</h1>
+  <p><strong>纯离线、物理级零联网的 iOS 26 键全拼与双拼中文输入法 · 1:1 原生手感零适应成本</strong></p>
   <p>无需开启「允许完全访问」即可离线整句盲打 · 18 份核心引擎与键盘扩展源码字节级公开可审计</p>
   <p>
     <a href="https://kianuni.github.io/Lokey-Audit/"><strong>🌐 产品官网与互动体验页</strong></a> ·
@@ -33,11 +33,11 @@
 
 ## 中文说明
 
-**Lokey（落键）** 是一款面向 iOS 的纯离线、物理级零联网中文输入法，**聚焦「1:1 原生手感 · 零学习适应成本」与「可验证零联网隐私安全」**：
+**Lokey** 是一款纯离线、物理级零联网的 iOS 26 键全拼与小鹤/自然码双拼中文输入法，**兼顾「1:1 原生手感 · 零学习适应成本」与「端侧智能 · 源码级零联网隐私」**：
 
 - **1:1 原生手感，零学习适应成本**：透明根视图透出 iOS 26 Liquid Glass 原生液态玻璃底座，精确对齐四档屏幕高度与光学中心；保留空框高频起始候选、120Hz 异步键帽气泡、左滑删除键（`⌫`）清空待上屏长句、横拖 `Shift` / 长按空格移动拼音光标、智能数字时间半角标点（`12:00` / `3.14` / `localhost:8080`）与 `CoreHaptics` `0%–100%` 无级震动，从系统自带键盘切换过来无需重新适应。
-- **物理级零联网，源码独立可审计**：全工程与编译产物不含任何网络框架或 Socket 符号，关闭系统「允许完全访问」照样 100% 离线工作；本仓库即是可独立编译与 Mach-O 校验的公开审计仓库。
-- **落墨 · Inkstone 离线引擎**：支持 26 键全拼、小鹤/自然码双拼、简体/台灣正體/香港標準实时切换、句内无缝中英混输、邻键盲打纠错与个人 26 键拇指热区自适应校准，配合只读 `mmap` 零拷贝热挂载（开箱即用内置基础词库 + 可选 `55.3 万词` [白霜 `.lokeypack` 扩展包](https://github.com/Kianuni/lokey-frost-pack)与个人 Rime 词表导入）。
+- **自研「落墨 · Inkstone」离线引擎**：支持 **26 键盲打热区自适应校准**（`2×2` 协方差高斯实时贴合拇指落点）、**双向神经网络长句语义与邻键误触纠错**、**句内无缝中英混输**、**OpenCC 词级简繁实时切换**（简体 / 台灣正體 / 香港標準）及 **本机 SQLite 自造词记忆**，并支持只读 `mmap` 零拷贝热挂载可选 `55.3 万词` [白霜 `.lokeypack` 扩展包](https://github.com/Kianuni/lokey-frost-pack) 与个人 Rime 词表。
+- **物理级零联网，源码与二进制独立可审计**：全工程源码与编译产物均不含任何网络框架、Socket 符号或数据采集，关闭系统「允许完全访问」照样 100% 离线满血运行；本仓库即面向公开 `otool -L` / `nm -u` 与 `codesign` 核验的开源安全审计仓。
 
 `Lokey-Audit` 是 **Lokey**（iOS 26 键全拼与小鹤/自然码双拼离线输入法）的公开安全审计仓库，用于让安全研究者与用户独立验证键盘扩展的**物理级零联网隔离**、**隐私清单（Privacy Manifest）** 与**纯本地拼音解码逻辑**。
 
@@ -137,7 +137,7 @@ python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml -o dist/my-c
 
 > 🌐 **Product Showcase & Interactive Demo**: **<https://kianuni.github.io/Lokey-Audit/>** · Companion Lexicon Pack: **[`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack)** · Privacy Policy: **[`PRIVACY.md`](./PRIVACY.md)**
 
-**Lokey** is an offline, physically zero-network Chinese iOS keyboard built around **1:1 native iOS 26 ergonomics (zero learning curve)** and **byte-level auditable privacy**. It preserves stock iOS Liquid Glass dock geometry, key spacing, cursor gestures, smart half-width punctuation (`12:00`, `3.14`), and continuous `CoreHaptics` feedback—while powering Full Pinyin, Xiaohe/Ziranma Shuangpin, CN-EN mixed decoding, blind-typing typo recovery, and zero-copy `.lokeypack` `mmap` mounting completely offline.
+**Lokey** is an offline, physically zero-network iOS 26-key Full Pinyin & Xiaohe/Ziranma Shuangpin keyboard built around **1:1 native iOS ergonomics (zero learning curve)** and **auditable zero-data-collection privacy**. Powered on-device by the **Inkstone** engine, it pairs adaptive 26-key blind-typing heatmap calibration, bidirectional neural sentence semantics, inline CN-EN mixed decoding, word-level OpenCC Simplified/Traditional conversion, local user-phrase memory, continuous `CoreHaptics`, and zero-copy `.lokeypack` `mmap` mounting—with zero networking frameworks or tracking in source or compiled binaries.
 
 `Lokey-Audit` is the source-available security audit repository for **Lokey**. It allows researchers and users to independently verify physical zero-network isolation, Apple Privacy Manifest declarations, and offline Pinyin decoding behavior.
 

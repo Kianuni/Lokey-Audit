@@ -90,13 +90,12 @@ const LAB_CASES = {
 
 const I18N = {
   zh: {
-    brandSub: "· 落键",
     themeLight: "浅色",
     themeDark: "深色",
     navPack: "白霜包",
     heroKicker: "物理级零联网 · 18 份核心源码字节级可审计",
     heroTitle: "原生手感，零学习成本。<br />物理零联网的 iOS 中文输入法。",
-    heroSub: "从系统自带键盘切换过来，手指无需任何适应时间。1:1 延续 iOS 26 液态玻璃键位几何与操作直觉，搭载自研「落墨 · Inkstone」离线引擎——二进制内彻底不含网络能力，却依然聪明跟手。",
+    heroSub: "1:1 延续 iOS 26 原生手感与键位几何，零学习适应成本；内置自研「落墨 · Inkstone」输入引擎（26 键盲打热区自适应校准、双向神经网络长句语义、句内中英混输、OpenCC 词级简繁与本地自造词记忆），源码与二进制均不含任何网络框架或数据采集。",
     ctaAudit: "查看零联网审计仓 →",
     ctaPack: "获取 55 万词白霜包",
     cardScheme: "全拼 / 双拼",
@@ -196,13 +195,12 @@ const I18N = {
     toastCopied: "已复制到剪贴板"
   },
   en: {
-    brandSub: "· Local Key",
     themeLight: "Light",
     themeDark: "Dark",
     navPack: "Frost Pack",
     heroKicker: "Physically Zero-Network · 18 Core Files Byte-Auditable",
     heroTitle: "Native iOS Feel, Zero Learning Curve.<br />Physically Zero-Network Chinese Keyboard.",
-    heroSub: "Switch from Apple's built-in keyboard with zero muscle-memory friction. 1:1 iOS 26 Liquid Glass ergonomics paired with the offline Inkstone engine—literally zero networking code in the binary, yet fast and forgiving.",
+    heroSub: "Preserves 1:1 native iOS 26 ergonomics and geometry with zero learning curve. Powered on-device by the Inkstone engine (adaptive 26-key blind-typing heatmap calibration, bidirectional neural sentence semantics, inline CN-EN mixed input, word-level OpenCC conversion, and local user-phrase memory) with zero networking frameworks or data collection in source or binary.",
     ctaAudit: "Inspect Lokey-Audit Repo →",
     ctaPack: "Get 553k Rime-Frost Pack",
     cardScheme: "Full / Shuangpin",
