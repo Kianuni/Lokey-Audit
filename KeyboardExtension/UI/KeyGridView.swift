@@ -136,9 +136,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
+    private var isBatchingLayoutOptions: Bool = false
+    internal private(set) var hasBuiltInitialKeys: Bool = false
+    internal private(set) var rebuildKeysCountForTesting: Int = 0
+
     var showPeriodBesideSpace: Bool = false {
         didSet {
-            if oldValue != showPeriodBesideSpace {
+            if oldValue != showPeriodBesideSpace && !isBatchingLayoutOptions {
                 rebuildKeys()
             }
         }
@@ -146,10 +150,22 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     var needsGlobeKey: Bool = false {
         didSet {
-            if oldValue != needsGlobeKey {
+            if oldValue != needsGlobeKey && !isBatchingLayoutOptions {
                 rebuildKeys()
             }
         }
+    }
+
+    func applyBottomRowLayoutOptions(showPeriodBesideSpace nextShowPeriod: Bool, needsGlobeKey nextNeedsGlobe: Bool) {
+        let needsRebuild = !hasBuiltInitialKeys
+            || showPeriodBesideSpace != nextShowPeriod
+            || needsGlobeKey != nextNeedsGlobe
+        guard needsRebuild else { return }
+        isBatchingLayoutOptions = true
+        showPeriodBesideSpace = nextShowPeriod
+        needsGlobeKey = nextNeedsGlobe
+        isBatchingLayoutOptions = false
+        rebuildKeys()
     }
 
     var isChineseContext: Bool = true {
@@ -424,7 +440,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     private lazy var selectionFeedback = UISelectionFeedbackGenerator()
 
-    override init(frame: CGRect) {
+    init(frame: CGRect, deferInitialBuild: Bool) {
         super.init(frame: frame)
         backgroundColor = KeyboardTheme.hitTestableClearBacking
         isMultipleTouchEnabled = true
@@ -440,7 +456,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             for: [.touchDragExit, .touchUpInside, .touchUpOutside, .touchCancel]
         )
         addSubview(globeSwitchButton)
-        rebuildKeys()
+        if !deferInitialBuild {
+            rebuildKeys()
+        }
+    }
+
+    override convenience init(frame: CGRect) {
+        self.init(frame: frame, deferInitialBuild: false)
     }
 
     @available(*, unavailable)
@@ -605,6 +627,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     // MARK: - Key Hierarchy Construction
 
     private func rebuildKeys() {
+        hasBuiltInitialKeys = true
+        rebuildKeysCountForTesting &+= 1
         cancelAllTimersAndTouches()
         lastLaidOutGridSize = .zero
         let rolesPerRow = makeRoles(for: page)

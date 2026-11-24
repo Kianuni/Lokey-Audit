@@ -152,6 +152,7 @@ internal final class DiagnosticTouchSnifferGestureRecognizer: UIGestureRecognize
 /// Shared read-only `mmap` lexicon holder inside the Keyboard Extension process so subsequent
 /// text-field focus transitions reuse the clean mapped pages in `0 ms`, while supporting `.lokeypack` hot-reloads.
 private enum SharedLexiconHolder {
+    private static let loadLock = NSLock()
     private static let lexiconLock = NSLock()
     private static var cachedLexicon: MmapLexicon?
     private static var cachedSignature: LokeyLexiconPackManager.ActiveSignature?
@@ -187,6 +188,19 @@ private enum SharedLexiconHolder {
             lexiconLock.unlock()
             return cached
         }
+        lexiconLock.unlock()
+
+        // Serialize cold-start and pack-switch mapping across background prewarm and main-thread setup
+        // so the active `.lokeypack` and its neural weights are initialized strictly once.
+        loadLock.lock()
+        defer { loadLock.unlock() }
+
+        let refreshedSig = LokeyLexiconPackManager.currentActiveSignature(in: lexiconsDirectory, defaults: defaults)
+        lexiconLock.lock()
+        if let cached = cachedLexicon, cachedSignature == refreshedSig {
+            lexiconLock.unlock()
+            return cached
+        }
         // Release the previous mapped lexicon before mapping a newly selected `.lokeypack`
         // so two large lexicons do not overlap in the extension's address space.
         let previous = cachedLexicon
@@ -204,7 +218,7 @@ private enum SharedLexiconHolder {
         lexiconLock.lock()
         if let resolved {
             cachedLexicon = resolved
-            cachedSignature = sig
+            cachedSignature = refreshedSig
         }
         lexiconLock.unlock()
         return resolved
@@ -235,11 +249,13 @@ private enum SharedLexiconHolder {
     }
 
     static func resetForTesting() {
+        loadLock.lock()
         lexiconLock.lock()
         cachedLexicon = nil
         cachedSignature = nil
         didStartPrewarm = false
         lexiconLock.unlock()
+        loadLock.unlock()
     }
 
     static let userStore = UserLexiconStore()
@@ -607,7 +623,7 @@ public final class KeyboardViewController: UIInputViewController {
     private var session: LokeySessionController?
 
     private let candidateBar = CandidateBarView()
-    private let keyGrid = KeyGridView()
+    private let keyGrid = KeyGridView(frame: .zero, deferInitialBuild: true)
     private let expandedGrid = ExpandedCandidateGridView()
     private var emojiKeyboard: EmojiKeyboardView?
     private let calloutBubble = KeyCalloutBubbleView()
@@ -640,6 +656,7 @@ public final class KeyboardViewController: UIInputViewController {
     private var appearGeneration: UInt64 = 0
     private var lastCalibrationMTime: TimeInterval = -1
     private var lastSettingsGeneration: UInt64 = 0
+    private var lastLoadedSettingsMTime: TimeInterval = -2
     private var cachedHasFullAccess: Bool = false
     private var currentIdleCandidates: [LokeyCandidate] = []
     private var isShowingQuickPunctuationStrip = false
@@ -750,6 +767,9 @@ public final class KeyboardViewController: UIInputViewController {
     internal var isBaseLexiconReloadPendingForTesting: Bool { pendingBaseLexiconReload }
     internal static func resetSharedLexiconCacheForTesting() {
         SharedLexiconHolder.resetForTesting()
+    }
+    internal static func resolveSharedLexiconForTesting() -> MmapLexicon? {
+        SharedLexiconHolder.currentLexicon()
     }
     private var activeLexiconObjectID: ObjectIdentifier?
     private var pendingBaseLexiconReload: Bool = false
@@ -947,7 +967,7 @@ public final class KeyboardViewController: UIInputViewController {
         lastNotifiedHostHeightMismatchSignature = ""
         pendingGlobeSwitchDeparture = false
         cachedHasFullAccess = hasFullAccess
-        updateKeyboardHeightConstraint(forceHostLayoutNotify: true)
+        updateKeyboardHeightConstraint(forceHostLayoutNotify: false)
         if cachedHasFullAccess {
             let shortVer = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.9.5"
             publishExtensionVisibility(isVisible: true)
@@ -959,7 +979,6 @@ public final class KeyboardViewController: UIInputViewController {
         }
         cachedNeedsGlobeKey = needsInputModeSwitchKey
         hasSyncedGlobeKey = true
-        keyGrid.needsGlobeKey = cachedNeedsGlobeKey
         keyGrid.hasFullAccess = cachedHasFullAccess
         contextReconcileWorkItem?.cancel()
         markedTextCoalescer.cancel()
@@ -972,7 +991,17 @@ public final class KeyboardViewController: UIInputViewController {
         contextTracker.reset(proxyBefore: appearBefore)
         session?.resetTopicMemory()
         session?.notifyContextBreak()
-        reloadPreferencesFromAppGroup(refreshFullAccess: false)
+        let currentSettingsGen = LokeyIPC.settingsGeneration
+        let currentSettingsMTime = LokeyAppGroup.sharedSettingsModificationTime()
+        let cachedAppearSettings: LokeySettings? = (
+            currentSettingsGen == lastSettingsGeneration
+                && currentSettingsMTime == lastLoadedSettingsMTime
+        ) ? session?.settings : nil
+        reloadPreferencesFromAppGroup(
+            refreshFullAccess: false,
+            preloadedSettings: cachedAppearSettings,
+            needsGlobeKey: cachedNeedsGlobeKey
+        )
         reloadBaseLexiconIfNeeded()
         refreshSupplementaryLexiconIfNeeded()
         SharedLexiconHolder.userStore.reloadFromDiskAsyncIfExternal { [weak self] in
@@ -1121,7 +1150,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func observeDuoScreenProfileIfNeeded() {
         let scr = effectiveScreenSize()
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let refWidth = referenceLayoutWidth(screenSize: scr)
         let profile = KeyboardTheme.layoutProfile(forWidth: refWidth, screenSize: scr)
         if profile == .duoUnfoldedPortrait || profile == .duoUnfoldedLandscape || min(scr.width, scr.height) > 550.0 {
             Self.hasObservedUnfoldedDuoInProcess = true
@@ -1138,7 +1167,7 @@ public final class KeyboardViewController: UIInputViewController {
     /// on standard iPhones, unfolded displays, and fresh cover sessions.
     internal func shouldBypassInputModeListHUDForDuoFold() -> Bool {
         let scr = effectiveScreenSize()
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let refWidth = referenceLayoutWidth(screenSize: scr)
         let profile = KeyboardTheme.layoutProfile(forWidth: refWidth, screenSize: scr)
         guard profile == .duoCover else {
             return false
@@ -1251,7 +1280,7 @@ public final class KeyboardViewController: UIInputViewController {
             _ = syncChildHostScreenSize()
         }
         let scr = effectiveScreenSize()
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let refWidth = referenceLayoutWidth(screenSize: scr)
         session?.decoder.spatialModel.isLandscapeLayout = (refWidth > 520.0)
         if !hasSyncedGlobeKey && (hasAppearedInHost || view.window != nil || customTextDocumentProxyForTesting != nil) {
             syncNeedsGlobeKeyIfConnected()
@@ -1809,6 +1838,7 @@ public final class KeyboardViewController: UIInputViewController {
         let previousMTime = lastCalibrationMTime
         Self.extensionStateIOQueue.async { [weak self] in
             let latest = LokeySettings.load()
+            let settingsMTime = LokeyAppGroup.sharedSettingsModificationTime()
             let mtime = LokeyAppGroup.sharedTouchCalibrationModificationTime()
             let calibration = mtime != previousMTime ? SharedLexiconHolder.loadCalibration() : nil
             DispatchQueue.main.async { [weak self] in
@@ -1823,6 +1853,7 @@ public final class KeyboardViewController: UIInputViewController {
                     self.lastCalibrationMTime = updatedMTime
                 }
                 self.lastSettingsGeneration = gen
+                self.lastLoadedSettingsMTime = settingsMTime
                 self.applyPreferences(latest)
             }
         }
@@ -1831,9 +1862,11 @@ public final class KeyboardViewController: UIInputViewController {
     private func reloadPreferencesFromAppGroup(
         refreshFullAccess: Bool = true,
         preloadedSettings: LokeySettings? = nil,
-        refreshCalibration: Bool = true
+        refreshCalibration: Bool = true,
+        needsGlobeKey: Bool? = nil
     ) {
         lastSettingsGeneration = LokeyIPC.settingsGeneration
+        lastLoadedSettingsMTime = LokeyAppGroup.sharedSettingsModificationTime()
         loadingSettingsGeneration = nil
         if refreshCalibration {
             refreshCalibrationFromDiskAsync()
@@ -1851,16 +1884,15 @@ public final class KeyboardViewController: UIInputViewController {
                 LokeySelectionFeedbackLogger.shared.bootstrapFromDiskAsync()
             }
         }
-        applyPreferences(preloadedSettings ?? LokeySettings.load())
+        applyPreferences(preloadedSettings ?? LokeySettings.load(), needsGlobeKey: needsGlobeKey)
     }
 
-    private func applyPreferences(_ latest: LokeySettings) {
+    private func applyPreferences(_ latest: LokeySettings, needsGlobeKey: Bool? = nil) {
         let prevScriptMode = session?.settings.chineseScriptMode
         let prevScheme = session?.settings.pinyinScheme
         session?.settings = latest
         LokeyDiagnosticLogger.shared.isEnabled = latest.enableDiagnosticLogging
         LokeySelectionFeedbackLogger.shared.isEnabled = latest.enableSelectionFeedbackLogging
-        keyGrid.showPeriodBesideSpace = latest.showPeriodBesideSpace
         keyGrid.spaceWatermarkTitle = latest.pinyinScheme.spaceWatermark
         keyGrid.enableTopRowNumberSwipe = latest.enableTopRowNumberSwipe
         keyGrid.hapticStrength = latest.hapticStrength
@@ -1868,6 +1900,10 @@ public final class KeyboardViewController: UIInputViewController {
         keyGrid.isKeyClickSoundEnabled = latest.isKeyClickSoundEnabled
         keyGrid.enableComposingSpaceTrackpad = latest.enableComposingSpaceTrackpad
         keyGrid.hasFullAccess = cachedHasFullAccess
+        keyGrid.applyBottomRowLayoutOptions(
+            showPeriodBesideSpace: latest.showPeriodBesideSpace,
+            needsGlobeKey: needsGlobeKey ?? keyGrid.needsGlobeKey
+        )
         if (session?.isComposing == true || prevScriptMode != latest.chineseScriptMode || prevScheme != latest.pinyinScheme) && !candidateBar.hasActiveTouch {
             refreshCandidateUI()
         }
@@ -1905,14 +1941,16 @@ public final class KeyboardViewController: UIInputViewController {
                               !self.isDisappearing,
                               !self.pendingGlobeSwitchDeparture else { return }
                         self.reconcileDisplayTransitionIfNeeded()
-                        self.updateKeyboardHeightConstraint(forceHostLayoutNotify: true, inLayoutPass: false)
+                        self.updateKeyboardHeightConstraint(forceHostLayoutNotify: false, inLayoutPass: false)
                     }
                 }
             }
         }
         keyGrid.calloutBubble = calloutBubble
 
-        let hc = view.heightAnchor.constraint(equalToConstant: desiredKeyboardHeight())
+        let initialHeight = desiredKeyboardHeight()
+        preferredContentSize = CGSize(width: 0, height: initialHeight)
+        let hc = view.heightAnchor.constraint(equalToConstant: initialHeight)
         hc.priority = UILayoutPriority(999)
         hc.isActive = true
         self.heightConstraint = hc
@@ -2067,7 +2105,7 @@ public final class KeyboardViewController: UIInputViewController {
         keyGrid.onAnchorsUpdated = { [weak self] anchors in
             guard let self else { return }
             let scr = self.effectiveScreenSize()
-            let refWidth = self.view.bounds.width > 0 ? self.view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+            let refWidth = self.referenceLayoutWidth(screenSize: scr)
             self.session?.decoder.spatialModel.isLandscapeLayout = (refWidth > 520.0)
             self.session?.decoder.spatialModel.updateAnchors(anchors)
         }
@@ -3100,6 +3138,13 @@ public final class KeyboardViewController: UIInputViewController {
                 keyGrid.isHidden = false
                 refreshCandidateUI()
             } else {
+                let resetTarget = desiredKeyboardHeight()
+                if abs(preferredContentSize.height - resetTarget) > 0.25 {
+                    preferredContentSize = CGSize(width: 0, height: resetTarget)
+                }
+                if let hc = heightConstraint, abs(hc.constant - resetTarget) > 0.25 {
+                    hc.constant = resetTarget
+                }
                 keyGrid.isHidden = false
             }
         }
@@ -3214,7 +3259,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func effectiveHostTopPadding() -> CGFloat {
         let scr = effectiveScreenSize()
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let refWidth = referenceLayoutWidth(screenSize: scr)
         let isiOS26OrNewer: Bool
         if #available(iOS 26.0, *) {
             isiOS26OrNewer = true
@@ -3228,6 +3273,30 @@ public final class KeyboardViewController: UIInputViewController {
             cachedExternalPadding: nil,
             didActivateSystemKeyboardLayout: Self.didActivateSystemKeyboardLayoutInProcess,
             isiOS26OrNewer: isiOS26OrNewer
+        )
+    }
+
+    internal static func resolveReferenceLayoutWidth(
+        viewBounds: CGRect,
+        hasWindow: Bool,
+        isExtensionProcess: Bool,
+        screenSize: CGSize,
+        mainScreenWidth: CGFloat
+    ) -> CGFloat {
+        let fallbackWidth = screenSize.width > 0 ? screenSize.width : mainScreenWidth
+        if isExtensionProcess && (!hasWindow || viewBounds.height > 420.0) {
+            return fallbackWidth > 0 ? fallbackWidth : viewBounds.width
+        }
+        return viewBounds.width > 0 ? viewBounds.width : fallbackWidth
+    }
+
+    private func referenceLayoutWidth(screenSize scr: CGSize) -> CGFloat {
+        Self.resolveReferenceLayoutWidth(
+            viewBounds: view.bounds,
+            hasWindow: view.window != nil,
+            isExtensionProcess: isRunningInExtensionProcess,
+            screenSize: scr,
+            mainScreenWidth: UIScreen.main.bounds.width
         )
     }
 
@@ -3256,7 +3325,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func desiredCandidateBarHeight() -> CGFloat {
         let scr = syncChildHostScreenSize()
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let refWidth = referenceLayoutWidth(screenSize: scr)
         return KeyboardTheme.portraitCandidateBarHeight(
             forWidth: refWidth,
             hostTopPadding: effectiveHostTopPadding(),
@@ -3266,7 +3335,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func desiredKeyboardHeight() -> CGFloat {
         let scr = syncChildHostScreenSize()
-        let refWidth = view.bounds.width > 0 ? view.bounds.width : (scr.width > 0 ? scr.width : UIScreen.main.bounds.width)
+        let refWidth = referenceLayoutWidth(screenSize: scr)
         let profile = KeyboardTheme.layoutProfile(forWidth: refWidth, screenSize: scr)
         let isLandscape = (profile == .regularLandscape)
         let topPad = effectiveHostTopPadding()
@@ -3288,6 +3357,10 @@ public final class KeyboardViewController: UIInputViewController {
     private func updateKeyboardHeightConstraint(forceHostLayoutNotify: Bool = false, inLayoutPass: Bool = false) {
         var didMutate = false
         let target = desiredKeyboardHeight()
+        if abs(preferredContentSize.height - target) > 0.25 {
+            preferredContentSize = CGSize(width: 0, height: target)
+            didMutate = true
+        }
         if let hc = heightConstraint, abs(hc.constant - target) > 0.25 {
             hc.constant = target
             didMutate = true
@@ -3302,7 +3375,7 @@ public final class KeyboardViewController: UIInputViewController {
         let vb = view.bounds
         let hasHeightMismatch = vb.width > 40.0
             && vb.height > 40.0
-            && vb.height <= 360.0
+            && vb.height <= 420.0
             && abs(vb.height - target) > 1.5
         let mismatchSig = hasHeightMismatch
             ? String(format: "%.1fx%.1f->%.1f|win=%d", vb.width, vb.height, target, view.window != nil ? 1 : 0)
@@ -3325,7 +3398,7 @@ public final class KeyboardViewController: UIInputViewController {
             view.setNeedsLayout()
 
             let canNotifyHostWindow = view.window != nil || onHostInputViewLayoutInvalidatedForTesting != nil
-            if canNotifyHostWindow && (isRunningInExtensionProcess || shouldNotifyForMismatch || forceHostLayoutNotify) {
+            if canNotifyHostWindow && (isRunningInExtensionProcess || didMutate || shouldNotifyForMismatch || forceHostLayoutNotify) {
                 inputView?.invalidateIntrinsicContentSize()
                 inputView?.setNeedsUpdateConstraints()
                 inputView?.setNeedsLayout()
@@ -3348,8 +3421,11 @@ public final class KeyboardViewController: UIInputViewController {
                     let retryTarget = self.desiredKeyboardHeight()
                     if self.view.bounds.width > 40.0,
                        self.view.bounds.height > 40.0,
-                       self.view.bounds.height <= 360.0,
+                       self.view.bounds.height <= 420.0,
                        abs(self.view.bounds.height - retryTarget) > 1.5 {
+                        if abs(self.preferredContentSize.height - retryTarget) > 0.25 {
+                            self.preferredContentSize = CGSize(width: 0, height: retryTarget)
+                        }
                         self.heightConstraint?.constant = retryTarget
                         self.view.setNeedsUpdateConstraints()
                         self.view.setNeedsLayout()
