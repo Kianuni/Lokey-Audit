@@ -76,7 +76,7 @@ codesign -d --entitlements - --xml "$EXT_DIR"
 Lokey 内置 100% 开放许可的基础词库（开箱即用，无需联网），同时也支持用户通过本地文件导入被动的只读静态 `.lokeypack` 扩展基础词库包（`LKLF-v2` + `LNLM-v2` + `EOF-16`）。Lokey 本体永远不会联网下载任何词库；用户手动导入本地文件后，App 在本机完成魔数、段边界与 SHA-256 校验，再通过只读零拷贝 `mmap` 热挂载至键盘扩展。
 
 ### 1. 社区开源扩展词库参考（独立仓库）
-- **`Kianuni/lokey-frost-pack`**（独立 `GPL-3.0` 开源词库与离线编译仓库）：
+- **`Kianuni/lokey-frost-pack`**（独立开源外部词库与离线编译器仓库）：
   - 仓库主页：<https://github.com/Kianuni/lokey-frost-pack>
   - 最新预编译 Release 下载：<https://github.com/Kianuni/lokey-frost-pack/releases/latest>（下载其中的 `rime-frost.lokeypack`；约 `44.32 MB`，含 `553,352` 条中文词条、单文件内嵌端侧神经打分/盲打纠错/语境记忆权重及可独立校验的 `.sha256` 文件）
 
@@ -85,9 +85,20 @@ Lokey 内置 100% 开放许可的基础词库（开箱即用，无需联网）�
 2. **两种任选方式导入 Lokey**：
    - **方式 A（在 Lokey 内导入）**：打开 **Lokey → 词库数据 → 导入外部 `.lokeypack` 词库包**（或进入「管理基础词库与已安装包」），在文件选择器中选中下载好的 `.lokeypack` 文件。
    - **方式 B（用 Lokey 打开）**：在系统「文件」App 中长按或点击该 `.lokeypack` 文件 → 点击左下角**分享** → 选择 **「用 Lokey 打开」**。
-3. **本机校验与热挂载**：在预览页核对词条数、来源与 SHA-256 摘要后确认安装，即可零延迟切换生效；在「基础词库管理」中可随时**一键切回内置词库**或左滑删除外部包。
+3. **本机校验与热挂载**：在预览页核对词条数、来源与 SHA-256 摘要后确认安装，即可零延迟切换生效；在「基础词库管理」中支持多包共存，可随时**一键切回内置词库**或左滑删除外部包。
 
-> **English Summary**: Lokey ships with a permissive GPL-free built-in lexicon and never downloads dictionaries over the network. Users who wish to mount a standalone community `.lokeypack` pack (such as the independent GPL-3.0 [`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack/releases/latest)) can download the `.lokeypack` file to the iOS **Files** app (or AirDrop it), then import it via **Lokey → Lexicon Data → Import External `.lokeypack`** or **Share → Open in Lokey**. Lokey validates format bounds and SHA-256 locally before read-only `mmap` mounting and supports one-tap rollback to the built-in lexicon at any time.
+### 3. 如何自行离线编译 `.lokeypack` 词库包
+Lokey 不限制官方签名包，任何用户均可在电脑端使用 [`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack) 提供的零第三方依赖 Python 3 编译器离线打包（复现发布包、追更上游热词，或通过 `--extra-dict` 合入个人/行业 `.dict.yaml` 专业词表）：
+```zsh
+git clone https://github.com/Kianuni/lokey-frost-pack.git
+cd lokey-frost-pack
+./scripts/fetch_rime_frost.sh
+
+# 直接编译标准包，或通过 --extra-dict 合入自定义 Rime .dict.yaml / TSV 词表
+python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml -o dist/my-custom.lokeypack
+```
+
+> **English Summary**: Lokey ships with an independent built-in lexicon and never downloads dictionaries over the network. Users can download a prebuilt community `.lokeypack` (such as [`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack/releases/latest)) or compile their own custom `.lokeypack` offline with `python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml`, save/AirDrop it to the iOS **Files** app, and import it via **Lokey → Lexicon Data → Import External `.lokeypack`** or **Share → Open in Lokey**. Lokey validates format bounds and SHA-256 locally before read-only `mmap` mounting and supports one-tap rollback to the built-in lexicon at any time.
 
 ---
 
