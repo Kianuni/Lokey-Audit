@@ -4159,25 +4159,113 @@ public enum LokeyLexiconPackManager {
         return metadata
     }
 
+    /// Validates a single-component filename inside `Lexicons/` without stripping legacy
+    /// `lokeypack-preview-<UUID>-` prefixes or rewriting `.lokeypack` names, so previously
+    /// installed packs on disk remain addressable for activation and deletion while rejecting
+    /// path traversal or reserved config names.
+    internal static func validateInstalledFileName(_ rawName: String) -> String? {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed != ".",
+              trimmed != "..",
+              trimmed.lowercased() != activePackFileName.lowercased(),
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.contains("\0") else {
+            return nil
+        }
+        return trimmed
+    }
+
     public static func listInstalledPacks(in lexiconsDirectory: URL? = nil) -> [LokeyLexiconPackMetadata] {
         let fm = FileManager.default
         let dir = lexiconsDirectory ?? LokeyAppGroup.sharedLexiconsDirectoryURL(createIfNeeded: false)
-        guard let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+        guard let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else {
             return []
         }
         let decoder = JSONDecoder()
-        var packs: [LokeyLexiconPackMetadata] = []
-        for url in entries where url.lastPathComponent.hasSuffix(".lokeypack.json") {
+        var byFileName: [String: (meta: LokeyLexiconPackMetadata, isCanonicalJSON: Bool)] = [:]
+
+        for url in entries where url.lastPathComponent.lowercased().hasSuffix(".lokeypack.json") {
             guard let data = try? Data(contentsOf: url),
-                  let meta = try? decoder.decode(LokeyLexiconPackMetadata.self, from: data) else {
+                  let decoded = try? decoder.decode(LokeyLexiconPackMetadata.self, from: data),
+                  let validFile = validateInstalledFileName(decoded.fileName) else {
                 continue
             }
-            let packURL = dir.appendingPathComponent(meta.fileName)
-            if fm.fileExists(atPath: packURL.path) {
-                packs.append(meta)
+            let packURL = dir.appendingPathComponent(validFile)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: packURL.path, isDirectory: &isDir), !isDir.boolValue else {
+                continue
+            }
+            let normalizedMeta: LokeyLexiconPackMetadata
+            if decoded.fileName == validFile {
+                normalizedMeta = decoded
+            } else {
+                normalizedMeta = LokeyLexiconPackMetadata(
+                    packId: decoded.packId,
+                    packName: decoded.packName,
+                    fileName: validFile,
+                    wordCount: decoded.wordCount,
+                    syllableCount: decoded.syllableCount,
+                    englishCount: decoded.englishCount,
+                    associationCount: decoded.associationCount,
+                    fileSizeBytes: decoded.fileSizeBytes,
+                    source: decoded.source,
+                    sha256: decoded.sha256,
+                    installedAt: decoded.installedAt
+                )
+            }
+            let isCanonical = (url.lastPathComponent == validFile + ".json")
+            if let existing = byFileName[validFile] {
+                if (isCanonical && !existing.isCanonicalJSON)
+                    || (isCanonical == existing.isCanonicalJSON && normalizedMeta.installedAt > existing.meta.installedAt) {
+                    byFileName[validFile] = (normalizedMeta, isCanonical)
+                }
+            } else {
+                byFileName[validFile] = (normalizedMeta, isCanonical)
             }
         }
-        return packs.sorted { $0.installedAt > $1.installedAt }
+
+        // Recover valid standalone `.lokeypack` files whose `.json` metadata sidecar is missing.
+        for url in entries {
+            let name = url.lastPathComponent
+            guard !name.hasPrefix(".staging-"),
+                  name.lowercased().hasSuffix(".lokeypack"),
+                  let validFile = validateInstalledFileName(name),
+                  byFileName[validFile] == nil else {
+                continue
+            }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue,
+                  let mapped = try? NSData(contentsOf: url, options: [.mappedIfSafe]),
+                  let summary = try? validatePack(nsData: mapped, computeHash: false, validateRecords: false) else {
+                continue
+            }
+            let mtime = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                ?? (try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date))?.timeIntervalSince1970 ?? 0
+            let sz = ((try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? summary.fileSizeBytes
+            let recovered = LokeyLexiconPackMetadata(
+                packId: validFile,
+                packName: displayPackName(fromFileName: validFile),
+                fileName: validFile,
+                wordCount: summary.wordCount,
+                syllableCount: summary.syllableCount,
+                englishCount: summary.englishCount,
+                associationCount: summary.associationCount,
+                fileSizeBytes: sz,
+                source: "外部词库包 (.lokeypack)",
+                sha256: "",
+                installedAt: mtime
+            )
+            byFileName[validFile] = (recovered, false)
+        }
+
+        return byFileName.values.map(\.meta).sorted {
+            if $0.installedAt != $1.installedAt {
+                return $0.installedAt > $1.installedAt
+            }
+            return $0.fileName < $1.fileName
+        }
     }
 
     private static func configuredActiveFileName(
@@ -4187,12 +4275,12 @@ public enum LokeyLexiconPackManager {
         let activeURL = dir.appendingPathComponent(activePackFileName)
         if let data = try? Data(contentsOf: activeURL),
            let cfg = try? JSONDecoder().decode(LokeyLexiconPackActiveConfig.self, from: data),
-           !cfg.activeFileName.isEmpty {
-            return cfg.activeFileName
+           let validActive = validateInstalledFileName(cfg.activeFileName) {
+            return validActive
         }
         if let fallbackName = resolveDefaults(defaults).string(forKey: activeDefaultsKey),
-           !fallbackName.isEmpty {
-            return fallbackName
+           let validFallback = validateInstalledFileName(fallbackName) {
+            return validFallback
         }
         return nil
     }
@@ -4244,12 +4332,28 @@ public enum LokeyLexiconPackManager {
         in lexiconsDirectory: URL? = nil,
         defaults: UserDefaults? = nil
     ) throws {
+        let fm = FileManager.default
         let dir = resolveLexiconsDirectory(lexiconsDirectory)
-        let safeFile = sanitizedPackFileName(from: fileName)
-        let packURL = dir.appendingPathComponent(safeFile)
-        guard FileManager.default.fileExists(atPath: packURL.path) else {
+        guard let candidate = validateInstalledFileName(fileName) else {
             throw LokeyLexiconPackError.packNotFound
         }
+        let safeFile: String
+        var isDir: ObjCBool = false
+        let exactURL = dir.appendingPathComponent(candidate)
+        if fm.fileExists(atPath: exactURL.path, isDirectory: &isDir), !isDir.boolValue {
+            safeFile = candidate
+        } else if !candidate.lowercased().hasSuffix(".lokeypack"),
+                  let suffixed = validateInstalledFileName(candidate + ".lokeypack") {
+            var suffixedDir: ObjCBool = false
+            let suffixedURL = dir.appendingPathComponent(suffixed)
+            guard fm.fileExists(atPath: suffixedURL.path, isDirectory: &suffixedDir), !suffixedDir.boolValue else {
+                throw LokeyLexiconPackError.packNotFound
+            }
+            safeFile = suffixed
+        } else {
+            throw LokeyLexiconPackError.packNotFound
+        }
+        let packURL = dir.appendingPathComponent(safeFile)
         let mapped = try NSData(contentsOf: packURL, options: [.mappedIfSafe])
         let metaURL = dir.appendingPathComponent(safeFile + ".json")
         let cachedMeta: LokeyLexiconPackMetadata? = {
@@ -4301,14 +4405,53 @@ public enum LokeyLexiconPackManager {
     ) throws {
         let fm = FileManager.default
         let dir = lexiconsDirectory ?? LokeyAppGroup.sharedLexiconsDirectoryURL(createIfNeeded: false)
-        let safeFile = sanitizedPackFileName(from: fileName)
-        let wasActive = configuredActiveFileName(in: dir, defaults: defaults) == safeFile
-        try? fm.removeItem(at: dir.appendingPathComponent(safeFile))
-        try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".json"))
-        try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".bwd"))
-        try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".lntr"))
-        try? fm.removeItem(at: dir.appendingPathComponent(safeFile + ".sem64"))
+        guard let targetFile = validateInstalledFileName(fileName) else {
+            throw LokeyLexiconPackError.packNotFound
+        }
+
+        func removeItemIfPresent(_ url: URL) throws {
+            do {
+                try fm.removeItem(at: url)
+            } catch let err as NSError {
+                if err.domain == NSCocoaErrorDomain && (err.code == NSFileNoSuchFileError || err.code == CocoaError.fileNoSuchFile.rawValue) {
+                    return
+                }
+                if err.domain == NSPOSIXErrorDomain && err.code == Int(ENOENT) {
+                    return
+                }
+                if !fm.fileExists(atPath: url.path) {
+                    return
+                }
+                throw err
+            }
+        }
+
+        let configuredBefore = configuredActiveFileName(in: dir, defaults: defaults)
+        let defaultsActive = resolveDefaults(defaults).string(forKey: activeDefaultsKey).flatMap { validateInstalledFileName($0) }
+        let wasActive = (configuredBefore == targetFile) || (defaultsActive == targetFile)
+
+        try removeItemIfPresent(dir.appendingPathComponent(targetFile))
+        try removeItemIfPresent(dir.appendingPathComponent(targetFile + ".json"))
+        try removeItemIfPresent(dir.appendingPathComponent(targetFile + ".bwd"))
+        try removeItemIfPresent(dir.appendingPathComponent(targetFile + ".lntr"))
+        try removeItemIfPresent(dir.appendingPathComponent(targetFile + ".sem64"))
+
+        // Also clean up any metadata sidecar whose internal `fileName` points to `targetFile`.
+        if let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            let decoder = JSONDecoder()
+            for entry in entries where entry.lastPathComponent.lowercased().hasSuffix(".lokeypack.json") {
+                if let data = try? Data(contentsOf: entry),
+                   let meta = try? decoder.decode(LokeyLexiconPackMetadata.self, from: data),
+                   validateInstalledFileName(meta.fileName) == targetFile {
+                    try removeItemIfPresent(entry)
+                }
+            }
+        }
+
         if wasActive {
+            activateBuiltInLexicon(in: lexiconsDirectory, defaults: defaults)
+        } else if let remainingActive = configuredActiveFileName(in: dir, defaults: defaults),
+                  !fm.fileExists(atPath: dir.appendingPathComponent(remainingActive).path) {
             activateBuiltInLexicon(in: lexiconsDirectory, defaults: defaults)
         }
     }
@@ -4324,9 +4467,9 @@ public enum LokeyLexiconPackManager {
         guard hasActiveFile,
               let data = try? Data(contentsOf: activeURL),
               let cfg = try? JSONDecoder().decode(LokeyLexiconPackActiveConfig.self, from: data),
-              !cfg.activeFileName.isEmpty else {
-            if let fallback = resolveDefaults(defaults).string(forKey: activeDefaultsKey),
-               !fallback.isEmpty {
+              let activeFile = validateInstalledFileName(cfg.activeFileName) else {
+            if let rawFallback = resolveDefaults(defaults).string(forKey: activeDefaultsKey),
+               let fallback = validateInstalledFileName(rawFallback) {
                 let packURL = dir.appendingPathComponent(fallback)
                 var pst = stat()
                 if packURL.path.withCString({ stat($0, &pst) == 0 }) {
@@ -4336,14 +4479,14 @@ public enum LokeyLexiconPackManager {
             }
             return .builtIn
         }
-        let packURL = dir.appendingPathComponent(cfg.activeFileName)
+        let packURL = dir.appendingPathComponent(activeFile)
         var pst = stat()
         guard packURL.path.withCString({ stat($0, &pst) == 0 }) else {
             return .builtIn
         }
         let mtime = Double(pst.st_mtimespec.tv_sec) + Double(pst.st_mtimespec.tv_nsec) * 1e-9
         return .externalPack(
-            fileName: cfg.activeFileName,
+            fileName: activeFile,
             sha256: cfg.sha256,
             size: Int64(pst.st_size),
             mtime: mtime

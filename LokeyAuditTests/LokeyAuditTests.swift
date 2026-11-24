@@ -248,7 +248,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(hostBundle.bundleIdentifier, "com.kianuni.lokey.audit")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "88")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "89")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool, false)
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool, false)
         XCTAssertNil(hostBundle.object(forInfoDictionaryKey: "CFBundleDocumentTypes"))
@@ -259,7 +259,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(extBundle.bundleIdentifier, "com.kianuni.lokey.audit.keyboard")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.9.5")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "88")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "89")
 
         XCTAssertEqual(Bundle(for: LokeyAuditTests.self).bundleIdentifier, "com.kianuni.lokey.audit.tests")
 
@@ -658,5 +658,67 @@ final class LokeyAuditTests: XCTestCase {
             grid.layoutSubviews()
         }
         XCTAssertNil(weakGrid)
+    }
+
+    func testExternalPackDeletePreservesCoexistingPackAndRejectsPathTraversal() throws {
+        let fm = FileManager.default
+        let rootDir = fm.temporaryDirectory.appendingPathComponent("lokey_audit_pack_del_\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: rootDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: rootDir) }
+
+        let lexiconsDir = rootDir.appendingPathComponent("Lexicons", isDirectory: true)
+        try fm.createDirectory(at: lexiconsDir, withIntermediateDirectories: true)
+        let suiteName = "com.kianuni.lokey.audit.packdel.\(UUID().uuidString)"
+        let testDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { testDefaults.removePersistentDomain(forName: suiteName) }
+
+        let demoLexURL = try XCTUnwrap(Bundle(for: LokeyAuditTests.self).url(forResource: "lokey_lexicon", withExtension: "bin"))
+        let packData = try Data(contentsOf: demoLexURL)
+        let srcURL = rootDir.appendingPathComponent("rime-frost.lokeypack")
+        try packData.write(to: srcURL)
+
+        let activeMeta = try LokeyLexiconPackManager.installPack(
+            from: srcURL,
+            preferredFileName: "rime-frost.lokeypack",
+            packName: "rime-frost",
+            activate: true,
+            in: lexiconsDir,
+            defaults: testDefaults
+        )
+
+        let legacyFileName = "lokeypack-preview-12345678-1234-1234-1234-123456789abc-rime-frost.lokeypack"
+        let legacyPackURL = lexiconsDir.appendingPathComponent(legacyFileName)
+        let legacyMetaURL = lexiconsDir.appendingPathComponent(legacyFileName + ".json")
+        try packData.write(to: legacyPackURL)
+        let legacyMeta = LokeyLexiconPackMetadata(
+            packId: "\(legacyFileName)#legacy",
+            packName: "rime-frost-legacy",
+            fileName: legacyFileName,
+            wordCount: activeMeta.wordCount,
+            syllableCount: activeMeta.syllableCount,
+            englishCount: activeMeta.englishCount,
+            associationCount: activeMeta.associationCount,
+            fileSizeBytes: activeMeta.fileSizeBytes,
+            source: "外部导入 (.lokeypack)",
+            sha256: activeMeta.sha256,
+            installedAt: activeMeta.installedAt - 20
+        )
+        try JSONEncoder().encode(legacyMeta).write(to: legacyMetaURL)
+
+        XCTAssertEqual(LokeyLexiconPackManager.listInstalledPacks(in: lexiconsDir).count, 2)
+        try LokeyLexiconPackManager.deletePack(fileName: legacyFileName, in: lexiconsDir, defaults: testDefaults)
+        XCTAssertFalse(fm.fileExists(atPath: legacyPackURL.path))
+        XCTAssertFalse(fm.fileExists(atPath: legacyMetaURL.path))
+        XCTAssertTrue(fm.fileExists(atPath: lexiconsDir.appendingPathComponent("rime-frost.lokeypack").path))
+        XCTAssertEqual(LokeyLexiconPackManager.activePackMetadata(in: lexiconsDir, defaults: testDefaults)?.fileName, "rime-frost.lokeypack")
+
+        for bad in ["", ".", "..", "../rime-frost.lokeypack", "sub/pack.lokeypack", "active_pack.json"] {
+            XCTAssertThrowsError(try LokeyLexiconPackManager.deletePack(fileName: bad, in: lexiconsDir, defaults: testDefaults))
+            XCTAssertThrowsError(try LokeyLexiconPackManager.activatePack(fileName: bad, in: lexiconsDir, defaults: testDefaults))
+        }
+
+        try LokeyLexiconPackManager.deletePack(fileName: "rime-frost.lokeypack", in: lexiconsDir, defaults: testDefaults)
+        XCTAssertTrue(LokeyLexiconPackManager.listInstalledPacks(in: lexiconsDir).isEmpty)
+        XCTAssertNil(LokeyLexiconPackManager.activePackMetadata(in: lexiconsDir, defaults: testDefaults))
     }
 }
