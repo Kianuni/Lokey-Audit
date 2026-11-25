@@ -37,14 +37,14 @@ const LAB_CASES = {
   typo: {
     raw: "renfuomeishi",
     badge: { zh: "全拼 · 邻键盲打", en: "Full Pinyin · Typo Recovery" },
-    cands: ["人没事", "人若没事", "人多没事", "ren fuo mei shi"],
+    cands: ["人多没事", "人若没事", "人没事", "ren fuo mei shi"],
     title: {
       zh: "精准捞回邻键误触，严守干净输入不误改",
       en: "Recovers adjacent-key thumb slips while protecting clean typing"
     },
     body: {
-      zh: "快速盲打时 f/d、u/r 极易带偏。落墨引擎融合真实键帽几何坐标 (x, y) 与端侧 LNLM-v2 语义重排，把「renfuomeishi」直接拉回「人没事」，同时支持双指换位、漏敲补全与胖手指多按滤除。",
-      en: "Fast thumb typing easily clips adjacent keys like f/d or u/r. Inkstone pairs keycap coordinates with on-device LNLM-v2 reranking—restoring '人没事' while also handling two-thumb transpositions and missed finals."
+      zh: "快速盲打时 d/f 邻键极易带偏（renduomeishi 误敲为 renfuomeishi）。落墨引擎融合真实键帽几何坐标 (x, y) 与端侧 LNLM-v2 语义重排，将「renfuomeishi」直接拉回首选「人多没事」，同时支持双指换位、漏敲补全与胖手指多按滤除。",
+      en: "Fast thumb typing easily slips onto an adjacent key like d/f ('renduomeishi' typed as 'renfuomeishi'). Inkstone pairs keycap coordinates with on-device LNLM-v2 reranking—restoring '人多没事' as top candidate while also handling two-thumb transpositions and missed finals."
     }
   },
   disambig: {
