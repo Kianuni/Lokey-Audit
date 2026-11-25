@@ -54,8 +54,8 @@
     --segmented-thumb: #363942;
     --primary-ink: #F8FAFC;
     --secondary-ink: #94A3B8;
-    --control-accent: #2563EB;
-    --control-accent-fg: #FFFFFF;
+    --control-accent: #F1F5F9;
+    --control-accent-fg: #111318;
     --badge-surface: #2C2F38;
     --badge-ink: #F8FAFC;
     --card-border: rgba(255, 255, 255, 0.095);
@@ -84,8 +84,8 @@ html[data-theme="dark"] {
   --segmented-thumb: #363942;
   --primary-ink: #F8FAFC;
   --secondary-ink: #94A3B8;
-  --control-accent: #2563EB;
-  --control-accent-fg: #FFFFFF;
+  --control-accent: #F1F5F9;
+  --control-accent-fg: #111318;
   --badge-surface: #2C2F38;
   --badge-ink: #F8FAFC;
   --card-border: rgba(255, 255, 255, 0.095);
@@ -325,6 +325,13 @@ a {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.hero-meta-note {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--secondary-ink);
+  letter-spacing: -0.005em;
 }
 
 .btn {
@@ -1015,7 +1022,7 @@ a {
 /* Screenshots Section */
 .screens-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 14px;
 }
 
@@ -1442,7 +1449,7 @@ a {
 .ios-switch.on::after {
   left: auto;
   right: 2px;
-  background: #FFFFFF;
+  background: var(--control-accent-fg);
 }
 
 .switch-tag {
@@ -1526,6 +1533,20 @@ a {
 }
 
 /* Card #1: Why Switch Comparison Table */
+.compare-scroll-hint {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--inset-surface);
+  border: 0.6px solid var(--inset-border);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--secondary-ink);
+}
+
 .compare-table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -1840,16 +1861,36 @@ a {
   transform: translateX(-50%) translateY(0);
 }
 
+@media (max-width: 960px) {
+  .screens-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 @media (max-width: 900px) {
   .hero-split,
   .split-2,
-  .screens-grid,
   .pricing-grid,
   .pipeline-bounds-3 {
     grid-template-columns: 1fr;
   }
   .pipeline-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .compare-scroll-hint {
+    display: flex;
+  }
+  .compare-table th:first-child,
+  .compare-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--card-bg);
+    min-width: 118px;
+    box-shadow: 4px 0 10px rgba(0, 0, 0, 0.045);
   }
 }
 
@@ -1860,6 +1901,13 @@ a {
     flex-direction: column;
     align-items: flex-start;
   }
+  .seg-btn {
+    padding: 6px 12px;
+  }
+  .nav-pill {
+    padding: 6px 12px;
+  }
+  .screens-grid,
   .hero-telemetry-grid,
   .shield-zero-grid,
   .lexicon-metrics-3,

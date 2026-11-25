@@ -7,6 +7,7 @@
   <p>无需开启「允许完全访问」即可使用默认 26 键全拼离线盲打 · 18 份核心引擎与键盘扩展源码字节级公开可审计</p>
   <p>
     <a href="https://kianuni.github.io/Lokey-Audit/"><strong>🌐 产品官网与互动体验页</strong></a> ·
+    <a href="https://testflight.apple.com/join/Bx9gxXTN"><strong>✈️ TestFlight 先行体验</strong></a> ·
     <a href="#中文说明">简体中文</a> ·
     <a href="#english">English</a> ·
     <a href="#external-lexicon-packs">📦 外部词库包 (.lokeypack)</a> ·
@@ -14,6 +15,7 @@
   </p>
   <p>
     <a href="https://kianuni.github.io/Lokey-Audit/"><img alt="Product Showcase" src="https://img.shields.io/badge/%E4%BA%A7%E5%93%81%E5%AE%98%E7%BD%91-Lokey%20Showcase-1D232A?style=flat-square"></a>
+    <a href="https://testflight.apple.com/join/Bx9gxXTN"><img alt="TestFlight Beta" src="https://img.shields.io/badge/TestFlight-Public%20Beta-0F172A?style=flat-square"></a>
     <img alt="Zero Network" src="https://img.shields.io/badge/Zero%20Network-0%20Sockets%20%2F%200%20Trackers-1E7E45?style=flat-square">
     <a href="https://github.com/Kianuni/lokey-frost-pack"><img alt="Frost Pack" src="https://img.shields.io/badge/Frost%20Pack-553K%20Entries%20(mmap)-0EA5E9?style=flat-square"></a>
     <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Source--Available%20Audit-475569?style=flat-square"></a>
@@ -22,11 +24,12 @@
 
 <div align="center">
   <br>
-  <img src="./docs/assets/feel-light.png" width="210" alt="Lokey 手感设置（浅色）"/>&nbsp;&nbsp;
-  <img src="./docs/assets/feel-dark.png" width="210" alt="Lokey 手感设置（深色）"/>&nbsp;&nbsp;
-  <img src="./docs/assets/lexicon-light.png" width="210" alt="Lokey 词库数据与 .lokeypack 热挂载"/>
+  <img src="./docs/assets/studio-keyboard.png" width="185" alt="Lokey 体验台与 1:1 液态玻璃键盘"/>&nbsp;&nbsp;
+  <img src="./docs/assets/heatmap-dark.png" width="185" alt="Lokey 纯黑深色外观与 26 键盲打热区云图"/>&nbsp;&nbsp;
+  <img src="./docs/assets/feel-light.png" width="185" alt="Lokey 手感与输入方案设置"/>&nbsp;&nbsp;
+  <img src="./docs/assets/lexicon-light.png" width="185" alt="Lokey 词库数据与 .lokeypack 热挂载"/>
   <br>
-  <sub>▲ 遵循 iOS 26 原生系统视觉：手感与震动调校（浅色 / 深色）、只读零拷贝词库管理与 .lokeypack 外置包热挂载</sub>
+  <sub>▲ 1:1 原生液态玻璃键盘、曜石深色与 26 键盲打热区云图、无级震动调校及只读零拷贝词库管理</sub>
 </div>
 
 ---
