@@ -70,7 +70,7 @@
 
           <div class="hero-status-strip">
             <span class="status-dot"></span>
-            <span data-i18n="cardStatusText">无需「允许完全访问」· 100% 离线盲打</span>
+            <span data-i18n="cardStatusText">无需「允许完全访问」· 默认 26 键全拼离线可用</span>
             <span class="hero-offline-tag" data-i18n="cardOfflineTag">纯离线</span>
           </div>
 
@@ -549,7 +549,7 @@
                 </tr>
                 <tr>
                   <td data-i18n="cmpR2K">关闭「允许完全访问」</td>
-                  <td class="compare-lokey-td" data-i18n="cmpR2L">100% 离线满血整句与简繁输出</td>
+                  <td class="compare-lokey-td" data-i18n="cmpR2L">26 键全拼整句、内置词库与盲打纠错 100% 离线可用</td>
                   <td class="compare-muted" data-i18n="cmpR2S">系统内置权限</td>
                   <td class="compare-muted" data-i18n="cmpR2C">功能降级或无法同步</td>
                 </tr>
@@ -627,7 +627,7 @@
                   <strong data-i18n="shP1Title">关闭「允许完全访问」（默认即用）</strong>
                   <span class="shield-perm-badge" data-i18n="shP1Badge">核心可用</span>
                 </div>
-                <p data-i18n="shP1Desc">26 键全拼/双拼整句、内置词库、OpenCC 简繁与 Emoji 联想 100% 离线生效</p>
+                <p data-i18n="shP1Desc">默认 26 键全拼整句、内置纯净词库、盲打邻键纠错与 Emoji 联想 100% 离线生效</p>
               </div>
 
               <div class="shield-divider"></div>
@@ -637,7 +637,7 @@
                   <strong data-i18n="shP2Title">开启「允许完全访问」（按需可选）</strong>
                   <span class="shield-perm-badge" data-i18n="shP2Badge">仅本机容器</span>
                 </div>
-                <p data-i18n="shP2Desc">仅用于本机 App Group 同步偏好、SQLite 自造词、外部 .lokeypack 与震动音效；安全输入框（isSecureTextEntry）自动隔离</p>
+                <p data-i18n="shP2Desc">仅用于本机 App Group 同步小鹤/自然码双拼、OpenCC 简繁、模糊音与手感设置、SQLite 自造词、外部 .lokeypack 与震动音效；安全输入框（isSecureTextEntry）自动隔离</p>
               </div>
             </div>
 
@@ -974,7 +974,7 @@ xcodebuild test -project LokeyAudit.xcodeproj -scheme LokeyAudit \
                 <span data-i18n="fq1Q">1. 不开启「允许完全访问」能用哪些功能？开启后会偷偷联网吗？</span>
                 <svg class="faq-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
               </summary>
-              <p class="faq-a" data-i18n="fq1A">关闭「允许完全访问」时，26 键全拼与双拼整句、内置纯净词库、OpenCC 简繁切换、盲打邻键纠错与 Emoji 联想已 100% 离线可用。开启该权限也仅用于本机 App Group 共享容器内的偏好同步、SQLite 自造词、外部 .lokeypack 热挂载与 CoreHaptics 震动——因为宿主与键盘扩展的源码及二进制中均不含任何网络框架或 Socket 符号，物理上不具备联网能力。</p>
+              <p class="faq-a" data-i18n="fq1A">关闭「允许完全访问」时，默认的 26 键全拼整句、内置纯净词库、盲打邻键纠错与 Emoji 联想已 100% 离线可用。如需在主应用切换小鹤/自然码双拼、OpenCC 繁体输出、模糊音与手感开关，或启用本机 SQLite 自造词、外部 .lokeypack 热挂载与 CoreHaptics 震动，需开启该权限以允许本机 App Group 共享容器跨进程读取——因为宿主与键盘扩展的源码及二进制中均不含任何网络框架或 Socket 符号，开启后依然物理上不具备联网能力。</p>
             </details>
 
             <details class="faq-item">
@@ -1034,6 +1034,6 @@ xcodebuild test -project LokeyAudit.xcodeproj -scheme LokeyAudit \
   </div>
 
   <div id="toast" class="toast" data-i18n="toastCopied">已复制到剪贴板</div>
-  <script src="./app.js?v=3"></script>
+  <script src="./app.js?v=4"></script>
 </body>
 </html>

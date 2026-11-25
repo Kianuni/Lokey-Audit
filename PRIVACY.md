@@ -25,9 +25,9 @@ Lokey 是一款**纯离线、物理级零联网**的 iOS 26 键拼音（全拼�
 
 ### 3. 为什么请求「允许完全访问（Allow Full Access）」？（仅限本机跨进程同步）
 在 iOS 中，「允许完全访问」本身只是开启跨进程系统能力的系统权限开关，并不代表必须联网：
-- **关闭「允许完全访问」（默认即可使用核心功能）**：26 键全拼与双拼整句引擎、内置开放许可词库、简繁转换（OpenCC）及 Emoji 候选联想均 **100% 离线正常运行**。
+- **关闭「允许完全访问」（默认即可使用核心功能）**：默认 26 键全拼整句引擎、内置开放许可词库、盲打邻键纠错及 Emoji 候选联想均 **100% 离线正常运行**。
 - **开启「允许完全访问」（按需可选）**：Lokey **仅将此权限用于本机设备内部的沙盒共享容器（App Group：`group.com.kianuni.lokey`）跨进程数据读写与硬件触感，绝不会发起任何网络通信**。具体仅用于：
-  1. 在宿主 App 与键盘扩展之间本机同步您的输入设置（方案、模糊音、按键音与震动强度等）；
+  1. 在宿主 App 与键盘扩展之间本机同步您的输入设置（小鹤/自然码双拼方案、OpenCC 繁体输出、模糊音、按键音与震动强度等）；
   2. 读写本机 SQLite 个人常用词/自造词库及 26 键盲打热区校准参数；
   3. 热挂载您手动导入的外部 `.lokeypack` 词库包或恢复 `.lokeybackup` 备份；
   4. 调用 `CoreHaptics` 细腻线性马达震动与按键音效；
@@ -78,9 +78,9 @@ Lokey is an **offline-only, physically zero-network** iOS 26-key Pinyin keyboard
 
 ### 3. Why "Allow Full Access" May Be Requested (On-Device Only)
 On iOS, "Allow Full Access" enables inter-process sandbox capabilities on your device and does not mean an app connects to the internet:
-- **With Full Access OFF (Core Functionality Ready)**: The 26-key full-sentence Pinyin engine, built-in permissive lexicon, Simplified/Traditional conversion (OpenCC), and Emoji candidates work **100% offline**.
+- **With Full Access OFF (Core Functionality Ready)**: The default 26-key full-sentence Full Pinyin engine, built-in permissive lexicon, blind-typing correction, and Emoji candidates work **100% offline**.
 - **With Full Access ON (Optional, Strictly On-Device)**: Lokey uses this capability **exclusively for local on-device App Group container (`group.com.kianuni.lokey`) synchronization and hardware haptics—never for any network communication**. Specifically, it enables:
-  1. Instant local sync of keyboard preferences (Pinyin layout, fuzzy Pinyin, sound, and haptic intensity) between the host app and keyboard extension;
+  1. Instant local sync of keyboard preferences (Xiaohe/Ziranma Shuangpin layouts, OpenCC Traditional output, fuzzy Pinyin, sound, and haptic intensity) between the host app and keyboard extension;
   2. Reading and updating your local SQLite user lexicon and 26-key adaptive touch-heatmap calibration;
   3. Mounting external `.lokeypack` dictionaries or restoring `.lokeybackup` archives you explicitly import on your device;
   4. Rich key haptics via `CoreHaptics` and local acoustic key clicks;
