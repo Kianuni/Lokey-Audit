@@ -138,7 +138,7 @@ python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml -o dist/my-c
 
 ## English
 
-> 🌐 **Product Showcase & Interactive Demo**: **<https://kianuni.github.io/Lokey-Audit/>** · Companion Lexicon Pack: **[`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack)** · Privacy Policy: **[`PRIVACY.md`](./PRIVACY.md)**
+> 🌐 **Product Showcase & Interactive Demo**: **<https://kianuni.github.io/Lokey-Audit/>** · ✈️ **TestFlight Beta**: **[Join on TestFlight](https://testflight.apple.com/join/Bx9gxXTN)** · Companion Lexicon Pack: **[`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack)** · Privacy Policy: **[`PRIVACY.md`](./PRIVACY.md)**
 
 **Lokey** is an offline, physically zero-network iOS 26-key Full Pinyin & Xiaohe/Ziranma Shuangpin keyboard built around **1:1 native iOS ergonomics (zero learning curve)** and **auditable zero-data-collection privacy**. Powered on-device by the **Inkstone** engine, it pairs adaptive 26-key blind-typing heatmap calibration, bidirectional neural sentence semantics, inline CN-EN mixed decoding, word-level OpenCC Simplified/Traditional conversion, local user-phrase memory, continuous `CoreHaptics`, and zero-copy `.lokeypack` `mmap` mounting—with zero networking frameworks or tracking in source or compiled binaries.
 
@@ -177,3 +177,17 @@ python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml -o dist/my-c
 ### License
 - Repository source code is governed by the **Source-Available Security Audit License** (`LICENSE`), permitting security inspection and local build/test verification while prohibiting `.ipa`/binary redistribution and commercial/App Store republishing.
 - Permissive upstream data attributions for `demo_lexicon.bin`, `lokey_emoji.bin`, and `lokey_opencc.bin` are included in `LICENSES/`.
+
+---
+
+<p align="center">
+  <sub>
+    <strong>Kianuni 苹果生态开源矩阵 · Apple Ecosystem Works</strong><br>
+    <a href="https://github.com/Kianuni/Erosion-CN">Erosion-CN</a> ·
+    <a href="https://github.com/Kianuni/AppleFlow">AppleFlow</a> ·
+    <a href="https://github.com/Kianuni/AppleLens">AppleLens</a> ·
+    <a href="https://github.com/Kianuni/WQGuard">WQGuard</a> ·
+    <a href="https://github.com/Kianuni/Camlo">Camlo · 开幕</a> ·
+    <a href="https://github.com/Kianuni/Enkard">Enkard</a>
+  </sub>
+</p>
