@@ -88,6 +88,51 @@ const LAB_CASES = {
   }
 };
 
+const SCHEME_DEMOS = {
+  quanpin: {
+    word: { zh: "零联网双拼", en: "零联网双拼 (Zero-Network Shuangpin)" },
+    count: { zh: "21 键 · 标准全拼", en: "21 Taps · Full Pinyin" },
+    keys: ["ling", "lian", "wang", "shuang", "pin"],
+    space: "拼"
+  },
+  xiaohe: {
+    word: { zh: "零联网双拼", en: "零联网双拼 (Xiaohe Shuangpin)" },
+    count: { zh: "10 键 · 减少 52% 击键", en: "10 Taps · 52% Fewer Taps" },
+    keys: ["lk", "lm", "wh", "ul", "pb"],
+    space: "鹤"
+  },
+  ziranma: {
+    word: { zh: "零联网双拼", en: "零联网双拼 (Ziranma Shuangpin)" },
+    count: { zh: "10 键 · 减少 52% 击键", en: "10 Taps · 52% Fewer Taps" },
+    keys: ["ly", "lm", "wh", "ud", "pn"],
+    space: "自"
+  }
+};
+
+const OPENCC_DEMOS = {
+  sc: {
+    sentence: "这款离线输入法内存占用极低，支持导入自定义词库。",
+    diff: {
+      zh: "所有个人记忆与上下文学习均以规范简体统一存储，切换输出标准不分裂词库。",
+      en: "Personal lexicon and contextual learning stay unified in canonical Simplified internally—switching output never fragments your memory."
+    }
+  },
+  tw: {
+    sentence: "這款離線輸入法記憶體佔用極低，支援匯入自訂詞庫。",
+    diff: {
+      zh: "OpenCC s2twp 词级转换：内存 → 記憶體 · 支持 → 支援 · 导入 → 匯入 · 自定义 → 自訂",
+      en: "OpenCC s2twp phrase conversion: 内存 → 記憶體 · 支持 → 支援 · 导入 → 匯入 · 自定义 → 自訂"
+    }
+  },
+  hk: {
+    sentence: "這款離線輸入法內存佔用極低，支持導入自定義詞庫。",
+    diff: {
+      zh: "OpenCC s2hk 港标字形转换，保留本机简体词库统一检索与自动学习",
+      en: "OpenCC s2hk Hong Kong character standards backed by unified local lexicon indexing"
+    }
+  }
+};
+
 const I18N = {
   zh: {
     themeLight: "浅色",
@@ -189,6 +234,130 @@ const I18N = {
     pkRow2Title: "零依赖 Python 3 离线编译器与 Rime 定制",
     pkRow2Sub: "使用 --extra-dict 合入个人 Rime .dict.yaml 专业词表；支持在 Lokey 主应用导入 Rime .userdb.txt",
     copySha: "复制",
+    schTitle: "输入方案与 OpenCC 词级简繁",
+    schSub: "全拼/小鹤/自然码即时切换 · 简体规范存储",
+    schTabQP: "26 键全拼",
+    schTabXH: "小鹤双拼",
+    schTabZRM: "自然码双拼",
+    ccTabSC: "简体中文",
+    ccTabTW: "台灣正體",
+    ccTabHK: "香港標準",
+    swTitle: "极客细节开关与模糊音",
+    swSub: "按顺手程度独立定制 · 不强迫任何改动",
+    swChip: "App Group 同步",
+    sw1Title: "首排按键上滑输入数字（Q–P → 1–0）",
+    sw1Sub: "关闭时 Q–P 按下 0ms 即刻上屏；开启后支持上滑直出数字，不误触常规拼写",
+    sw2Title: "空格左侧常驻句号键（。/ .）",
+    sw2Sub: "高频句尾标点单手一键直达，不必反复切换符号页",
+    sw3Title: "候选栏表情联想（哈哈 → 😂）",
+    sw3Sub: "基于纯离线 Emoji 语义表实时伴随候选输出，支持一键开关",
+    sw4Title: "自定义模糊音等价匹配",
+    sw4Sub: "自由勾选平翘舌（zh/z、ch/c、sh/s）、前后鼻音及 n/l、f/h 等价规则",
+    sw4Tag: "可独立开关",
+    pipTitle: "落墨 · Inkstone 端侧离线引擎流水线",
+    pipSub: "从物理触控落点到 120Hz 异步上屏的全链路纯本地计算",
+    pipChip: "0 云端往返",
+    pip1Title: "触控坐标采集",
+    pip1Desc: "捕获真实键帽落点 (x, y) 与边缘防误触时序",
+    pip2Title: "2×2 热区校准",
+    pip2Desc: "按个人双拇指斜角椭圆实时微调热区（±20%）",
+    pip3Title: "增量混输晶格",
+    pip3Desc: "维特比解码统一权衡汉语拼音与英文短词路径",
+    pip4Title: "双向神经重排",
+    pip4Desc: "LNLM-v2 前向 + LNBR-v2 逆向 + 64 维话题记忆",
+    pip5Title: "120Hz 异步上屏",
+    pip5Desc: "气泡响应先于宿主提交，零 XPC 阻塞不掉帧",
+    pipB1Title: "只读 mmap 零脏堆",
+    pipB1Desc: "词典与神经权重直接只读内存映射，稳居 iOS 键盘扩展严苛内存红线以下",
+    pipB2Title: "touchesBegan 零阻塞",
+    pipB2Desc: "全异步合并提交 MarkedText，快速盲打时键帽反馈与候选项互不拖累",
+    pipB3Title: "密码框自动隔离",
+    pipB3Desc: "识别系统 isSecureTextEntry 标记后自动暂停自造词学习与一切日志记录",
+    cmpKicker: "横向对比",
+    cmpTitle: "为什么选择 Lokey：原生、云端第三方与 Lokey 对比",
+    cmpSub: "既不牺牲系统键盘多年积累的手指肌肉记忆，也不用把日常隐私交给黑盒联网服务。",
+    cmpColDim: "对比维度",
+    cmpColStock: "iOS 系统自带",
+    cmpColCloud: "传统联网第三方",
+    cmpR1K: "物理零联网与可审计",
+    cmpR1L: "0 网络框架 / 0 Socket · 核心源码字节级公开",
+    cmpR1S: "系统闭源组件",
+    cmpR1C: "普遍联网与云端候选",
+    cmpR2K: "关闭「允许完全访问」",
+    cmpR2L: "100% 离线满血整句与简繁输出",
+    cmpR2S: "系统内置权限",
+    cmpR2C: "功能降级或无法同步",
+    cmpR3K: "iOS 26 原生手感",
+    cmpR3L: "1:1 液态玻璃几何，零学习适应成本",
+    cmpR3S: "原生手感基准",
+    cmpR3C: "键位比例与动效常有偏移",
+    cmpR4K: "盲打纠错与热区学习",
+    cmpR4L: "26 键 2×2 高斯可视化热区 + 双向神经重排",
+    cmpR4S: "黑盒纠错 · 无个人热区视图",
+    cmpR4C: "多依赖云端模型纠错",
+    cmpR5K: "外置词库与数据迁移",
+    cmpR5L: "只读 mmap .lokeypack + Rime 双向迁移",
+    cmpR5S: "封闭词库 · 不支持导入",
+    cmpR5C: "多为专有云账号同步",
+    cmpR6K: "商业模式与隐私边界",
+    cmpR6L: "零广告 · 零订阅 · 核心打字永久免费",
+    cmpR6S: "系统附带免费",
+    cmpR6C: "常见皮肤广告或会员订阅",
+    memTitle: "本机 SQLite 自造词记忆机制",
+    memSub: "只记常用好词 · 不被误选词长期干扰",
+    mem1Title: "分步选词自动记住个人短语",
+    mem1Sub: "日常分步拼合的人名、术语与常用词自动存于 App Group 本地 SQLite，自动过滤口语短句污染",
+    mem2Title: "21 天时间遗忘曲线",
+    mem2Sub: "自造词权重随时间平滑半衰衰减，高频常用词稳居前排，临时词汇自然淡出",
+    mem3Title: "曝光跳过自动降权",
+    mem3Sub: "展示于前位却屡次未被选中的冗余自造词自动降权让位，绝不抢占日常首选",
+    mem4Title: "候选栏长按一键忘词",
+    mem4Sub: "在键盘候选栏或展开面板长按即可直接删除，主应用亦支持检索与左滑清理",
+    sovTitle: "数据主权与 Rime 双向迁移",
+    sovSub: "纯离线导出带走一切积累 · 零厂商锁定",
+    sov1Title: "导出完整迁移包（.lokeybackup）",
+    sov1Sub: "打包个人 SQLite 词库与 26 键触控校准模型，无需 iCloud 即可无损换机恢复",
+    sov2Title: "导出标准 Rime 词表（.userdb.txt）",
+    sov2Sub: "个人词汇可随时导出为开放纯文本格式，与桌面 Rime 体系互通不锁死",
+    sov3Title: "独立导出触控热区校准状态（.json）",
+    sov3Sub: "单独导出或检视个人 26 键拇指落点均值与斜角协方差状态",
+    sov4Title: "纯离线导入个人 Rime 词表",
+    sov4Sub: "支持 .dict.yaml / .userdb.txt / .txt，自动去重合并并防止低频导入词霸占日常首选",
+    prcKicker: "免费边界与买断说明",
+    prcTitle: "核心打字体验永久免费，绝不阉割基础手感",
+    prcSub: "不做订阅制、不强制注册账号、不插播广告。所有日常输入所需核心能力对全部用户免费开放，仅高效扩展工具采用一次性买断。",
+    freeTitle: "核心体验 · 永久免费",
+    freeChip: "零广告 · 零账号 · 开箱主力可用",
+    freeSub: "不设任何“试打字数限制”或弹出广告，装好即可完整作为日常主力中文键盘：",
+    freeLi1: "26 键全拼、小鹤双拼与自然码双拼完整支持",
+    freeLi2: "内置 50.6 万+ 纯净基础词库、端侧双向神经整句与盲打邻键纠错",
+    freeLi3: "OpenCC 简体 / 台灣正體 / 香港標準词级实时切换与自定义模糊音",
+    freeLi4: "日常自动记词、主应用查看删改与候选栏长按一键忘词",
+    freeLi5: "CoreHaptics 无级线性震动、三档原生按键音与物理级零联网隔离",
+    proTitle: "Lokey Pro 永久解锁",
+    proSub: "纯本地效率进阶 · 买断制独立软件",
+    proP1: "一次性买断",
+    proP2: "支持家人共享",
+    proP3: "零订阅 · 零账号",
+    pro1Title: "外部 .lokeypack 词库扩展引擎",
+    pro1Sub: "解锁只读零拷贝 mmap 外置词库槽位，本地校验热挂载白霜包或自定义领域包",
+    pro2Title: "26 键个人拇指热区自适应校准",
+    pro2Sub: "随日常打字拟合逐键落点偏移与双拇指斜角椭圆（±20%），点亮个人实测热区图",
+    pro3Title: "Rime 个人词库导入与 .lokeybackup 备份",
+    pro3Sub: "导入 Rime .dict.yaml / .userdb.txt，一键导出与恢复完整个人词库及热区模型",
+    proFoot: "由 Apple App Store 在设备本地校验买断凭证，不接入任何第三方支付或统计 SDK；键盘扩展进程不链接 StoreKit，始终保持 0 网络框架。",
+    faqKicker: "常见问题",
+    faqTitle: "关于隐私、手感与词库的几个直接回答",
+    fq1Q: "1. 不开启「允许完全访问」能用哪些功能？开启后会偷偷联网吗？",
+    fq1A: "关闭「允许完全访问」时，26 键全拼与双拼整句、内置纯净词库、OpenCC 简繁切换、盲打邻键纠错与 Emoji 联想已 100% 离线可用。开启该权限也仅用于本机 App Group 共享容器内的偏好同步、SQLite 自造词、外部 .lokeypack 热挂载与 CoreHaptics 震动——因为宿主与键盘扩展的源码及二进制中均不含任何网络框架或 Socket 符号，物理上不具备联网能力。",
+    fq2Q: "2. 目前支持哪些 iOS 屏幕尺寸与拼音方案？切过来需要学新手势吗？",
+    fq2A: "支持 Max/Plus（268.5pt）、Pro/标准（250.0pt）、Mini/SE（239.0pt）与横屏（197.5pt）四档屏幕自适应高度，内置 26 键全拼、小鹤双拼与自然码双拼。手势与光学布局沿用 iOS 原生肌肉记忆（如长按空格移光标、左滑 ⌫ 清空待上屏句、数字时间自动半角），几乎零适应成本。",
+    fq3Q: "3. 完全不联网怎么做到长句识别和盲打纠错？会不会耗电或内存闪退？",
+    fq3A: "所有词典索引与轻量化端侧模型均随安装包或本地 .lokeypack 以只读 mmap 零拷贝方式挂载，不解压占堆内存、稳居 iOS 键盘扩展严苛内存上限之内；落墨引擎结合 26 键触控坐标、前向/逆向双向神经重排与 64 维话题记忆全部在本地 CPU 高效运行，无后台网络唤醒耗电。",
+    fq4Q: "4. 如何导入 55.3 万词白霜扩展包或我自己的 Rime 词库？",
+    fq4A: "从 Kianuni/lokey-frost-pack 下载预编译 rime-frost.lokeypack（或用自带零依赖 Python 3 编译器配合 --extra-dict 自行打包）存至 iPhone「文件」App 或隔空投送，选择「用 Lokey 打开」或从「词库数据 → 导入外部 .lokeypack」选取即可本机校验挂载；Rime .dict.yaml / .userdb.txt 也可在「个人词库」中纯离线导入。",
+    fq5Q: "5. 怎样自己独立验证 Lokey 真的没有任何联网代码？",
+    fq5A: "Kianuni/Lokey-Audit 仓库中 Shared/Engine（12 个文件）与 KeyboardExtension（6 个文件）保持 100% 字节级一致。你可以在 Mac 终端克隆仓库运行 ./scripts/audit_zero_network.sh --source-only，并用 xcodebuild test 编译出产物后运行 ./scripts/audit_zero_network.sh build/DerivedData，或亲自执行 otool -L 与 nm -u 核验全部导入符号。",
     footerBy: "由",
     footerPrivacy: "隐私政策 / Privacy",
     footerEco: "Kianuni 苹果生态工具矩阵：",
@@ -294,6 +463,130 @@ const I18N = {
     pkRow2Title: "Zero-Dependency Python 3 Compiler & Rime Import",
     pkRow2Sub: "Merge custom Rime .dict.yaml via --extra-dict or import .userdb.txt directly inside Lokey",
     copySha: "Copy",
+    schTitle: "Input Schemes & Word-Level OpenCC",
+    schSub: "Live Full Pinyin / Xiaohe / Ziranma · Unified Canonical Storage",
+    schTabQP: "26-Key Full",
+    schTabXH: "Xiaohe",
+    schTabZRM: "Ziranma",
+    ccTabSC: "Simplified",
+    ccTabTW: "TW (s2twp)",
+    ccTabHK: "HK (s2hk)",
+    swTitle: "Ergonomic Switches & Fuzzy Pinyin",
+    swSub: "Optional fine-tuning without altering stock muscle memory",
+    swChip: "App Group Sync",
+    sw1Title: "Top-Row Flick Up for Digits (Q–P → 1–0)",
+    sw1Sub: "Keep OFF for 0ms keystroke commit, or turn ON to flick digits directly from QWERTY top row",
+    sw2Title: "Dedicated Period Beside Space (. / 。)",
+    sw2Sub: "Reach sentence-ending punctuation one-handed without hopping symbol layers",
+    sw3Title: "Candidate Emoji Suggestions (haha → 😂)",
+    sw3Sub: "Offline Emoji semantic suggestions alongside Chinese candidates, toggleable anytime",
+    sw4Title: "Custom Fuzzy Pinyin Equivalences",
+    sw4Sub: "Independently toggle zh/z, ch/c, sh/s, an/ang, en/eng, in/ing, n/l, and f/h equivalences",
+    sw4Tag: "Per-Rule",
+    pipTitle: "Inkstone On-Device Engine Pipeline",
+    pipSub: "End-to-end strictly local processing from physical touch to 120Hz text commit",
+    pipChip: "0 Cloud Trips",
+    pip1Title: "Touch Coordinates",
+    pip1Desc: "Captures true keycap (x, y) landings & anti-edge timing",
+    pip2Title: "2×2 Heatmap Calib",
+    pip2Desc: "Applies thumb-ellipse covariance clamped within ±20%",
+    pip3Title: "CN-EN Lattice",
+    pip3Desc: "Incremental Viterbi unifies Chinese syllables & English tokens",
+    pip4Title: "Bidirectional Neural",
+    pip4Desc: "LNLM-v2 forward + LNBR-v2 backward + 64-dim topic memory",
+    pip5Title: "120Hz Async Commit",
+    pip5Desc: "Keycap popups fire ahead of host commit with zero XPC stall",
+    pipB1Title: "Read-Only mmap Zero Heap",
+    pipB1Desc: "Lexicon and weights stay memory-mapped well under iOS keyboard extension RAM limits",
+    pipB2Title: "Zero touchesBegan Stalls",
+    pipB2Desc: "Asynchronous MarkedText coalescing keeps rapid blind typing fluid at 120Hz",
+    pipB3Title: "Secure-Field Isolation",
+    pipB3Desc: "Automatically halts personal learning and logging whenever isSecureTextEntry is set",
+    cmpKicker: "Side-by-Side",
+    cmpTitle: "Why Switch: Lokey vs Stock iOS vs Cloud Third-Party",
+    cmpSub: "Keep years of native iOS thumb muscle memory without surrendering keystrokes to black-box servers.",
+    cmpColDim: "Dimension",
+    cmpColStock: "Stock iOS Keyboard",
+    cmpColCloud: "Cloud Third-Party",
+    cmpR1K: "Zero-Network & Auditability",
+    cmpR1L: "0 network frameworks / 0 sockets · Byte-auditable core",
+    cmpR1S: "Closed system binary",
+    cmpR1C: "Cloud lookups & telemetry common",
+    cmpR2K: "Allow Full Access OFF",
+    cmpR2L: "100% offline sentences & OpenCC intact",
+    cmpR2S: "Built into OS",
+    cmpR2C: "Features degrade or stop syncing",
+    cmpR3K: "iOS 26 Native Ergonomics",
+    cmpR3L: "1:1 Liquid Glass geometry, zero learning curve",
+    cmpR3S: "Native baseline",
+    cmpR3C: "Altered keycap ratios & animations",
+    cmpR4K: "Blind-Type & Heatmap",
+    cmpR4L: "Visible 26-key Gaussian heatmap + bidirectional rerank",
+    cmpR4S: "Opaque correction · no calibration map",
+    cmpR4C: "Often relies on cloud correction",
+    cmpR5K: "Lexicon & Data Portability",
+    cmpR5L: "Zero-copy mmap .lokeypack + Rime two-way import/export",
+    cmpR5S: "Closed dictionary · no imports",
+    cmpR5C: "Proprietary cloud account formats",
+    cmpR6K: "Monetization & Ad Hygiene",
+    cmpR6L: "Zero ads · Zero subscriptions · Core typing free forever",
+    cmpR6S: "Included with OS",
+    cmpR6C: "Theme ads or recurring VIP plans",
+    memTitle: "On-Device SQLite Personal Memory",
+    memSub: "Remembers phrases you actually want · drops slips cleanly",
+    mem1Title: "Auto-Learns Step-Picked Phrases",
+    mem1Sub: "Stores custom names, jargon, and frequent phrases locally in App Group SQLite while filtering multi-word noise",
+    mem2Title: "21-Day Forgetting Curve",
+    mem2Sub: "Recency scores decay smoothly over time so active everyday terms stay on top",
+    mem3Title: "Skipped-Exposure Demotion",
+    mem3Sub: "Redundant learned items repeatedly shown and skipped yield priority automatically",
+    mem4Title: "Long-Press Candidate Forget",
+    mem4Sub: "Long-press any personal entry right in the candidate bar or swipe to delete inside the app",
+    sovTitle: "Data Sovereignty & Two-Way Rime",
+    sovSub: "Export everything cleanly offline · zero lock-in",
+    sov1Title: "Full Migration Archive (.lokeybackup)",
+    sov1Sub: "Bundles personal SQLite lexicon and 26-key calibration model for lossless offline device transfers",
+    sov2Title: "Standard Rime Export (.userdb.txt)",
+    sov2Sub: "Take your entire personal vocabulary with you anytime in standard open Rime text format",
+    sov3Title: "Standalone Heatmap Export (.json)",
+    sov3Sub: "Inspect or archive your 26-key per-key mean offsets and ellipse covariance independently",
+    sov4Title: "Offline Rime Lexicon Import",
+    sov4Sub: "Imports .dict.yaml / .userdb.txt / .txt with automatic deduplication and safe daily-word weighting",
+    prcKicker: "Fair Boundary",
+    prcTitle: "Core Typing Experience Is Free Forever—Zero Handicaps",
+    prcSub: "No subscriptions, no login walls, and no ads. Every daily typing capability is free permanently; Pro is an optional one-time purchase.",
+    freeTitle: "Core Experience · Free Forever",
+    freeChip: "0 Ads · 0 Accounts · Daily-Driver Ready",
+    freeSub: "No trial character caps or nag dialogs—ready as your primary iOS keyboard out of the box:",
+    freeLi1: "Full support for 26-key Pinyin, Xiaohe Shuangpin & Ziranma Shuangpin",
+    freeLi2: "Built-in 506k+ clean lexicon, bidirectional neural decoding & blind-typing typo recovery",
+    freeLi3: "Live OpenCC Simplified / TW / HK word-level conversion & custom fuzzy Pinyin rules",
+    freeLi4: "Local auto-learned phrases, in-app browsing, and long-press forget in candidate bar",
+    freeLi5: "Continuous CoreHaptics slider, native key clicks & physically zero-network isolation",
+    proTitle: "Lokey Pro Lifetime Unlock",
+    proSub: "Local power tools · One-time indie purchase",
+    proP1: "One-Time Purchase",
+    proP2: "Family Sharing",
+    proP3: "No Subscription",
+    pro1Title: "External .lokeypack Lexicon Engine",
+    pro1Sub: "Unlocks read-only zero-copy mmap external slots to hot-mount Rime-Frost or custom packs",
+    pro2Title: "26-Key Adaptive Thumb Calibration",
+    pro2Sub: "Fits per-key thumb offsets and 2×2 ellipse covariance (±20%) with live heatmap inspection",
+    pro3Title: "Rime Import & .lokeybackup Transfers",
+    pro3Sub: "Imports Rime .dict.yaml / .userdb.txt and exports/restores full personal dictionaries & calibration",
+    proFoot: "Validated locally via Apple App Store (StoreKit 2) with zero third-party payment or analytics SDKs. The keyboard extension itself never links StoreKit and stays 0-network.",
+    faqKicker: "FAQ",
+    faqTitle: "Straight Answers on Privacy, Feel & Lexicons",
+    fq1Q: "1. What works with Allow Full Access OFF, and can it go online if turned ON?",
+    fq1A: "With Allow Full Access OFF, 26-key Full Pinyin/Shuangpin sentences, the built-in clean lexicon, OpenCC conversion, blind-typing correction, and Emoji lookup all work 100% offline. Turning it ON strictly enables local App Group settings sync, SQLite user phrases, .lokeypack mounting, and CoreHaptics—both host app and keyboard binaries contain zero networking frameworks or sockets.",
+    fq2Q: "2. Which screen sizes and Pinyin schemes are supported? Is there a learning curve?",
+    fq2A: "Supports Max/Plus (268.5pt), Pro/Standard (250.0pt), Mini/SE (239.0pt), and Landscape (197.5pt) geometry across 26-key Full Pinyin, Xiaohe Shuangpin, and Ziranma Shuangpin. Muscle memory follows stock iOS gestures (Space cursor scrubbing, swipe-left ⌫ clear, smart half-width URLs/times).",
+    fq3Q: "3. How does offline sentence reranking avoid high RAM or battery drain?",
+    fq3A: "All lexicons and compact weights mount read-only via zero-copy mmap without decompressing onto the heap, staying comfortably below strict iOS keyboard extension Jetsam memory limits while executing purely on local CPU with zero background network wakeups.",
+    fq4Q: "4. How do I load the 553k Rime-Frost pack or my own Rime dictionary?",
+    fq4A: "Download rime-frost.lokeypack from Kianuni/lokey-frost-pack Releases (or compile custom .dict.yaml packs offline via the Python 3 compiler), save to iOS Files or AirDrop, and pick Open in Lokey or Lexicon Data → Import .lokeypack. Standard Rime .dict.yaml / .userdb.txt files can also be imported offline.",
+    fq5Q: "5. How can I verify zero networking code myself?",
+    fq5A: "All 18 Swift files under Shared/Engine (12) and KeyboardExtension (6) in Kianuni/Lokey-Audit match SHA-256 byte-for-byte. Clone the repo and run ./scripts/audit_zero_network.sh --source-only, build/test via xcodebuild, and run ./scripts/audit_zero_network.sh build/DerivedData or otool -L / nm -u directly.",
     footerBy: "Crafted by",
     footerPrivacy: "Privacy Policy",
     footerEco: "Kianuni Apple Ecosystem:",
@@ -303,6 +596,8 @@ const I18N = {
 
 let currentLang = "zh";
 let currentCase = "typo";
+let currentScheme = "quanpin";
+let currentOpencc = "sc";
 let selectedKey = "n";
 let userThemeOverride = null; // null follows system
 
@@ -333,6 +628,7 @@ function renderThemeUI() {
     hmCap.classList.toggle("keycap-ivory", !dark);
   }
   renderHeatmap();
+  renderSchemeLab();
 }
 
 function renderHeatmap() {
@@ -411,6 +707,41 @@ function renderLab() {
   });
 }
 
+function renderSchemeLab() {
+  const item = SCHEME_DEMOS[currentScheme];
+  const wordEl = document.getElementById("schemeTargetWord");
+  const countEl = document.getElementById("schemeKeyCount");
+  const capsEl = document.getElementById("schemeKeycaps");
+  if (!wordEl || !countEl || !capsEl) return;
+
+  const dark = isEffectiveDark();
+  wordEl.textContent = item.word[currentLang];
+  countEl.textContent = item.count[currentLang];
+
+  capsEl.innerHTML = "";
+  item.keys.forEach((code) => {
+    const cap = document.createElement("span");
+    cap.className = "keycap " + (dark ? "keycap-charcoal" : "keycap-ivory");
+    cap.textContent = code;
+    capsEl.appendChild(cap);
+  });
+
+  const sp = document.createElement("span");
+  sp.id = "schemeSpaceBadge";
+  sp.className = "scheme-space-badge";
+  sp.textContent = item.space;
+  capsEl.appendChild(sp);
+}
+
+function renderOpenccLab() {
+  const item = OPENCC_DEMOS[currentOpencc];
+  const sentEl = document.getElementById("openccSentence");
+  const diffEl = document.getElementById("openccDiff");
+  if (!sentEl || !diffEl) return;
+  sentEl.textContent = item.sentence;
+  diffEl.textContent = item.diff[currentLang];
+}
+
 function applyLang(lang) {
   currentLang = lang;
   document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
@@ -429,6 +760,8 @@ function applyLang(lang) {
   });
   renderHeatmapTelemetry();
   renderLab();
+  renderSchemeLab();
+  renderOpenccLab();
 }
 
 function showToast(msg) {
@@ -479,6 +812,24 @@ document.addEventListener("DOMContentLoaded", () => {
       btn.classList.add("active");
       currentCase = btn.getAttribute("data-case");
       renderLab();
+    });
+  });
+
+  document.querySelectorAll("[data-scheme]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("[data-scheme]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentScheme = btn.getAttribute("data-scheme");
+      renderSchemeLab();
+    });
+  });
+
+  document.querySelectorAll("[data-opencc]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("[data-opencc]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentOpencc = btn.getAttribute("data-opencc");
+      renderOpenccLab();
     });
   });
 
