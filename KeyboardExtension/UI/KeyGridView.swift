@@ -81,6 +81,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     var onMoveCursor: ((Int) -> Void)?
     var onGlobeEvent: ((UIView, UIEvent) -> Void)?
     var onOpenSettings: (() -> Void)?
+    var onRestoreFullWidthTap: (() -> Void)?
+    var onSelectOneHandedMode: ((OneHandedMode) -> Void)?
     var onAnchorsUpdated: (([SpatialTouchModel.KeyAnchor]) -> Void)? {
         didSet {
             lastReportedAnchorGeometryKey = nil
@@ -140,10 +142,35 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     internal private(set) var hasBuiltInitialKeys: Bool = false
     internal private(set) var rebuildKeysCountForTesting: Int = 0
 
-    var showPeriodBesideSpace: Bool = false {
+    var spaceLeftPunctuation: SpaceLeftPunctuationMode = .off {
         didSet {
-            if oldValue != showPeriodBesideSpace && !isBatchingLayoutOptions {
-                rebuildKeys()
+            guard oldValue != spaceLeftPunctuation else { return }
+            let hadKey = (oldValue != .off)
+            let hasKey = (spaceLeftPunctuation != .off)
+            if !isBatchingLayoutOptions {
+                if hadKey != hasKey {
+                    rebuildKeys()
+                } else if page == .alphabetic {
+                    if isHandlingTouchDown {
+                        bottomRowNeedsAppearanceRefresh = true
+                        scheduleDeferredAppearanceRefresh()
+                    } else {
+                        refreshBottomRowAppearanceOnly()
+                    }
+                }
+            }
+        }
+    }
+
+    var showPeriodBesideSpace: Bool {
+        get { spaceLeftPunctuation != .off }
+        set {
+            if newValue {
+                if spaceLeftPunctuation == .off {
+                    spaceLeftPunctuation = .period
+                }
+            } else {
+                spaceLeftPunctuation = .off
             }
         }
     }
@@ -156,16 +183,36 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
-    func applyBottomRowLayoutOptions(showPeriodBesideSpace nextShowPeriod: Bool, needsGlobeKey nextNeedsGlobe: Bool) {
+    func applyBottomRowLayoutOptions(
+        spaceLeftPunctuation nextSpaceLeftPunctuation: SpaceLeftPunctuationMode,
+        needsGlobeKey nextNeedsGlobe: Bool
+    ) {
         let needsRebuild = !hasBuiltInitialKeys
-            || showPeriodBesideSpace != nextShowPeriod
+            || (spaceLeftPunctuation != .off) != (nextSpaceLeftPunctuation != .off)
             || needsGlobeKey != nextNeedsGlobe
-        guard needsRebuild else { return }
+        let punctGlyphChanged = (spaceLeftPunctuation != nextSpaceLeftPunctuation)
+        guard needsRebuild || punctGlyphChanged else { return }
         isBatchingLayoutOptions = true
-        showPeriodBesideSpace = nextShowPeriod
+        spaceLeftPunctuation = nextSpaceLeftPunctuation
         needsGlobeKey = nextNeedsGlobe
         isBatchingLayoutOptions = false
-        rebuildKeys()
+        if needsRebuild {
+            rebuildKeys()
+        } else if page == .alphabetic {
+            if isHandlingTouchDown {
+                bottomRowNeedsAppearanceRefresh = true
+                scheduleDeferredAppearanceRefresh()
+            } else {
+                refreshBottomRowAppearanceOnly()
+            }
+        }
+    }
+
+    func applyBottomRowLayoutOptions(showPeriodBesideSpace nextShowPeriod: Bool, needsGlobeKey nextNeedsGlobe: Bool) {
+        let nextMode: SpaceLeftPunctuationMode = nextShowPeriod
+            ? (spaceLeftPunctuation == .off ? .period : spaceLeftPunctuation)
+            : .off
+        applyBottomRowLayoutOptions(spaceLeftPunctuation: nextMode, needsGlobeKey: nextNeedsGlobe)
     }
 
     var isChineseContext: Bool = true {
@@ -188,11 +235,61 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             if oldValue != isPinyinMode {
                 if page != .alphabetic {
                     rebuildKeys()
+                } else if showShuangpinKeyHints && pinyinScheme != .quanpin {
+                    if isHandlingTouchDown {
+                        pageNeedsAppearanceRefresh = true
+                        scheduleDeferredAppearanceRefresh()
+                    } else {
+                        refreshKeyAppearances()
+                    }
                 } else if isHandlingTouchDown {
                     bottomRowNeedsAppearanceRefresh = true
                     scheduleDeferredAppearanceRefresh()
                 } else {
                     refreshBottomRowAppearanceOnly()
+                }
+            }
+        }
+    }
+
+    var pinyinScheme: PinyinScheme = .quanpin {
+        didSet {
+            if oldValue != pinyinScheme && showShuangpinKeyHints && page == .alphabetic {
+                if isHandlingTouchDown {
+                    pageNeedsAppearanceRefresh = true
+                    scheduleDeferredAppearanceRefresh()
+                } else {
+                    refreshKeyAppearances()
+                }
+            }
+        }
+    }
+
+    var showShuangpinKeyHints: Bool = false {
+        didSet {
+            if oldValue != showShuangpinKeyHints && page == .alphabetic {
+                if isHandlingTouchDown {
+                    pageNeedsAppearanceRefresh = true
+                    scheduleDeferredAppearanceRefresh()
+                } else {
+                    refreshKeyAppearances()
+                }
+            }
+        }
+    }
+
+    var oneHandedMode: OneHandedMode = .off {
+        didSet {
+            if oldValue != oneHandedMode {
+                lastLaidOutGridSize = .zero
+                lastReportedAnchorGeometryKey = nil
+                if !isHidden && Self.isValidGridSize(width: bounds.width, height: bounds.height, screenSize: resolvedScreenSize) {
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    layoutKeyFrames(width: bounds.width, height: bounds.height)
+                    CATransaction.commit()
+                } else {
+                    setNeedsLayout()
                 }
             }
         }
@@ -315,6 +412,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         }
     }
 
+    weak var oneHandedPopup: OneHandedSelectorPopupView?
+
     // MARK: - Private State
 
     private struct AnchorGeometryKey: Equatable {
@@ -323,6 +422,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         let profile: KeyboardTheme.LayoutProfile
         let showPeriod: Bool
         let needsGlobe: Bool
+        let oneHanded: OneHandedMode
     }
 
     private static let letterLowerFont = UIFont.systemFont(ofSize: 25.0, weight: .regular)
@@ -362,6 +462,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private var lastLaidOutGridSize: CGSize = .zero
     private var lastLaidOutPage: Page?
     private var lastLaidOutProfile: KeyboardTheme.LayoutProfile?
+    private var lastLaidOutOneHanded: OneHandedMode = .off
+    private var activeGridOriginX: CGFloat = 0.0
+    private var activeGridWidth: CGFloat = 0.0
+    private var oneHandedRestoreButton: UIButton?
     private var currentKeyCornerRadius: CGFloat = KeyboardTheme.keyCornerRadius
     private var pendingDeferredPage: Page?
 
@@ -435,6 +539,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private(set) var isCommittingMomentaryNumericSymbol = false
     private weak var momentaryNumericSlideTouch: UITouch?
 
+    // Long-press Emoji -> One-Handed slide selector state
+    private var emojiLongPressTimer: Timer?
+    private(set) var isOneHandedSelectorActive = false
+    private weak var oneHandedSelectorTouch: UITouch?
+    private var oneHandedSelectorStartX: CGFloat = 0
+    private var hasSlidInOneHandedSelector = false
+
     internal let globeSwitchButton = GlobeSwitchOverlayButton(type: .custom)
     private var isGlobeButtonPressed = false
 
@@ -479,12 +590,15 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             || isGlobeButtonPressed
             || isTrackpadActive
             || isMomentaryNumericSlideActive
+            || isOneHandedSelectorActive
             || !currentlyPressedKeys.isEmpty
             || spaceLongPressTimer != nil
             || backspaceDelayTimer != nil
             || backspaceRepeatTimer != nil
             || settingsLongPressTimer != nil
-            || calloutBubble?.isHidden == false else {
+            || emojiLongPressTimer != nil
+            || calloutBubble?.isHidden == false
+            || oneHandedPopup?.isHidden == false else {
             return
         }
         let wasTrackpad = isTrackpadActive
@@ -815,21 +929,86 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         layoutKeyFrames(width: w, height: h)
     }
 
+    private func effectiveOneHandedMode(forWidth w: CGFloat, profile: KeyboardTheme.LayoutProfile) -> OneHandedMode {
+        guard oneHandedMode != .off, w >= 300.0, w <= 500.0 else { return .off }
+        switch profile {
+        case .regularMiniPortrait, .regularCompactPortrait, .regularMaxPortrait, .duoCover:
+            return oneHandedMode
+        case .regularLandscape, .duoUnfoldedPortrait, .duoUnfoldedLandscape:
+            return .off
+        }
+    }
+
+    @objc private func handleOneHandedRestoreTap() {
+        triggerHaptic()
+        playKeySound(type: .modifier)
+        onRestoreFullWidthTap?()
+    }
+
+    private func syncOneHandedRestoreButton(effMode: OneHandedMode, totalWidth w: CGFloat, totalHeight h: CGFloat, topPad: CGFloat, bottomPad: CGFloat, activeW: CGFloat) {
+        guard effMode != .off else {
+            if let btn = oneHandedRestoreButton, !btn.isHidden {
+                btn.isHidden = true
+            }
+            return
+        }
+        let btn: UIButton
+        if let existing = oneHandedRestoreButton {
+            btn = existing
+        } else {
+            let created = UIButton(type: .system)
+            created.backgroundColor = KeyboardTheme.hitTestableClearBacking
+            created.isExclusiveTouch = false
+            created.addTarget(self, action: #selector(handleOneHandedRestoreTap), for: .touchUpInside)
+            addSubview(created)
+            oneHandedRestoreButton = created
+            btn = created
+        }
+        let symName = (effMode == .left) ? "chevron.compact.right" : "chevron.compact.left"
+        let cfg = UIImage.SymbolConfiguration(pointSize: 24.0, weight: .semibold)
+        btn.setImage(UIImage(systemName: symName, withConfiguration: cfg), for: .normal)
+        btn.tintColor = KeyboardTheme.dynamicSecondaryText
+        btn.accessibilityLabel = "恢复全宽键盘"
+        let gutterW = max(28.0, w - activeW)
+        let gutterX: CGFloat = (effMode == .left) ? activeW : 0.0
+        let targetFrame = CGRect(x: gutterX, y: topPad, width: gutterW, height: max(40.0, h - topPad - bottomPad))
+        if btn.frame != targetFrame {
+            btn.frame = targetFrame
+        }
+        if btn.isHidden {
+            btn.isHidden = false
+        }
+        bringSubviewToFront(btn)
+        if !globeSwitchButton.isHidden {
+            bringSubviewToFront(globeSwitchButton)
+        }
+    }
+
+    internal var oneHandedRestoreButtonForTesting: UIButton? { oneHandedRestoreButton }
+
     private func layoutKeyFrames(width w: CGFloat, height h: CGFloat) {
         let targetGridSize = CGSize(width: w, height: h)
         let screenSize = resolvedScreenSize
         let profile = KeyboardTheme.layoutProfile(forWidth: w, screenSize: screenSize)
+        let effOneHand = effectiveOneHandedMode(forWidth: w, profile: profile)
         if hasLaidOutKeyFrames
             && !needsViewFrameSync
             && lastLaidOutGridSize == targetGridSize
             && lastLaidOutPage == page
             && lastLaidOutProfile == profile
+            && lastLaidOutOneHanded == effOneHand
             && (page != .alphabetic || onAnchorsUpdated == nil || lastReportedAnchorGeometryKey != nil) {
             return
         }
         lastLaidOutGridSize = targetGridSize
         lastLaidOutPage = page
         lastLaidOutProfile = profile
+        lastLaidOutOneHanded = effOneHand
+
+        let activeW: CGFloat = (effOneHand == .off) ? w : round(max(256.0, w * 0.81))
+        let originX: CGFloat = (effOneHand == .right) ? (w - activeW) : 0.0
+        activeGridOriginX = originX
+        activeGridWidth = activeW
 
         let sideInset: CGFloat
         let hGap: CGFloat
@@ -839,7 +1018,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         switch profile {
         case .duoCover:
             sideInset = 0.0
-            hGap = 6.0
+            hGap = effOneHand == .off ? 6.0 : 5.0
             bottomPad = 7.0
             vGap = 11.0
         case .duoUnfoldedPortrait:
@@ -859,8 +1038,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             vGap = 7.0
         case .regularMiniPortrait, .regularCompactPortrait, .regularMaxPortrait:
             let isCompactPortraitGrid = h < 216.0
-            sideInset = 6.5
-            hGap = 6.25
+            sideInset = effOneHand == .off ? 6.5 : 5.0
+            hGap = effOneHand == .off ? 6.25 : 5.0
             bottomPad = isCompactPortraitGrid ? 1.5 : 7.0
             vGap = isCompactPortraitGrid ? 10.5 : 11.0
         }
@@ -868,12 +1047,12 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         currentKeyCornerRadius = cornerR
 
         let keyH = max(30.0, (h - topPad - bottomPad - vGap * 3.0) / 4.0)
-        let stdKeyW = max(18.0, (w - sideInset * 2.0 - hGap * 9.0) / 10.0)
+        let stdKeyW = max(18.0, (activeW - sideInset * 2.0 - hGap * 9.0) / 10.0)
 
         // Row 0: 10 equal-width keys (`q`..`p`)
         let y0 = topPad
         for i in 0..<rowItems[0].count {
-            let x = sideInset + CGFloat(i) * (stdKeyW + hGap)
+            let x = originX + sideInset + CGFloat(i) * (stdKeyW + hGap)
             let f = CGRect(x: x, y: y0, width: stdKeyW, height: keyH)
             rowItems[0][i].frame = f
         }
@@ -882,7 +1061,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         let y1 = y0 + keyH + vGap
         let count1 = rowItems[1].count
         let totalW1 = CGFloat(count1) * stdKeyW + CGFloat(max(0, count1 - 1)) * hGap
-        let startX1 = (w - totalW1) * 0.5
+        let startX1 = originX + (activeW - totalW1) * 0.5
         for i in 0..<count1 {
             let x = startX1 + CGFloat(i) * (stdKeyW + hGap)
             let f = CGRect(x: x, y: y1, width: stdKeyW, height: keyH)
@@ -895,19 +1074,20 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         if count2 >= 3 {
             let midCount = count2 - 2
             // Calibrated to native iOS 26 `115.5px / 85.7px = 1.348`
-            let sideModW = max(stdKeyW * 1.348, 42.0)
+            let minSideModW: CGFloat = effOneHand == .off ? 42.0 : 34.0
+            let sideModW = max(stdKeyW * 1.348, minSideModW)
             let midKeyW: CGFloat
             if page == .alphabetic {
                 midKeyW = stdKeyW
             } else {
                 // 6 wider punctuation keys in numeric/symbolic Row 2, calibrated to native iOS (`108..180px` in `704px`)
-                let availMid = w - sideInset * 2.0 - sideModW * 2.0 - hGap * 2.0 - 10.0
+                let availMid = activeW - sideInset * 2.0 - sideModW * 2.0 - hGap * 2.0 - (effOneHand == .off ? 10.0 : 6.0)
                 midKeyW = (availMid - CGFloat(midCount - 1) * hGap) / CGFloat(midCount)
             }
             let totalMidW = CGFloat(midCount) * midKeyW + CGFloat(midCount - 1) * hGap
-            let startMidX = (w - totalMidW) * 0.5
+            let startMidX = originX + (activeW - totalMidW) * 0.5
 
-            let leftFrame = CGRect(x: sideInset, y: y2, width: sideModW, height: keyH)
+            let leftFrame = CGRect(x: originX + sideInset, y: y2, width: sideModW, height: keyH)
             rowItems[2][0].frame = leftFrame
 
             for m in 0..<midCount {
@@ -916,14 +1096,11 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 rowItems[2][1 + m].frame = f
             }
 
-            let rightFrame = CGRect(x: w - sideInset - sideModW, y: y2, width: sideModW, height: keyH)
+            let rightFrame = CGRect(x: originX + activeW - sideInset - sideModW, y: y2, width: sideModW, height: keyH)
             rowItems[2][count2 - 1].frame = rightFrame
         }
 
         // Row 3: Exact Apple `UIKBTree` symmetric geometry!
-        // `space.minX` aligns to the pixel with `d.minX` & `x.minX` (`sideInset + 2.5 * (stdKeyW + hGap)`),
-        // and `space.maxX` aligns to the pixel with `j.maxX` & `n.maxX` (`w - sideInset - 2.5 * (stdKeyW + hGap)`),
-        // making `123` == `😊` == `1.25 * stdKeyW + 0.25 * hGap` and `⏎` == `2.5 * stdKeyW + 1.5 * hGap`!
         let y3 = y2 + keyH + vGap
         let r3 = rowItems[3]
         if !r3.isEmpty {
@@ -965,7 +1142,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
             let periodW: CGFloat = (showPeriodBesideSpace && page == .alphabetic) ? stdKeyW : 0
 
-            var cursorX = sideInset
+            var cursorX = originX + sideInset
             for i in 0..<r3.count {
                 let role = r3[i].role
                 let kw: CGFloat
@@ -981,8 +1158,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 case .returnKey:
                     kw = returnW
                 case .space:
-                    let rightEdge = w - sideInset - returnW - hGap
-                    kw = max(80.0, rightEdge - cursorX)
+                    let rightEdge = originX + activeW - sideInset - returnW - hGap
+                    kw = max(64.0, rightEdge - cursorX)
                 default:
                     kw = stdKeyW
                 }
@@ -1009,6 +1186,14 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 }
             }
             syncGlobeOverlayFrame()
+            syncOneHandedRestoreButton(
+                effMode: effOneHand,
+                totalWidth: w,
+                totalHeight: h,
+                topPad: topPad,
+                bottomPad: bottomPad,
+                activeW: activeW
+            )
         }
 
         // Update 3-row alphabetic bounding region & report exact live key centers to SpatialTouchModel!
@@ -1021,7 +1206,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 h2: Int32((h * 2).rounded()),
                 profile: profile,
                 showPeriod: showPeriodBesideSpace,
-                needsGlobe: needsGlobeKey
+                needsGlobe: needsGlobeKey,
+                oneHanded: effOneHand
             )
             if let onAnchorsUpdated, geomKey != lastReportedAnchorGeometryKey {
                 lastReportedAnchorGeometryKey = geomKey
@@ -1030,7 +1216,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 for r in 0...2 {
                     for item in rowItems[r] {
                         if case let .letter(ch) = item.role {
-                            let nx = item.frame.midX / w
+                            let nx = (item.frame.midX - originX) / max(1.0, activeW)
                             let ny = (item.frame.midY - alphaRegionTop) / alphaRegionHeight
                             anchors.append(SpatialTouchModel.KeyAnchor(char: ch, center: CGPoint(x: nx, y: ny)))
                         }
@@ -1183,6 +1369,24 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             }
         }
         syncGlobeOverlayFrame()
+        let w = bounds.width
+        let h = bounds.height
+        if w > 1.0 && h > 1.0 {
+            let screenSize = resolvedScreenSize
+            let profile = KeyboardTheme.layoutProfile(forWidth: w, screenSize: screenSize)
+            let effOneHand = effectiveOneHandedMode(forWidth: w, profile: profile)
+            let topPad = KeyboardTheme.firstKeyRowTopInset(forWidth: w, screenSize: screenSize)
+            let bottomPad: CGFloat = (h < 216.0) ? 1.5 : 7.0
+            let activeW: CGFloat = (effOneHand == .off) ? w : round(max(256.0, w * 0.81))
+            syncOneHandedRestoreButton(
+                effMode: effOneHand,
+                totalWidth: w,
+                totalHeight: h,
+                topPad: topPad,
+                bottomPad: bottomPad,
+                activeW: activeW
+            )
+        }
     }
 
     private func flushDeferredAppearancesIfNeeded() {
@@ -1316,6 +1520,44 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         return uppercase ? String(ch.uppercased()) : String(ch)
     }
 
+    private static let xiaoheHints: [Character: String] = [
+        "q": "iu", "w": "ei", "r": "uan", "t": "üe", "y": "un", "u": "sh", "i": "ch", "o": "uo", "p": "ie",
+        "s": "ong", "d": "ai", "f": "en", "g": "eng", "h": "ang", "j": "an", "k": "ing", "l": "uang",
+        "z": "ou", "x": "ia", "c": "ao", "v": "zh", "b": "in", "n": "iao", "m": "ian",
+    ]
+
+    private static let ziranmaHints: [Character: String] = [
+        "q": "iu", "w": "ia", "r": "uan", "t": "üe", "y": "ing", "u": "sh", "i": "ch", "o": "uo", "p": "un",
+        "s": "ong", "d": "uang", "f": "en", "g": "eng", "h": "ang", "j": "an", "k": "ao", "l": "ai",
+        "z": "ei", "x": "ie", "c": "iao", "v": "zh", "b": "ou", "n": "in", "m": "ian",
+    ]
+
+    internal static func shuangpinKeyHint(for ch: Character, scheme: PinyinScheme) -> String? {
+        switch scheme {
+        case .quanpin: return nil
+        case .xiaohe: return xiaoheHints[ch]
+        case .ziranma: return ziranmaHints[ch]
+        }
+    }
+
+    internal func debugSubHintText(for role: KeyRole) -> String? {
+        for row in rowItems {
+            for item in row where item.role == role {
+                return item.view.subHintTextForTesting
+            }
+        }
+        return nil
+    }
+
+    internal func debugDisplayedTitle(for role: KeyRole) -> String? {
+        for row in rowItems {
+            for item in row where item.role == role {
+                return item.view.titleTextForTesting
+            }
+        }
+        return nil
+    }
+
     private func configureKeyView(_ v: KeycapItemView, role: KeyRole, dark: Bool, pressed: Bool, row: Int = -1, col: Int = -1) {
         let primaryText = KeyboardTheme.primaryKeyTextColor(dark: dark)
         let fgPrimary = isTrackpadActive ? primaryText.withAlphaComponent(0.16) : primaryText
@@ -1324,9 +1566,18 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         case let .letter(ch):
             let isUpper = (shiftState != .lower)
             let display = Self.letterDisplayString(ch, uppercase: isUpper)
-            let subHint = (enableTopRowNumberSwipe && page == .alphabetic && row == 0 && col >= 0 && col < Self.topRowDigits.count)
+            let digitHint = (enableTopRowNumberSwipe && page == .alphabetic && row == 0 && col >= 0 && col < Self.topRowDigits.count)
                 ? Self.topRowDigits[col]
                 : nil
+            let spHint = (showShuangpinKeyHints && isPinyinMode && pinyinScheme != .quanpin && page == .alphabetic && !isUpper)
+                ? Self.shuangpinKeyHint(for: ch, scheme: pinyinScheme)
+                : nil
+            let subHint: String?
+            if let d = digitHint, let s = spHint {
+                subHint = "\(d)·\(s)"
+            } else {
+                subHint = spHint ?? digitHint
+            }
             // Calibrated against iOS 26: lowercase 25.0pt regular with -2.9pt offset centers x-height at 0.0px!
             v.apply(
                 title: display,
@@ -1449,7 +1700,13 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             )
 
         case .smartPeriod:
-            let pText = isChineseContext ? "。" : "."
+            let isFullwidth = isPinyinMode && isChineseContext
+            let pText: String
+            if spaceLeftPunctuation == .comma {
+                pText = isFullwidth ? "，" : ","
+            } else {
+                pText = isFullwidth ? "。" : "."
+            }
             let pFont = Self.smartPeriodFont
             let pHOff = KeyboardTheme.opticalHorizontalOffset(for: pText, font: pFont)
             v.apply(
@@ -1459,7 +1716,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 font: pFont,
                 symbolWeight: .regular,
                 horizontalOffset: pHOff,
-                verticalOffset: isChineseContext ? -2.0 : -3.0,
+                verticalOffset: isFullwidth ? -2.0 : -3.0,
                 fill: KeyboardTheme.letterKeyFill(dark: dark, pressed: pressed),
                 foreground: fgPrimary,
                 dark: dark
@@ -1646,6 +1903,14 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             height: effectiveHitHeight + 65
         )
         guard hitBounds.contains(point) else { return nil }
+        if let restoreBtn = oneHandedRestoreButton, !restoreBtn.isHidden {
+            if activeGridOriginX > 1.0 && point.x < activeGridOriginX - 8.0 {
+                return nil
+            }
+            if activeGridOriginX == 0.0 && activeGridWidth > 1.0 && activeGridWidth < bounds.width - 10.0 && point.x > activeGridWidth + 8.0 {
+                return nil
+            }
+        }
 
         var bestRow = 0
         var bestRowDist = CGFloat.greatestFiniteMagnitude
@@ -1877,11 +2142,18 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                     } else if otherState.rowIndex < rowItems.count,
                               otherState.colIndex < rowItems[otherState.rowIndex].count {
                         let otherRole = rowItems[otherState.rowIndex][otherState.colIndex].role
-                        if !otherState.didCommitOnTouchDown && isCommitOnRolloverRole(otherRole) {
+                        if otherTouch === oneHandedSelectorTouch && isOneHandedSelectorActive {
+                            finishOneHandedSelector(at: otherState.currentPoint, cancelled: false)
+                        } else if !otherState.didCommitOnTouchDown && isCommitOnRolloverRole(otherRole) {
                             if otherRole == .space { stopSpaceTimer() }
+                            if otherRole == .emoji { stopEmojiLongPressTimer() }
                             if case .pageSwitch = otherRole { stopSettingsLongPressTimer() }
-                            let commitPt = otherState.hasUnlockedSlide ? otherState.currentPoint : otherState.initialPoint
-                            commitKey(row: otherState.rowIndex, col: otherState.colIndex, point: commitPt, touchSeq: otherState.touchSeq)
+                            if let swipeDigit = otherState.swipedUpDigit {
+                                onSymbolTap?(swipeDigit)
+                            } else {
+                                let commitPt = otherState.hasUnlockedSlide ? otherState.currentPoint : otherState.initialPoint
+                                commitKey(row: otherState.rowIndex, col: otherState.colIndex, point: commitPt, touchSeq: otherState.touchSeq)
+                            }
                         }
                     }
                 }
@@ -1917,8 +2189,11 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                         continue
                     }
                     let otherRole = rowItems[otherState.rowIndex][otherState.colIndex].role
-                    if !otherState.didCommitOnTouchDown && isCommitOnRolloverRole(otherRole) {
+                    if otherTouch === oneHandedSelectorTouch && isOneHandedSelectorActive {
+                        finishOneHandedSelector(at: otherState.currentPoint, cancelled: false)
+                    } else if !otherState.didCommitOnTouchDown && isCommitOnRolloverRole(otherRole) {
                         if otherRole == .space { stopSpaceTimer() }
+                        if otherRole == .emoji { stopEmojiLongPressTimer() }
                         if case .pageSwitch = otherRole { stopSettingsLongPressTimer() }
                         if let swipeDigit = otherState.swipedUpDigit {
                             onSymbolTap?(swipeDigit)
@@ -2057,8 +2332,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             if let event, window != nil {
                 onGlobeEvent?(resolvedGlobeEventSourceView(), event)
             }
-        default:
-            break
+        case .emoji:
+            if canPresentOneHandedSelector {
+                startEmojiLongPressTimer(for: touch)
+            }
         }
     }
 
@@ -2067,6 +2344,11 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
         for touch in touches {
             let pt = touch.location(in: self)
+
+            if isOneHandedSelectorActive && touch === oneHandedSelectorTouch {
+                updateOneHandedSelectorDrag(at: pt)
+                continue
+            }
 
             if isTrackpadActive && touch === trackpadTouch {
                 let dx = pt.x - lastTrackpadPoint.x
@@ -2102,6 +2384,9 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             let moveDistFromStart = hypot(pt.x - state.initialPoint.x, pt.y - state.initialPoint.y)
             if case .pageSwitch = state.initialRole, moveDistFromStart > 10.0 {
                 stopSettingsLongPressTimer()
+            }
+            if state.initialRole == .emoji, moveDistFromStart > 18.0 {
+                stopEmojiLongPressTimer()
             }
 
             if !state.isMomentaryNumericSlide,
@@ -2176,6 +2461,17 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             }
 
             if state.isDeferredTopRowLetter {
+                if pt.y < -96.0 {
+                    let role = rowItems[state.rowIndex][state.colIndex].role
+                    activeTouches.removeValue(forKey: touch)
+                    updateCalloutAndHighlights()
+                    LokeyDiagnosticLogger.shared.recordMissedOrCancelledTouchFast(
+                        touchSeq: state.touchSeq,
+                        point: pt,
+                        reason: .draggedOffKey(Int(pt.y), roleDiagnosticToken(role))
+                    )
+                    continue
+                }
                 let dx = pt.x - state.initialPoint.x
                 let dy = pt.y - state.initialPoint.y
                 var labelChanged = false
@@ -2313,6 +2609,14 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     }
 
     private func handleSingleTouchEnded(_ touch: UITouch, event: UIEvent?) {
+        if isOneHandedSelectorActive && touch === oneHandedSelectorTouch {
+            let endPt = touch.location(in: self)
+            finishOneHandedSelector(at: endPt, cancelled: false)
+            activeTouches.removeValue(forKey: touch)
+            updateCalloutAndHighlights()
+            return
+        }
+
         if isTrackpadActive && touch === trackpadTouch {
             endTrackpadMode()
             activeTouches.removeValue(forKey: touch)
@@ -2324,6 +2628,9 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         // Rollover already retired the older thumb. Its later lift must not
         // redraw the current thumb's bubble or alter its timers.
         guard let state = activeTouches.removeValue(forKey: touch) else { return }
+        if state.initialRole == .emoji {
+            stopEmojiLongPressTimer()
+        }
         if state.initialRole == .globe {
             updateCalloutAndHighlights()
             if let event, window != nil {
@@ -2460,6 +2767,10 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             stopSpaceTimer()
             stopBackspaceTimers()
             stopSettingsLongPressTimer()
+            stopEmojiLongPressTimer()
+            if isOneHandedSelectorActive {
+                finishOneHandedSelector(at: .zero, cancelled: true)
+            }
             didTriggerSettingsLongPress = false
             if isMomentaryNumericSlideActive {
                 isMomentaryNumericSlideActive = false
@@ -2493,6 +2804,11 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             if shouldRescueLineBreak {
                 onBackspaceTap?()
             }
+        }
+        if touch === oneHandedSelectorTouch {
+            finishOneHandedSelector(at: .zero, cancelled: true)
+            activeTouches.removeValue(forKey: touch)
+            return
         }
         if touch === trackpadTouch {
             endTrackpadMode()
@@ -2561,7 +2877,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         let item = rowItems[row][col]
         switch item.role {
         case let .letter(ch):
-            let nx = min(1.0, max(0.0, point.x / max(1.0, bounds.width)))
+            let gridW = activeGridWidth > 1.0 ? activeGridWidth : bounds.width
+            let nx = min(1.0, max(0.0, (point.x - activeGridOriginX) / max(1.0, gridW)))
             let ny = min(1.0, max(0.0, (point.y - alphaRegionTop) / alphaRegionHeight))
             let isShifted = (shiftState != .lower)
             if shiftState == .oneShotUpper {
@@ -2750,16 +3067,123 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
         settingsLongPressTimer = nil
     }
 
+    private var canPresentOneHandedSelector: Bool {
+        let w = bounds.width > 1.0 ? bounds.width : 393.0
+        guard w >= 300.0 && w <= 500.0 else { return false }
+        let profile = KeyboardTheme.layoutProfile(forWidth: w, screenSize: resolvedScreenSize)
+        switch profile {
+        case .regularMiniPortrait, .regularCompactPortrait, .regularMaxPortrait, .duoCover:
+            return true
+        case .regularLandscape, .duoUnfoldedPortrait, .duoUnfoldedLandscape:
+            return false
+        }
+    }
+
+    private func startEmojiLongPressTimer(for touch: UITouch) {
+        stopEmojiLongPressTimer()
+        emojiLongPressTimer = Timer.scheduledTimer(withTimeInterval: 0.30, repeats: false) { [weak self, weak touch] _ in
+            guard let self, let touch else { return }
+            self.activateOneHandedSelector(for: touch)
+        }
+    }
+
+    private func stopEmojiLongPressTimer() {
+        emojiLongPressTimer?.invalidate()
+        emojiLongPressTimer = nil
+    }
+
+    internal func activateOneHandedSelector(for touch: UITouch) {
+        stopEmojiLongPressTimer()
+        guard canPresentOneHandedSelector,
+              let state = activeTouches[touch],
+              state.initialRole == .emoji,
+              rowItems.count > 3,
+              let emojiItem = rowItems[3].first(where: { $0.role == .emoji }) else {
+            return
+        }
+        isOneHandedSelectorActive = true
+        oneHandedSelectorTouch = touch
+        oneHandedSelectorStartX = touch.location(in: self).x
+        hasSlidInOneHandedSelector = false
+        calloutBubble?.hide()
+        if hapticFeedbackIntensity > 0.0 {
+            selectionFeedback.prepare()
+        }
+        triggerHaptic()
+        if let popup = oneHandedPopup, let popupSuper = popup.superview {
+            let anchor = convert(emojiItem.frame, to: popupSuper)
+            let dark = traitCollection.userInterfaceStyle == .dark
+            let cw = popupSuper.bounds.width > 1.0 ? popupSuper.bounds.width : bounds.width
+            popup.show(
+                anchorKeyFrame: anchor,
+                containerWidth: cw,
+                initialMode: oneHandedMode,
+                dark: dark
+            )
+        }
+    }
+
+    private func updateOneHandedSelectorDrag(at ptInGrid: CGPoint) {
+        guard isOneHandedSelectorActive,
+              let popup = oneHandedPopup,
+              let popupSuper = popup.superview else { return }
+        if !hasSlidInOneHandedSelector && abs(ptInGrid.x - oneHandedSelectorStartX) >= 8.0 {
+            hasSlidInOneHandedSelector = true
+        }
+        guard hasSlidInOneHandedSelector else { return }
+        let ptInSuper = convert(ptInGrid, to: popupSuper)
+        let candidateMode = popup.resolveMode(forContainerPoint: ptInSuper)
+        if candidateMode != popup.highlightedMode {
+            popup.updateHighlightedMode(candidateMode, animated: true)
+            if hapticFeedbackIntensity > 0.0 {
+                selectionFeedback.selectionChanged()
+                selectionFeedback.prepare()
+            }
+        }
+    }
+
+    private func finishOneHandedSelector(at endPtInGrid: CGPoint, cancelled: Bool) {
+        stopEmojiLongPressTimer()
+        let wasActive = isOneHandedSelectorActive
+        let didSlide = hasSlidInOneHandedSelector
+        isOneHandedSelectorActive = false
+        oneHandedSelectorTouch = nil
+        hasSlidInOneHandedSelector = false
+        guard wasActive else {
+            oneHandedPopup?.hide()
+            return
+        }
+        var targetMode = oneHandedMode
+        if !cancelled && endPtInGrid.y >= -96.0, let popup = oneHandedPopup {
+            if didSlide, let popupSuper = popup.superview {
+                targetMode = popup.resolveMode(forContainerPoint: convert(endPtInGrid, to: popupSuper))
+            } else {
+                targetMode = popup.highlightedMode
+            }
+        }
+        oneHandedPopup?.hide()
+        guard !cancelled, endPtInGrid.y >= -96.0, targetMode != oneHandedMode else { return }
+        playKeySound(type: .modifier)
+        triggerHaptic()
+        oneHandedMode = targetMode
+        onSelectOneHandedMode?(targetMode)
+    }
+
     private func cancelAllTimersAndTouches() {
         stopSpaceTimer()
         stopBackspaceTimers()
         stopSettingsLongPressTimer()
+        stopEmojiLongPressTimer()
         isGlobeButtonPressed = false
         isTrackpadActive = false
         trackpadTouch = nil
+        isOneHandedSelectorActive = false
+        oneHandedSelectorTouch = nil
+        hasSlidInOneHandedSelector = false
         activeTouches.removeAll()
         currentlyPressedKeys.removeAll(keepingCapacity: true)
         calloutBubble?.hide()
+        oneHandedPopup?.hide()
     }
 
     static func clearSymbolCacheForMemoryWarning() {
@@ -2836,6 +3260,8 @@ private final class KeycapItemView: UIView {
     private let iconView = UIImageView()
     private let watermarkLabel = UILabel()
     private let subHintLabel = UILabel()
+    internal var subHintTextForTesting: String? { subHintLabel.isHidden ? nil : subHintLabel.text }
+    internal var titleTextForTesting: String? { label.isHidden ? nil : label.text }
     private var horizontalOffset: CGFloat = 0
     private var verticalOffset: CGFloat = 0
     private var lastRenderState: RenderState?
@@ -2861,7 +3287,9 @@ private final class KeycapItemView: UIView {
         addSubview(watermarkLabel)
 
         subHintLabel.textAlignment = .right
-        subHintLabel.font = .systemFont(ofSize: 9.5, weight: .medium)
+        subHintLabel.font = .systemFont(ofSize: 8.8, weight: .medium)
+        subHintLabel.adjustsFontSizeToFitWidth = true
+        subHintLabel.minimumScaleFactor = 0.70
         subHintLabel.isHidden = true
         addSubview(subHintLabel)
     }
@@ -2877,7 +3305,7 @@ private final class KeycapItemView: UIView {
         iconView.frame = bounds.offsetBy(dx: horizontalOffset, dy: verticalOffset)
         // Calibrated to native iOS 26 `拼` watermark (`(716..743, 587..613)` in 1024px crop)
         watermarkLabel.frame = CGRect(x: bounds.width - 20.4, y: bounds.height - 18.7, width: 16.0, height: 15.5)
-        subHintLabel.frame = CGRect(x: bounds.width - 14.0, y: 2.0, width: 11.0, height: 11.0)
+        subHintLabel.frame = CGRect(x: 2.0, y: 1.8, width: max(11.0, bounds.width - 5.0), height: 11.5)
     }
 
     func apply(

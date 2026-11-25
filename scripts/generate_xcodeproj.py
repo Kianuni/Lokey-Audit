@@ -111,6 +111,7 @@ def generate_pbxproj() -> None:
 		B10000050000000000000001 /* lokey_opencc.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200002C0000000000000001 /* lokey_opencc.bin */; };
 		B10000060000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B20000060000000000000001 /* PrivacyInfo.xcprivacy */; };
 		B10000070000000000000001 /* lokey_emoji.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200001A0000000000000001 /* lokey_emoji.bin */; };
+		B10000090000000000000001 /* lokey_hanzi_meta.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200002E0000000000000001 /* lokey_hanzi_meta.bin */; };
 
 		/* Shared Engine compiled into AuditDemoApp */
 		B10000100000000000000001 /* LokeySettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000100000000000000001 /* LokeySettings.swift */; };
@@ -147,6 +148,7 @@ def generate_pbxproj() -> None:
 		B100002F0000000000000001 /* lokey_emoji.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200001A0000000000000001 /* lokey_emoji.bin */; };
 		B100006C0000000000000001 /* lokey_opencc.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200002C0000000000000001 /* lokey_opencc.bin */; };
 		B100006E0000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B20000280000000000000001 /* PrivacyInfo.xcprivacy */; };
+		B10000710000000000000001 /* lokey_hanzi_meta.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200002E0000000000000001 /* lokey_hanzi_meta.bin */; };
 
 		/* Embed App Extension into Host App PlugIns */
 		B10000300000000000000001 /* LokeyKeyboard.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B20000910000000000000001 /* LokeyKeyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -155,6 +157,7 @@ def generate_pbxproj() -> None:
 		B10000400000000000000001 /* LokeyAuditTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000400000000000000001 /* LokeyAuditTests.swift */; };
 		B10000510000000000000001 /* lokey_emoji.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200001A0000000000000001 /* lokey_emoji.bin */; };
 		B100006D0000000000000001 /* lokey_opencc.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200002C0000000000000001 /* lokey_opencc.bin */; };
+		B10000720000000000000001 /* lokey_hanzi_meta.bin in Resources */ = {isa = PBXBuildFile; fileRef = B200002E0000000000000001 /* lokey_hanzi_meta.bin */; };
 		B10000420000000000000001 /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000200000000000000001 /* KeyboardViewController.swift */; };
 		B10000430000000000000001 /* KeyboardTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000210000000000000001 /* KeyboardTheme.swift */; };
 		B10000440000000000000001 /* KeyCalloutBubbleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000220000000000000001 /* KeyCalloutBubbleView.swift */; };
@@ -229,6 +232,7 @@ def generate_pbxproj() -> None:
 		B20000180000000000000001 /* demo_lexicon.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = demo_lexicon.bin; sourceTree = "<group>"; };
 		B200001A0000000000000001 /* lokey_emoji.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = lokey_emoji.bin; sourceTree = "<group>"; };
 		B200002C0000000000000001 /* lokey_opencc.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = lokey_opencc.bin; sourceTree = "<group>"; };
+		B200002E0000000000000001 /* lokey_hanzi_meta.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = lokey_hanzi_meta.bin; sourceTree = "<group>"; };
 
 		B20000200000000000000001 /* KeyboardViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardViewController.swift; sourceTree = "<group>"; };
 		B20000210000000000000001 /* KeyboardTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardTheme.swift; sourceTree = "<group>"; };
@@ -331,6 +335,7 @@ def generate_pbxproj() -> None:
 				B20000180000000000000001 /* demo_lexicon.bin */,
 				B200001A0000000000000001 /* lokey_emoji.bin */,
 				B200002C0000000000000001 /* lokey_opencc.bin */,
+				B200002E0000000000000001 /* lokey_hanzi_meta.bin */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -490,6 +495,7 @@ def generate_pbxproj() -> None:
 				B10000050000000000000001 /* lokey_opencc.bin in Resources */,
 				B10000060000000000000001 /* PrivacyInfo.xcprivacy in Resources */,
 				B10000070000000000000001 /* lokey_emoji.bin in Resources */,
+				B10000090000000000000001 /* lokey_hanzi_meta.bin in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -500,6 +506,7 @@ def generate_pbxproj() -> None:
 				B100002F0000000000000001 /* lokey_emoji.bin in Resources */,
 				B100006C0000000000000001 /* lokey_opencc.bin in Resources */,
 				B100006E0000000000000001 /* PrivacyInfo.xcprivacy in Resources */,
+				B10000710000000000000001 /* lokey_hanzi_meta.bin in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -509,6 +516,7 @@ def generate_pbxproj() -> None:
 			files = (
 				B10000510000000000000001 /* lokey_emoji.bin in Resources */,
 				B100006D0000000000000001 /* lokey_opencc.bin in Resources */,
+				B10000720000000000000001 /* lokey_hanzi_meta.bin in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -704,7 +712,7 @@ def generate_pbxproj() -> None:
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = AuditDemoApp/AuditDemoApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 100;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AuditDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -724,7 +732,7 @@ def generate_pbxproj() -> None:
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = AuditDemoApp/AuditDemoApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 100;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AuditDemoApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -744,7 +752,7 @@ def generate_pbxproj() -> None:
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = KeyboardExtension/LokeyKeyboard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 100;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = KeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -766,7 +774,7 @@ def generate_pbxproj() -> None:
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = KeyboardExtension/LokeyKeyboard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 100;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = KeyboardExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -787,7 +795,7 @@ def generate_pbxproj() -> None:
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 100;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LokeyAuditTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -808,7 +816,7 @@ def generate_pbxproj() -> None:
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 100;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LokeyAuditTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

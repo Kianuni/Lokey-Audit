@@ -1197,6 +1197,42 @@ public enum PinyinScheme: String, Codable, CaseIterable, Sendable, Hashable {
     }
 }
 
+public enum OneHandedMode: Int, Codable, CaseIterable, Sendable, Hashable {
+    case off = 0
+    case left = 1
+    case right = 2
+
+    public var title: String {
+        switch self {
+        case .off: return "标准全宽"
+        case .left: return "左侧单手"
+        case .right: return "右侧单手"
+        }
+    }
+}
+
+public enum SpaceLeftPunctuationMode: Int, Codable, CaseIterable, Sendable, Hashable {
+    case off = 0
+    case comma = 1
+    case period = 2
+
+    public var title: String {
+        switch self {
+        case .off: return "关闭"
+        case .comma: return "逗号（，/ ,）"
+        case .period: return "句号（。/ .）"
+        }
+    }
+
+    public var shortTitle: String {
+        switch self {
+        case .off: return "关闭"
+        case .comma: return "逗号"
+        case .period: return "句号"
+        }
+    }
+}
+
 /// Shared preferences persisted in the `App Group` container (both direct atomic JSON file + `UserDefaults`).
 public struct LokeySettings: Codable, Equatable, Sendable {
     public var hapticStrength: HapticStrength {
@@ -1235,7 +1271,25 @@ public struct LokeySettings: Codable, Equatable, Sendable {
     }
 
     public var isKeyClickSoundEnabled: Bool
-    public var showPeriodBesideSpace: Bool
+    public var spaceLeftPunctuation: SpaceLeftPunctuationMode {
+        didSet {
+            let active = (spaceLeftPunctuation != .off)
+            if showPeriodBesideSpace != active {
+                showPeriodBesideSpace = active
+            }
+        }
+    }
+    public var showPeriodBesideSpace: Bool {
+        didSet {
+            if showPeriodBesideSpace {
+                if spaceLeftPunctuation == .off {
+                    spaceLeftPunctuation = .period
+                }
+            } else if spaceLeftPunctuation != .off {
+                spaceLeftPunctuation = .off
+            }
+        }
+    }
     public var enableSpatialCorrection: Bool
     public var enableAdaptiveTouchCalibration: Bool
     public var enableEmojiCandidates: Bool
@@ -1246,12 +1300,17 @@ public struct LokeySettings: Codable, Equatable, Sendable {
     public var enableComposingSpaceTrackpad: Bool
     public var pinyinScheme: PinyinScheme
     public var enableTopRowNumberSwipe: Bool
+    public var oneHandedMode: OneHandedMode
+    public var enableAutoPairPunctuation: Bool
+    public var showShuangpinKeyHints: Bool
+    public var enableDateTimeShortcuts: Bool
 
     public init(
         hapticStrength: HapticStrength? = nil,
         hapticFeedbackIntensity: Double = 0.65,
         isKeyClickSoundEnabled: Bool = true,
         showPeriodBesideSpace: Bool = false,
+        spaceLeftPunctuation: SpaceLeftPunctuationMode? = nil,
         enableSpatialCorrection: Bool = true,
         enableAdaptiveTouchCalibration: Bool = true,
         enableEmojiCandidates: Bool = true,
@@ -1261,7 +1320,11 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         chineseScriptMode: ChineseScriptMode = .simplified,
         enableComposingSpaceTrackpad: Bool = false,
         pinyinScheme: PinyinScheme = .quanpin,
-        enableTopRowNumberSwipe: Bool = false
+        enableTopRowNumberSwipe: Bool = false,
+        oneHandedMode: OneHandedMode = .off,
+        enableAutoPairPunctuation: Bool = true,
+        showShuangpinKeyHints: Bool = false,
+        enableDateTimeShortcuts: Bool = true
     ) {
         let clamped = min(1.0, max(0.0, hapticFeedbackIntensity))
         self.hapticFeedbackIntensity = clamped
@@ -1282,7 +1345,9 @@ public struct LokeySettings: Codable, Equatable, Sendable {
             }
         }
         self.isKeyClickSoundEnabled = isKeyClickSoundEnabled
-        self.showPeriodBesideSpace = showPeriodBesideSpace
+        let resolvedLeftPunct = spaceLeftPunctuation ?? (showPeriodBesideSpace ? .period : .off)
+        self.spaceLeftPunctuation = resolvedLeftPunct
+        self.showPeriodBesideSpace = (resolvedLeftPunct != .off)
         self.enableSpatialCorrection = enableSpatialCorrection
         self.enableAdaptiveTouchCalibration = enableAdaptiveTouchCalibration
         self.enableEmojiCandidates = enableEmojiCandidates
@@ -1293,6 +1358,10 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.enableComposingSpaceTrackpad = enableComposingSpaceTrackpad
         self.pinyinScheme = pinyinScheme
         self.enableTopRowNumberSwipe = enableTopRowNumberSwipe
+        self.oneHandedMode = oneHandedMode
+        self.enableAutoPairPunctuation = enableAutoPairPunctuation
+        self.showShuangpinKeyHints = showShuangpinKeyHints
+        self.enableDateTimeShortcuts = enableDateTimeShortcuts
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1300,6 +1369,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         case hapticFeedbackIntensity
         case isKeyClickSoundEnabled
         case showPeriodBesideSpace
+        case spaceLeftPunctuation
         case enableSpatialCorrection
         case enableAdaptiveTouchCalibration
         case enableEmojiCandidates
@@ -1311,6 +1381,10 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         case enableComposingSpaceTrackpad
         case pinyinScheme
         case enableTopRowNumberSwipe
+        case oneHandedMode
+        case enableAutoPairPunctuation
+        case showShuangpinKeyHints
+        case enableDateTimeShortcuts
     }
 
     public init(from decoder: Decoder) throws {
@@ -1347,7 +1421,15 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         }
 
         self.isKeyClickSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .isKeyClickSoundEnabled) ?? true
-        self.showPeriodBesideSpace = try container.decodeIfPresent(Bool.self, forKey: .showPeriodBesideSpace) ?? false
+        let legacyPeriod = try container.decodeIfPresent(Bool.self, forKey: .showPeriodBesideSpace) ?? false
+        if let explicitPunct = try container.decodeIfPresent(SpaceLeftPunctuationMode.self, forKey: .spaceLeftPunctuation) {
+            self.spaceLeftPunctuation = explicitPunct
+            self.showPeriodBesideSpace = (explicitPunct != .off)
+        } else {
+            let migrated: SpaceLeftPunctuationMode = legacyPeriod ? .period : .off
+            self.spaceLeftPunctuation = migrated
+            self.showPeriodBesideSpace = legacyPeriod
+        }
         self.enableSpatialCorrection = try container.decodeIfPresent(Bool.self, forKey: .enableSpatialCorrection) ?? true
         self.enableAdaptiveTouchCalibration = try container.decodeIfPresent(Bool.self, forKey: .enableAdaptiveTouchCalibration) ?? true
         self.enableEmojiCandidates = try container.decodeIfPresent(Bool.self, forKey: .enableEmojiCandidates) ?? true
@@ -1366,6 +1448,10 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.enableComposingSpaceTrackpad = try container.decodeIfPresent(Bool.self, forKey: .enableComposingSpaceTrackpad) ?? false
         self.pinyinScheme = try container.decodeIfPresent(PinyinScheme.self, forKey: .pinyinScheme) ?? .quanpin
         self.enableTopRowNumberSwipe = try container.decodeIfPresent(Bool.self, forKey: .enableTopRowNumberSwipe) ?? false
+        self.oneHandedMode = try container.decodeIfPresent(OneHandedMode.self, forKey: .oneHandedMode) ?? .off
+        self.enableAutoPairPunctuation = try container.decodeIfPresent(Bool.self, forKey: .enableAutoPairPunctuation) ?? true
+        self.showShuangpinKeyHints = try container.decodeIfPresent(Bool.self, forKey: .showShuangpinKeyHints) ?? false
+        self.enableDateTimeShortcuts = try container.decodeIfPresent(Bool.self, forKey: .enableDateTimeShortcuts) ?? true
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1374,6 +1460,7 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         try container.encode(hapticFeedbackIntensity, forKey: .hapticFeedbackIntensity)
         try container.encode(isKeyClickSoundEnabled, forKey: .isKeyClickSoundEnabled)
         try container.encode(showPeriodBesideSpace, forKey: .showPeriodBesideSpace)
+        try container.encode(spaceLeftPunctuation, forKey: .spaceLeftPunctuation)
         try container.encode(enableSpatialCorrection, forKey: .enableSpatialCorrection)
         try container.encode(enableAdaptiveTouchCalibration, forKey: .enableAdaptiveTouchCalibration)
         try container.encode(enableEmojiCandidates, forKey: .enableEmojiCandidates)
@@ -1385,6 +1472,10 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         try container.encode(enableComposingSpaceTrackpad, forKey: .enableComposingSpaceTrackpad)
         try container.encode(pinyinScheme, forKey: .pinyinScheme)
         try container.encode(enableTopRowNumberSwipe, forKey: .enableTopRowNumberSwipe)
+        try container.encode(oneHandedMode, forKey: .oneHandedMode)
+        try container.encode(enableAutoPairPunctuation, forKey: .enableAutoPairPunctuation)
+        try container.encode(showShuangpinKeyHints, forKey: .showShuangpinKeyHints)
+        try container.encode(enableDateTimeShortcuts, forKey: .enableDateTimeShortcuts)
     }
 
     private static let storageKey = "com.kianuni.lokey.settings.v1"

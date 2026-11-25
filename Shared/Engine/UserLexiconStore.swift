@@ -67,6 +67,20 @@ public struct LokeyPersonalBackup: Codable, Equatable, Sendable {
         }
     }
 
+    public struct ShortcutRecord: Codable, Equatable, Sendable {
+        public let code: String
+        public let phrase: String
+        public let rank: Int
+        public let updatedAt: Int64
+
+        public init(code: String, phrase: String, rank: Int = 1, updatedAt: Int64) {
+            self.code = code
+            self.phrase = phrase
+            self.rank = rank
+            self.updatedAt = updatedAt
+        }
+    }
+
     public let format: String
     public let exportedAtISO8601: String
     public let appVersion: String
@@ -74,6 +88,18 @@ public struct LokeyPersonalBackup: Codable, Equatable, Sendable {
     public let phrases: [PhraseRecord]
     public let bigrams: [BigramRecord]
     public let unigrams: [UnigramRecord]
+    public let shortcuts: [ShortcutRecord]
+
+    private enum CodingKeys: String, CodingKey {
+        case format
+        case exportedAtISO8601
+        case appVersion
+        case touchCalibration
+        case phrases
+        case bigrams
+        case unigrams
+        case shortcuts
+    }
 
     public init(
         format: String = LokeyPersonalBackup.currentFormat,
@@ -82,7 +108,8 @@ public struct LokeyPersonalBackup: Codable, Equatable, Sendable {
         touchCalibration: LokeyTouchCalibration?,
         phrases: [PhraseRecord],
         bigrams: [BigramRecord],
-        unigrams: [UnigramRecord]
+        unigrams: [UnigramRecord],
+        shortcuts: [ShortcutRecord] = []
     ) {
         self.format = format
         self.exportedAtISO8601 = exportedAtISO8601
@@ -91,12 +118,25 @@ public struct LokeyPersonalBackup: Codable, Equatable, Sendable {
         self.phrases = phrases
         self.bigrams = bigrams
         self.unigrams = unigrams
+        self.shortcuts = shortcuts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.format = try c.decodeIfPresent(String.self, forKey: .format) ?? Self.currentFormat
+        self.exportedAtISO8601 = try c.decodeIfPresent(String.self, forKey: .exportedAtISO8601) ?? ""
+        self.appVersion = try c.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.0"
+        self.touchCalibration = try c.decodeIfPresent(LokeyTouchCalibration.self, forKey: .touchCalibration)
+        self.phrases = try c.decodeIfPresent([PhraseRecord].self, forKey: .phrases) ?? []
+        self.bigrams = try c.decodeIfPresent([BigramRecord].self, forKey: .bigrams) ?? []
+        self.unigrams = try c.decodeIfPresent([UnigramRecord].self, forKey: .unigrams) ?? []
+        self.shortcuts = try c.decodeIfPresent([ShortcutRecord].self, forKey: .shortcuts) ?? []
     }
 
     /// Decodes either a full `LokeyPersonalBackup` JSON file or a standalone `LokeyTouchCalibration` JSON profile.
     public static func decodeAutoDetecting(from data: Data) throws -> LokeyPersonalBackup {
         if let rawObj = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if rawObj["format"] is String || rawObj["phrases"] is [Any] || rawObj["bigrams"] is [Any] || rawObj["unigrams"] is [Any] {
+            if rawObj["format"] is String || rawObj["phrases"] is [Any] || rawObj["bigrams"] is [Any] || rawObj["unigrams"] is [Any] || rawObj["shortcuts"] is [Any] {
                 return try JSONDecoder().decode(LokeyPersonalBackup.self, from: data)
             }
             if rawObj["perKey"] is [String: Any] {
@@ -104,11 +144,12 @@ public struct LokeyPersonalBackup: Codable, Equatable, Sendable {
                 return LokeyPersonalBackup(
                     format: currentFormat,
                     exportedAtISO8601: ISO8601DateFormatter().string(from: Date()),
-                    appVersion: "0.9.5",
+                    appVersion: "1.0",
                     touchCalibration: cal,
                     phrases: [],
                     bigrams: [],
-                    unigrams: []
+                    unigrams: [],
+                    shortcuts: []
                 )
             }
         }
@@ -124,6 +165,7 @@ public struct PersonalBackupRestoreSummary: Sendable, Equatable {
     public let phrasesApplied: Int
     public let bigramsApplied: Int
     public let unigramsApplied: Int
+    public let shortcutsApplied: Int
     public let calibratedKeys: Int
     public let totalCommittedTaps: Int
 
@@ -131,12 +173,14 @@ public struct PersonalBackupRestoreSummary: Sendable, Equatable {
         phrasesApplied: Int,
         bigramsApplied: Int,
         unigramsApplied: Int,
+        shortcutsApplied: Int = 0,
         calibratedKeys: Int,
         totalCommittedTaps: Int
     ) {
         self.phrasesApplied = phrasesApplied
         self.bigramsApplied = bigramsApplied
         self.unigramsApplied = unigramsApplied
+        self.shortcutsApplied = shortcutsApplied
         self.calibratedKeys = calibratedKeys
         self.totalCommittedTaps = totalCommittedTaps
     }
@@ -157,6 +201,7 @@ public final class UserLexiconStore: @unchecked Sendable {
         public let isCustomComposed: Bool
         public let dynamicBoostQ8: Int
         public let skipCount: Int
+        public let recencyDecay: Double
 
         public init(
             surface: String,
@@ -166,7 +211,8 @@ public final class UserLexiconStore: @unchecked Sendable {
             useCount: Int,
             isCustomComposed: Bool,
             dynamicBoostQ8: Int,
-            skipCount: Int = 0
+            skipCount: Int = 0,
+            recencyDecay: Double = 1.0
         ) {
             self.surface = surface
             self.pinyinNormalized = pinyinNormalized
@@ -176,13 +222,16 @@ public final class UserLexiconStore: @unchecked Sendable {
             self.isCustomComposed = isCustomComposed
             self.dynamicBoostQ8 = dynamicBoostQ8
             self.skipCount = skipCount
+            self.recencyDecay = recencyDecay
         }
 
         /// The standalone preference is deliberately strong. An embedded dictionary
         /// word retains its lexical cost so one selection cannot dominate a sentence.
         func embeddedScore(syllables: [String], dictionary: @autoclosure () -> [MmapLexicon.WordHit]) -> Int? {
             guard syllables.count == surface.count, syllables.joined(separator: " ") == pinyinNormalized else { return nil }
-            let rawBonus = min(420, useCount > 6 ? 420 : useCount * 60)
+            let effDecay = isCustomComposed ? max(0.35, min(1.0, recencyDecay)) : max(0.0, min(1.0, recencyDecay))
+            let effUses = Double(max(0, useCount)) * effDecay
+            let rawBonus = min(420, Int((min(7.0, effUses) * 60.0).rounded()))
             let skipPenalty = min(900, max(0, skipCount) * 180)
             let bonus = rawBonus - skipPenalty
             let dict = dictionary()
@@ -220,11 +269,27 @@ public final class UserLexiconStore: @unchecked Sendable {
         }
     }
 
+    public struct CustomShortcut: Codable, Sendable, Equatable, Identifiable {
+        public var id: String { "\(code)|\(phrase)" }
+        public let code: String
+        public let phrase: String
+        public let rank: Int // 1 = #1的首选置顶, 2 = #2次选, 3 = #3候选
+        public let updatedAt: Int64
+
+        public init(code: String, phrase: String, rank: Int = 1, updatedAt: Int64 = Int64(Date().timeIntervalSince1970)) {
+            self.code = code
+            self.phrase = phrase
+            self.rank = min(9, max(1, rank))
+            self.updatedAt = updatedAt
+        }
+    }
+
     public struct DecodeSnapshot: Sendable {
         public let generation: UInt64
         public let hasAnyExactPhrases: Bool
         public let hasAnyBigrams: Bool
         public let hasAnyUnigrams: Bool
+        public let hasAnyShortcuts: Bool
         public let syllablePrefixSet: Set<String>
         public let strictSyllablePrefixSet: Set<String>
         fileprivate let exactCache: [String: [UserPhrase]]
@@ -232,6 +297,7 @@ public final class UserLexiconStore: @unchecked Sendable {
         fileprivate let shuangpinCache: [String: [UserPhrase]]
         fileprivate let bigramBonusCache: [String: [String: Int]]
         fileprivate let unigramCache: [String: [String: UnigramBoostEntry]]
+        fileprivate let shortcutCache: [String: [CustomShortcut]]
 
         @inline(__always)
         public func exactSyllablePhrases(compactPinyin: String) -> [UserPhrase] {
@@ -343,6 +409,12 @@ public final class UserLexiconStore: @unchecked Sendable {
             guard hasAnyUnigrams, !compactPinyin.isEmpty else { return nil }
             return unigramCache[compactPinyin]
         }
+
+        @inline(__always)
+        public func customShortcuts(forCode code: String) -> [CustomShortcut] {
+            guard hasAnyShortcuts, !code.isEmpty, let hits = shortcutCache[code] else { return [] }
+            return hits
+        }
     }
 
     private var db: OpaquePointer?
@@ -364,13 +436,16 @@ public final class UserLexiconStore: @unchecked Sendable {
     private var orderedPhrasesCache: [UserPhrase] = []
     private var syllablePrefixCache: Set<String> = []
     private var strictSyllablePrefixCache: Set<String> = []
-    private var bigramCache: [String: [(surface: String, count: Int)]] = [:]
+    private var bigramCache: [String: [(surface: String, count: Int, recencyDecay: Double)]] = [:]
     private var bigramBonusCache: [String: [String: Int]] = [:]
     private var unigramCache: [String: [String: UnigramBoostEntry]] = [:]
+    private var shortcutCache: [String: [CustomShortcut]] = [:]
+    private var orderedShortcutsCache: [CustomShortcut] = []
     private var _cacheGeneration: UInt64 = 0
     private var _hasAnyExactPhrases: Bool = false
     private var _hasAnyBigrams: Bool = false
     private var _hasAnyUnigrams: Bool = false
+    private var _hasAnyShortcuts: Bool = false
     private var cachedQuanpinSnapshot: DecodeSnapshot?
     private var cachedXiaoheSnapshot: DecodeSnapshot?
     private var cachedZiranmaSnapshot: DecodeSnapshot?
@@ -485,13 +560,15 @@ public final class UserLexiconStore: @unchecked Sendable {
             hasAnyExactPhrases: _hasAnyExactPhrases,
             hasAnyBigrams: _hasAnyBigrams,
             hasAnyUnigrams: _hasAnyUnigrams,
+            hasAnyShortcuts: _hasAnyShortcuts,
             syllablePrefixSet: syllablePrefixCache,
             strictSyllablePrefixSet: strictSyllablePrefixCache,
             exactCache: exactCache,
             jianpinCache: jianpinCache,
             shuangpinCache: spMap,
             bigramBonusCache: bigramBonusCache,
-            unigramCache: unigramCache
+            unigramCache: unigramCache,
+            shortcutCache: shortcutCache
         )
         switch scheme {
         case .quanpin: cachedQuanpinSnapshot = built
@@ -695,6 +772,14 @@ public final class UserLexiconStore: @unchecked Sendable {
             PRIMARY KEY (surface, compact_pinyin)
         );
         CREATE INDEX IF NOT EXISTS idx_unigram_compact ON user_unigrams(compact_pinyin);
+        CREATE TABLE IF NOT EXISTS user_shortcuts (
+            code TEXT NOT NULL,
+            phrase TEXT NOT NULL,
+            rank INTEGER NOT NULL DEFAULT 1,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (code, phrase)
+        );
+        CREATE INDEX IF NOT EXISTS idx_shortcut_code ON user_shortcuts(code);
         """
         sqlite3_exec(db, schema, nil, nil, nil)
 
@@ -835,7 +920,23 @@ public final class UserLexiconStore: @unchecked Sendable {
             }
             if migOK {
                 sqlite3_exec(db, "PRAGMA user_version = 6;", nil, nil, nil)
+                currentVer = 6
             }
+        }
+
+        if currentVer < 7, let db {
+            let scSQL = """
+            CREATE TABLE IF NOT EXISTS user_shortcuts (
+                code TEXT NOT NULL,
+                phrase TEXT NOT NULL,
+                rank INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (code, phrase)
+            );
+            CREATE INDEX IF NOT EXISTS idx_shortcut_code ON user_shortcuts(code);
+            PRAGMA user_version = 7;
+            """
+            sqlite3_exec(db, scSQL, nil, nil, nil)
         }
 
         reloadCacheOnDBQueue()
@@ -894,15 +995,29 @@ public final class UserLexiconStore: @unchecked Sendable {
         strictSyllablePrefixCache = prefixes.strict
     }
 
+    private static func computeBigramBonus(count: Int, recencyDecay: Double) -> Int {
+        guard count > 0 else { return 0 }
+        let effDecay = max(0.20, min(1.0, recencyDecay))
+        let effCount = Double(count) * effDecay
+        let base = Int((380.0 * effDecay).rounded())
+        let freq = Int((effCount * 60.0).rounded())
+        return min(680, base + freq)
+    }
+
     private func rebuildBigramBonusCacheLocked() {
         bigramBonusCache.removeAll(keepingCapacity: true)
         for (prev, items) in bigramCache {
             var map: [String: Int] = [:]
             map.reserveCapacity(items.count)
             for item in items {
-                map[item.surface] = min(680, 380 + item.count * 60)
+                let bonus = Self.computeBigramBonus(count: item.count, recencyDecay: item.recencyDecay)
+                if bonus > 0 {
+                    map[item.surface] = bonus
+                }
             }
-            bigramBonusCache[prev] = map
+            if !map.isEmpty {
+                bigramBonusCache[prev] = map
+            }
         }
     }
 
@@ -919,11 +1034,14 @@ public final class UserLexiconStore: @unchecked Sendable {
         var nextOrdered: [UserPhrase] = []
         var nextExact: [String: [UserPhrase]] = [:]
         var nextJianpin: [String: [UserPhrase]] = [:]
-        var nextBigrams: [String: [(surface: String, count: Int)]] = [:]
+        var nextBigrams: [String: [(surface: String, count: Int, recencyDecay: Double)]] = [:]
         var nextUnigrams: [String: [String: UnigramBoostEntry]] = [:]
+        var nextShortcuts: [String: [CustomShortcut]] = [:]
+        var nextOrderedShortcuts: [CustomShortcut] = []
         var nextHasExact = false
         var nextHasBigrams = false
         var nextHasUnigrams = false
+        var nextHasShortcuts = false
 
         if let db {
             let now = Double(Date().timeIntervalSince1970)
@@ -947,6 +1065,8 @@ public final class UserLexiconStore: @unchecked Sendable {
                     let isCustom = sqlite3_column_int(stmt, 5) != 0
                     let lastUsed = Double(sqlite3_column_int64(stmt, 6))
                     let skipCount = max(0, Int(sqlite3_column_int(stmt, 7)))
+                    let phraseAgeDays = max(0.0, (now - lastUsed) / 86400.0)
+                    let phraseDecay = pow(0.5, phraseAgeDays / 21.0)
                     let score = Self.computeDynamicScore(
                         count: count,
                         lastUsed: lastUsed,
@@ -963,7 +1083,8 @@ public final class UserLexiconStore: @unchecked Sendable {
                         useCount: count,
                         isCustomComposed: isCustom,
                         dynamicBoostQ8: score,
-                        skipCount: skipCount
+                        skipCount: skipCount,
+                        recencyDecay: phraseDecay
                     )
                     nextOrdered.append(phrase)
                     nextHasExact = true
@@ -976,7 +1097,7 @@ public final class UserLexiconStore: @unchecked Sendable {
             }
 
             let bgSQL = """
-            SELECT prev_surface, next_surface, use_count
+            SELECT prev_surface, next_surface, use_count, last_used
             FROM user_bigrams
             ORDER BY use_count DESC, last_used DESC
             LIMIT 8192;
@@ -989,10 +1110,21 @@ public final class UserLexiconStore: @unchecked Sendable {
                     let prev = String(cString: cPrev)
                     let next = String(cString: cNext)
                     let count = Int(sqlite3_column_int(bgStmt, 2))
-                    if nextBigrams[prev, default: []].count < 8 {
-                        nextBigrams[prev, default: []].append((next, count))
-                        nextHasBigrams = true
+                    let lastUsed = Double(sqlite3_column_int64(bgStmt, 3))
+                    let bgAgeDays = max(0.0, (now - lastUsed) / 86400.0)
+                    let bgDecay = pow(0.5, bgAgeDays / 21.0)
+                    var bucket = nextBigrams[prev, default: []]
+                    bucket.append((next, count, bgDecay))
+                    if bucket.count > 1 {
+                        bucket.sort {
+                            Double($0.count) * max(0.20, $0.recencyDecay) > Double($1.count) * max(0.20, $1.recencyDecay)
+                        }
                     }
+                    if bucket.count > 8 {
+                        bucket.removeSubrange(8..<bucket.count)
+                    }
+                    nextBigrams[prev] = bucket
+                    nextHasBigrams = true
                 }
                 sqlite3_finalize(bgStmt)
             }
@@ -1021,6 +1153,32 @@ public final class UserLexiconStore: @unchecked Sendable {
                 }
                 sqlite3_finalize(uniStmt)
             }
+
+            let scSQL = """
+            SELECT code, phrase, rank, updated_at
+            FROM user_shortcuts
+            ORDER BY rank ASC, updated_at DESC
+            LIMIT 2048;
+            """
+            var scStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, scSQL, -1, &scStmt, nil) == SQLITE_OK {
+                while sqlite3_step(scStmt) == SQLITE_ROW {
+                    guard let cCode = sqlite3_column_text(scStmt, 0),
+                          let cPhrase = sqlite3_column_text(scStmt, 1) else { continue }
+                    let code = String(cString: cCode)
+                    let phrase = String(cString: cPhrase)
+                    let rank = min(9, max(1, Int(sqlite3_column_int(scStmt, 2))))
+                    let updatedAt = sqlite3_column_int64(scStmt, 3)
+                    guard !code.isEmpty, !phrase.isEmpty else { continue }
+                    let item = CustomShortcut(code: code, phrase: phrase, rank: rank, updatedAt: updatedAt)
+                    nextOrderedShortcuts.append(item)
+                    if nextShortcuts[code, default: []].count < 8 {
+                        nextShortcuts[code, default: []].append(item)
+                        nextHasShortcuts = true
+                    }
+                }
+                sqlite3_finalize(scStmt)
+            }
         }
 
         let nextPrefixes = Self.buildSyllablePrefixSets(from: nextOrdered)
@@ -1039,10 +1197,13 @@ public final class UserLexiconStore: @unchecked Sendable {
         strictSyllablePrefixCache = nextPrefixes.strict
         bigramCache = nextBigrams
         unigramCache = nextUnigrams
+        shortcutCache = nextShortcuts
+        orderedShortcutsCache = nextOrderedShortcuts
         rebuildBigramBonusCacheLocked()
         _hasAnyExactPhrases = nextHasExact
         _hasAnyBigrams = nextHasBigrams
         _hasAnyUnigrams = nextHasUnigrams
+        _hasAnyShortcuts = nextHasShortcuts
         invalidateSnapshotsLocked(phrasesChanged: true)
         lock.unlock()
     }
@@ -1275,16 +1436,22 @@ public final class UserLexiconStore: @unchecked Sendable {
         var list = bigramCache[prev] ?? []
         if let idx = list.firstIndex(where: { $0.surface == next }) {
             list[idx].count += 1
+            list[idx].recencyDecay = 1.0
         } else {
-            list.append((next, 1))
+            list.append((next, 1, 1.0))
         }
-        list.sort { $0.count > $1.count }
+        list.sort {
+            Double($0.count) * max(0.20, $0.recencyDecay) > Double($1.count) * max(0.20, $1.recencyDecay)
+        }
         if list.count > 8 { list.removeSubrange(8..<list.count) }
         bigramCache[prev] = list
         var bonusBucket = bigramBonusCache[prev] ?? [:]
         bonusBucket.removeAll(keepingCapacity: true)
         for entry in list {
-            bonusBucket[entry.surface] = min(680, 380 + entry.count * 60)
+            let bonus = Self.computeBigramBonus(count: entry.count, recencyDecay: entry.recencyDecay)
+            if bonus > 0 {
+                bonusBucket[entry.surface] = bonus
+            }
         }
         bigramBonusCache[prev] = bonusBucket
         _hasAnyBigrams = true
@@ -1379,7 +1546,9 @@ public final class UserLexiconStore: @unchecked Sendable {
                             jianpin: p.jianpin,
                             useCount: p.useCount,
                             isCustomComposed: p.isCustomComposed,
-                            dynamicBoostQ8: p.dynamicBoostQ8 - 550
+                            dynamicBoostQ8: p.dynamicBoostQ8 - 550,
+                            skipCount: p.skipCount,
+                            recencyDecay: p.recencyDecay
                         )
                         out.append(prefixAdjusted)
                         if out.count >= limit * 2 { break }
@@ -1473,7 +1642,8 @@ public final class UserLexiconStore: @unchecked Sendable {
                 useCount: old.useCount,
                 isCustomComposed: old.isCustomComposed,
                 dynamicBoostQ8: updatedBoost,
-                skipCount: newSkip
+                skipCount: newSkip,
+                recencyDecay: old.recencyDecay
             )
             orderedPhrasesCache[existingIdx] = updated
             rebuildPhraseIndexesLocked()
@@ -1513,26 +1683,38 @@ public final class UserLexiconStore: @unchecked Sendable {
         }
     }
 
-    public func deletePhrase(surface: String) {
+    @discardableResult
+    public func deletePhrase(surface: String) -> Bool {
+        guard !surface.isEmpty else { return false }
         lock.lock()
+        let prevPhraseCount = orderedPhrasesCache.count
         orderedPhrasesCache.removeAll { $0.surface == surface }
         rebuildPhraseIndexesLocked()
+        var removedUnigram = false
         for k in Array(unigramCache.keys) {
-            unigramCache[k]?.removeValue(forKey: surface)
+            if unigramCache[k]?.removeValue(forKey: surface) != nil {
+                removedUnigram = true
+            }
             if unigramCache[k]?.isEmpty == true {
                 unigramCache.removeValue(forKey: k)
             }
         }
         _hasAnyUnigrams = !unigramCache.isEmpty
-        bigramCache.removeValue(forKey: surface)
+        var removedBigram = (bigramCache.removeValue(forKey: surface) != nil)
         for k in Array(bigramCache.keys) {
-            bigramCache[k]?.removeAll { $0.surface == surface }
+            if let beforeCount = bigramCache[k]?.count {
+                bigramCache[k]?.removeAll { $0.surface == surface }
+                if (bigramCache[k]?.count ?? 0) < beforeCount {
+                    removedBigram = true
+                }
+            }
             if bigramCache[k]?.isEmpty == true {
                 bigramCache.removeValue(forKey: k)
             }
         }
         rebuildBigramBonusCacheLocked()
         _hasAnyBigrams = !bigramCache.isEmpty
+        let didRemoveInMemory = (orderedPhrasesCache.count < prevPhraseCount) || removedUnigram || removedBigram
         invalidateSnapshotsLocked(phrasesChanged: true)
         enqueuePersistenceAndUnlock { [self] in
             if let db {
@@ -1562,6 +1744,7 @@ public final class UserLexiconStore: @unchecked Sendable {
                 LokeyIPC.postLexiconChanged()
             }
         }
+        return didRemoveInMemory
     }
 
     public func totalPhraseCount() -> Int {
@@ -1729,13 +1912,16 @@ public final class UserLexiconStore: @unchecked Sendable {
         bigramCache.removeAll()
         bigramBonusCache.removeAll()
         unigramCache.removeAll()
+        shortcutCache.removeAll()
+        orderedShortcutsCache.removeAll()
         _hasAnyExactPhrases = false
         _hasAnyBigrams = false
         _hasAnyUnigrams = false
+        _hasAnyShortcuts = false
         invalidateSnapshotsLocked(phrasesChanged: true)
         enqueuePersistenceAndUnlock { [self] in
             if let db {
-                sqlite3_exec(db, "DELETE FROM user_phrases; DELETE FROM user_bigrams; DELETE FROM user_unigrams;", nil, nil, nil)
+                sqlite3_exec(db, "DELETE FROM user_phrases; DELETE FROM user_bigrams; DELETE FROM user_unigrams; DELETE FROM user_shortcuts;", nil, nil, nil)
             }
             if broadcastChanges {
                 LokeyIPC.postLexiconChanged()
@@ -1743,18 +1929,301 @@ public final class UserLexiconStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - Custom Shortcut Phrases (`user_shortcuts` & Rime `custom_phrase.txt` Compatibility)
+
+    public static func normalizeShortcutCode(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard (1...32).contains(trimmed.count),
+              trimmed.allSatisfy({ ($0 >= "a" && $0 <= "z") }) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    public func totalShortcutCount() -> Int {
+        lock.lock()
+        let c = orderedShortcutsCache.count
+        lock.unlock()
+        return c
+    }
+
+    public func allShortcuts() -> [CustomShortcut] {
+        lock.lock()
+        let copy = orderedShortcutsCache.sorted {
+            if $0.code != $1.code { return $0.code < $1.code }
+            if $0.rank != $1.rank { return $0.rank < $1.rank }
+            return $0.updatedAt > $1.updatedAt
+        }
+        lock.unlock()
+        return copy
+    }
+
+    @discardableResult
+    public func upsertShortcut(code rawCode: String, phrase rawPhrase: String, rank: Int = 1) -> Bool {
+        guard let code = Self.normalizeShortcutCode(rawCode) else { return false }
+        let phrase = rawPhrase.trimmingCharacters(in: .newlines)
+        guard !phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, phrase.count <= 512 else { return false }
+        let clampedRank = min(9, max(1, rank))
+        let nowSec = Int64(Date().timeIntervalSince1970)
+        let item = CustomShortcut(code: code, phrase: phrase, rank: clampedRank, updatedAt: nowSec)
+
+        lock.lock()
+        orderedShortcutsCache.removeAll { $0.code == code && $0.phrase == phrase }
+        orderedShortcutsCache.insert(item, at: 0)
+        var bucket = shortcutCache[code] ?? []
+        bucket.removeAll { $0.phrase == phrase }
+        bucket.append(item)
+        bucket.sort {
+            if $0.rank != $1.rank { return $0.rank < $1.rank }
+            return $0.updatedAt > $1.updatedAt
+        }
+        if bucket.count > 8 { bucket.removeSubrange(8..<bucket.count) }
+        shortcutCache[code] = bucket
+        _hasAnyShortcuts = !shortcutCache.isEmpty
+        invalidateSnapshotsLocked(phrasesChanged: false)
+        enqueuePersistenceAndUnlock { [self] in
+            guard let db else { return }
+            let sql = """
+            INSERT INTO user_shortcuts (code, phrase, rank, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(code, phrase) DO UPDATE SET
+                rank = excluded.rank,
+                updated_at = excluded.updated_at;
+            """
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, code, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                sqlite3_bind_text(stmt, 2, phrase, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                sqlite3_bind_int(stmt, 3, Int32(clampedRank))
+                sqlite3_bind_int64(stmt, 4, nowSec)
+                _ = sqlite3_step(stmt)
+                sqlite3_finalize(stmt)
+            }
+            if broadcastChanges {
+                LokeyIPC.postLexiconChanged()
+            }
+        }
+        return true
+    }
+
+    public func deleteShortcut(code rawCode: String, phrase: String) {
+        let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !code.isEmpty, !phrase.isEmpty else { return }
+        lock.lock()
+        orderedShortcutsCache.removeAll { $0.code == code && $0.phrase == phrase }
+        if var bucket = shortcutCache[code] {
+            bucket.removeAll { $0.phrase == phrase }
+            if bucket.isEmpty {
+                shortcutCache.removeValue(forKey: code)
+            } else {
+                shortcutCache[code] = bucket
+            }
+        }
+        _hasAnyShortcuts = !shortcutCache.isEmpty
+        invalidateSnapshotsLocked(phrasesChanged: false)
+        enqueuePersistenceAndUnlock { [self] in
+            guard let db else { return }
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM user_shortcuts WHERE code = ?1 AND phrase = ?2;", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, code, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                sqlite3_bind_text(stmt, 2, phrase, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                _ = sqlite3_step(stmt)
+                sqlite3_finalize(stmt)
+            }
+            if broadcastChanges {
+                LokeyIPC.postLexiconChanged()
+            }
+        }
+    }
+
+    /// Parses Rime `custom_phrase.txt` (`phrase<TAB>code[<TAB>weight]`), Lokey `# format: phrase<TAB>code<TAB>rank`, `code<TAB>phrase`, or `code=phrase` lines.
+    @discardableResult
+    public func importCustomPhraseText(_ rawText: String, replaceExisting: Bool = false) -> Int {
+        let cleanText = rawText.hasPrefix("\u{FEFF}") ? String(rawText.dropFirst()) : rawText
+        let isLokeyRankTable = cleanText.contains("# format: phrase<TAB>code<TAB>rank")
+        struct RawShortcutRow {
+            let lineOrder: Int
+            let code: String
+            let phrase: String
+            let thirdValue: Double?
+        }
+        var rawRows: [RawShortcutRow] = []
+        var inYAMLHeader = false
+        var lineSeq = 0
+        for var rawLine in cleanText.components(separatedBy: .newlines) {
+            if rawLine.hasPrefix("\u{FEFF}") {
+                rawLine.removeFirst()
+            }
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            if trimmed == "---" {
+                inYAMLHeader = true
+                continue
+            }
+            if trimmed == "..." {
+                inYAMLHeader = false
+                continue
+            }
+            if inYAMLHeader { continue }
+
+            let tabParts = rawLine.split(separator: "\t", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if tabParts.count >= 2 {
+                // Rime `custom_phrase.txt` standard: `phrase<TAB>code[<TAB>weight]`
+                // Also accept `code<TAB>phrase[<TAB>rank]` when column 0 is pure ASCII code and column 1 is non-code!
+                let col0Code = Self.normalizeShortcutCode(tabParts[0])
+                let col1Code = Self.normalizeShortcutCode(tabParts[1])
+                let code: String
+                let phrase: String
+                if let c1 = col1Code, col0Code == nil || tabParts[0].unicodeScalars.contains(where: { !$0.isASCII }) {
+                    phrase = tabParts[0]
+                    code = c1
+                } else if let c0 = col0Code, col1Code == nil {
+                    code = c0
+                    phrase = tabParts[1]
+                } else if let c1 = col1Code {
+                    phrase = tabParts[0]
+                    code = c1
+                } else {
+                    continue
+                }
+                let thirdNum: Double? = (tabParts.count >= 3) ? Double(tabParts[2]).flatMap({ $0.isFinite ? $0 : nil }) : nil
+                if !phrase.isEmpty && phrase.count <= 512 {
+                    rawRows.append(RawShortcutRow(lineOrder: lineSeq, code: code, phrase: phrase, thirdValue: thirdNum))
+                    lineSeq += 1
+                }
+                continue
+            }
+
+            if let eqRange = trimmed.range(of: "=") {
+                let left = String(trimmed[..<eqRange.lowerBound])
+                let right = String(trimmed[eqRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if let code = Self.normalizeShortcutCode(left), !right.isEmpty, right.count <= 512 {
+                    rawRows.append(RawShortcutRow(lineOrder: lineSeq, code: code, phrase: right, thirdValue: nil))
+                    lineSeq += 1
+                }
+            }
+        }
+
+        var parsed: [(code: String, phrase: String, rank: Int)] = []
+        if isLokeyRankTable {
+            var seenPairs = Set<String>()
+            for row in rawRows {
+                let key = "\(row.code)\0\(row.phrase)"
+                guard seenPairs.insert(key).inserted else { continue }
+                let clampedRank: Int
+                if let val = row.thirdValue {
+                    clampedRank = Int(min(9.0, max(1.0, val.rounded())))
+                } else {
+                    clampedRank = 1
+                }
+                parsed.append((row.code, row.phrase, clampedRank))
+            }
+        } else {
+            // Upstream Rime `custom_phrase.txt`: larger 3rd-column `weight` means higher priority (`rank = 1, 2, 3...`).
+            var groupedByCode: [String: [RawShortcutRow]] = [:]
+            var codeFirstSeenOrder: [String] = []
+            for row in rawRows {
+                if groupedByCode[row.code] == nil {
+                    codeFirstSeenOrder.append(row.code)
+                }
+                groupedByCode[row.code, default: []].append(row)
+            }
+            for code in codeFirstSeenOrder {
+                guard let rows = groupedByCode[code] else { continue }
+                // Deduplicate identical `(code, phrase)` keeping highest explicit weight (or earliest line on tie)
+                var dedupedByPhrase: [String: RawShortcutRow] = [:]
+                for r in rows {
+                    if let prev = dedupedByPhrase[r.phrase] {
+                        let prevW = prev.thirdValue ?? 0.0
+                        let curW = r.thirdValue ?? 0.0
+                        if curW > prevW {
+                            dedupedByPhrase[r.phrase] = r
+                        }
+                    } else {
+                        dedupedByPhrase[r.phrase] = r
+                    }
+                }
+                let sortedRows = dedupedByPhrase.values.sorted { a, b in
+                    let wa = a.thirdValue ?? 0.0
+                    let wb = b.thirdValue ?? 0.0
+                    if wa != wb { return wa > wb }
+                    return a.lineOrder < b.lineOrder
+                }
+                for (idx, r) in sortedRows.enumerated() {
+                    parsed.append((code, r.phrase, min(9, idx + 1)))
+                }
+            }
+        }
+        guard !parsed.isEmpty || replaceExisting else { return 0 }
+        let nowSec = Int64(Date().timeIntervalSince1970)
+        let applied: Int = dbQueue.sync {
+            guard let db else { return 0 }
+            guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else { return 0 }
+            if replaceExisting {
+                _ = sqlite3_exec(db, "DELETE FROM user_shortcuts;", nil, nil, nil)
+            }
+            let sql = """
+            INSERT INTO user_shortcuts (code, phrase, rank, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(code, phrase) DO UPDATE SET
+                rank = excluded.rank,
+                updated_at = excluded.updated_at;
+            """
+            var stmt: OpaquePointer?
+            var count = 0
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                for entry in parsed {
+                    sqlite3_reset(stmt)
+                    sqlite3_clear_bindings(stmt)
+                    sqlite3_bind_text(stmt, 1, entry.code, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                    sqlite3_bind_text(stmt, 2, entry.phrase, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                    sqlite3_bind_int(stmt, 3, Int32(entry.rank))
+                    sqlite3_bind_int64(stmt, 4, nowSec)
+                    if sqlite3_step(stmt) == SQLITE_DONE {
+                        count += 1
+                    }
+                }
+                sqlite3_finalize(stmt)
+            }
+            _ = sqlite3_exec(db, "COMMIT;", nil, nil, nil)
+            reloadCacheOnDBQueue()
+            return count
+        }
+        if broadcastChanges && (applied > 0 || replaceExisting) {
+            LokeyIPC.postLexiconChanged()
+        }
+        return applied
+    }
+
+    public func exportCustomPhraseText() -> String {
+        let items = allShortcuts()
+        var lines = [
+            "# Rime custom_phrase compatible table exported by Lokey",
+            "# format: phrase<TAB>code<TAB>rank",
+        ]
+        for item in items {
+            let safePhrase = item.phrase.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
+            lines.append("\(safePhrase)\t\(item.code)\t\(item.rank)")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
     // MARK: - Full Personal Backup & Cross-Install Migration
 
     private static func readBackupRecords(from sqliteDB: OpaquePointer?) -> (
         phrases: [LokeyPersonalBackup.PhraseRecord],
         bigrams: [LokeyPersonalBackup.BigramRecord],
-        unigrams: [LokeyPersonalBackup.UnigramRecord]
+        unigrams: [LokeyPersonalBackup.UnigramRecord],
+        shortcuts: [LokeyPersonalBackup.ShortcutRecord]
     ) {
-        guard let sqliteDB else { return ([], [], []) }
+        guard let sqliteDB else { return ([], [], [], []) }
         let nowSec = Int64(Date().timeIntervalSince1970)
         var phrases: [LokeyPersonalBackup.PhraseRecord] = []
         var bigrams: [LokeyPersonalBackup.BigramRecord] = []
         var unigrams: [LokeyPersonalBackup.UnigramRecord] = []
+        var shortcuts: [LokeyPersonalBackup.ShortcutRecord] = []
 
         var pStmt: OpaquePointer?
         let phraseSQL = "SELECT surface, compact_pinyin, spaced_pinyin, jianpin, use_count, is_custom, last_used, skip_count FROM user_phrases ORDER BY use_count DESC, surface ASC;"
@@ -1838,7 +2307,23 @@ public final class UserLexiconStore: @unchecked Sendable {
             sqlite3_finalize(uStmt)
         }
 
-        return (phrases, bigrams, unigrams)
+        var scStmt: OpaquePointer?
+        if sqlite3_prepare_v2(sqliteDB, "SELECT code, phrase, rank, updated_at FROM user_shortcuts ORDER BY code ASC, rank ASC;", -1, &scStmt, nil) == SQLITE_OK {
+            while sqlite3_step(scStmt) == SQLITE_ROW {
+                guard let cCode = sqlite3_column_text(scStmt, 0),
+                      let cPhrase = sqlite3_column_text(scStmt, 1) else { continue }
+                let rawUp = sqlite3_column_int64(scStmt, 3)
+                shortcuts.append(LokeyPersonalBackup.ShortcutRecord(
+                    code: String(cString: cCode),
+                    phrase: String(cString: cPhrase),
+                    rank: min(9, max(1, Int(sqlite3_column_int(scStmt, 2)))),
+                    updatedAt: rawUp > 0 ? rawUp : nowSec
+                ))
+            }
+            sqlite3_finalize(scStmt)
+        }
+
+        return (phrases, bigrams, unigrams, shortcuts)
     }
 
     /// Lightweight `O(1)` SQLite row-count query avoiding full backup materialization for UI summaries.
@@ -1861,7 +2346,7 @@ public final class UserLexiconStore: @unchecked Sendable {
 
     public func exportPersonalBackup(
         touchCalibration: LokeyTouchCalibration? = LokeyTouchCalibration.load(),
-        appVersion: String = "0.9.5"
+        appVersion: String = "1.0"
     ) -> LokeyPersonalBackup {
         let records = dbQueue.sync { Self.readBackupRecords(from: db) }
         return LokeyPersonalBackup(
@@ -1871,7 +2356,8 @@ public final class UserLexiconStore: @unchecked Sendable {
             touchCalibration: touchCalibration,
             phrases: records.phrases,
             bigrams: records.bigrams,
-            unigrams: records.unigrams
+            unigrams: records.unigrams,
+            shortcuts: records.shortcuts
         )
     }
 
@@ -1971,23 +2457,35 @@ public final class UserLexiconStore: @unchecked Sendable {
                 lastUsed: rec.lastUsed > 0 ? rec.lastUsed : nowSec
             )
         }
+        let validShortcuts = backup.shortcuts.compactMap { rec -> LokeyPersonalBackup.ShortcutRecord? in
+            guard let c = Self.normalizeShortcutCode(rec.code) else { return nil }
+            let p = rec.phrase.trimmingCharacters(in: .newlines)
+            guard !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, p.count <= 512 else { return nil }
+            return LokeyPersonalBackup.ShortcutRecord(
+                code: c,
+                phrase: p,
+                rank: min(9, max(1, rec.rank)),
+                updatedAt: rec.updatedAt > 0 ? rec.updatedAt : nowSec
+            )
+        }
 
-        let (pApplied, bApplied, uApplied): (Int, Int, Int) = dbQueue.sync {
-            guard let db else { return (0, 0, 0) }
+        let (pApplied, bApplied, uApplied, scApplied): (Int, Int, Int, Int) = dbQueue.sync {
+            guard let db else { return (0, 0, 0, 0) }
             guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else {
-                return (0, 0, 0)
+                return (0, 0, 0, 0)
             }
 
             if replaceExisting {
-                if sqlite3_exec(db, "DELETE FROM user_phrases; DELETE FROM user_bigrams; DELETE FROM user_unigrams;", nil, nil, nil) != SQLITE_OK {
+                if sqlite3_exec(db, "DELETE FROM user_phrases; DELETE FROM user_bigrams; DELETE FROM user_unigrams; DELETE FROM user_shortcuts;", nil, nil, nil) != SQLITE_OK {
                     sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
-                    return (0, 0, 0)
+                    return (0, 0, 0, 0)
                 }
             }
 
             var pCount = 0
             var bCount = 0
             var uCount = 0
+            var scCount = 0
             var ok = true
 
             if !validPhrases.isEmpty {
@@ -2076,16 +2574,42 @@ public final class UserLexiconStore: @unchecked Sendable {
                 }
             }
 
+            if ok && !validShortcuts.isEmpty {
+                let scSQL = """
+                INSERT INTO user_shortcuts (code, phrase, rank, updated_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(code, phrase) DO UPDATE SET
+                    rank = excluded.rank,
+                    updated_at = MAX(user_shortcuts.updated_at, excluded.updated_at);
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, scSQL, -1, &stmt, nil) == SQLITE_OK {
+                    for rec in validShortcuts {
+                        sqlite3_reset(stmt)
+                        sqlite3_clear_bindings(stmt)
+                        sqlite3_bind_text(stmt, 1, rec.code, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_text(stmt, 2, rec.phrase, -1, SQLITE_TRANSIENT_DESTRUCTOR)
+                        sqlite3_bind_int(stmt, 3, Int32(rec.rank))
+                        sqlite3_bind_int64(stmt, 4, rec.updatedAt)
+                        if sqlite3_step(stmt) != SQLITE_DONE { ok = false; break }
+                        scCount += 1
+                    }
+                    sqlite3_finalize(stmt)
+                } else {
+                    ok = false
+                }
+            }
+
             if !ok || sqlite3_exec(db, "COMMIT;", nil, nil, nil) != SQLITE_OK {
                 sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
-                return (0, 0, 0)
+                return (0, 0, 0, 0)
             }
 
             reloadCacheOnDBQueue()
-            return (pCount, bCount, uCount)
+            return (pCount, bCount, uCount, scCount)
         }
 
-        if broadcastChanges && (replaceExisting || pApplied > 0 || bApplied > 0 || uApplied > 0) {
+        if broadcastChanges && (replaceExisting || pApplied > 0 || bApplied > 0 || uApplied > 0 || scApplied > 0) {
             LokeyIPC.postLexiconChanged()
         }
 
@@ -2120,6 +2644,7 @@ public final class UserLexiconStore: @unchecked Sendable {
             phrasesApplied: pApplied,
             bigramsApplied: bApplied,
             unigramsApplied: uApplied,
+            shortcutsApplied: scApplied,
             calibratedKeys: finalCal.calibratedKeyCount,
             totalCommittedTaps: finalCal.totalCommittedTaps
         )
@@ -2162,7 +2687,8 @@ public final class UserLexiconStore: @unchecked Sendable {
             touchCalibration: nil,
             phrases: records.phrases,
             bigrams: records.bigrams,
-            unigrams: records.unigrams
+            unigrams: records.unigrams,
+            shortcuts: records.shortcuts
         )
         return restorePersonalBackup(backup, replaceExisting: replaceExisting, restoreTouchCalibration: false)
     }

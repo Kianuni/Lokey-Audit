@@ -248,7 +248,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(hostBundle.bundleIdentifier, "com.kianuni.lokey.audit")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "1.0")
-        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "94")
+        XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "100")
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool, false)
         XCTAssertEqual(hostBundle.object(forInfoDictionaryKey: "LSSupportsOpeningDocumentsInPlace") as? Bool, false)
         XCTAssertNil(hostBundle.object(forInfoDictionaryKey: "CFBundleDocumentTypes"))
@@ -259,7 +259,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertEqual(extBundle.bundleIdentifier, "com.kianuni.lokey.audit.keyboard")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "LokeyAppGroupID") as? String, "group.com.kianuni.lokey")
         XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "1.0")
-        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "94")
+        XCTAssertEqual(extBundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String, "100")
 
         XCTAssertEqual(Bundle(for: LokeyAuditTests.self).bundleIdentifier, "com.kianuni.lokey.audit.tests")
 
@@ -300,6 +300,7 @@ final class LokeyAuditTests: XCTestCase {
         XCTAssertNotNil(extBundle.url(forResource: "lokey_lexicon", withExtension: "bin"), "LokeyKeyboard.appex must bundle lokey_lexicon.bin")
         XCTAssertNotNil(extBundle.url(forResource: "lokey_emoji", withExtension: "bin"), "LokeyKeyboard.appex must bundle lokey_emoji.bin")
         XCTAssertNotNil(extBundle.url(forResource: "lokey_opencc", withExtension: "bin"), "LokeyKeyboard.appex must bundle lokey_opencc.bin")
+        XCTAssertNotNil(extBundle.url(forResource: "lokey_hanzi_meta", withExtension: "bin"), "LokeyKeyboard.appex must bundle lokey_hanzi_meta.bin")
         XCTAssertNil(extBundle.url(forResource: "lokey_spelling", withExtension: "bin"), "Lokey-Audit omits lokey_spelling.bin")
 
         let lexURL = try XCTUnwrap(testBundle.url(forResource: "lokey_lexicon", withExtension: "bin"))
@@ -720,5 +721,70 @@ final class LokeyAuditTests: XCTestCase {
         try LokeyLexiconPackManager.deletePack(fileName: "rime-frost.lokeypack", in: lexiconsDir, defaults: testDefaults)
         XCTAssertTrue(LokeyLexiconPackManager.listInstalledPacks(in: lexiconsDir).isEmpty)
         XCTAssertNil(LokeyLexiconPackManager.activePackMetadata(in: lexiconsDir, defaults: testDefaults))
+    }
+
+    func testHanziFilterShortcutsOneHandedAndShuangpinParity() throws {
+        let meta = try XCTUnwrap(HanziMetadataTable.shared, "LokeyKeyboard/Tests must bundle lokey_hanzi_meta.bin")
+        XCTAssertEqual(meta.lookup("祎")?.radicalLabel, "礻")
+        XCTAssertEqual(meta.lookup("熠")?.radicalLabel, "火")
+        XCTAssertEqual(HanziMetadataTable.displayRadicalLabel("讠", scriptMode: .traditionalTW), "言")
+        XCTAssertEqual(HanziMetadataTable.displayRadicalLabel("钅", scriptMode: .traditionalHK), "金")
+
+        let emojiURL = try XCTUnwrap(Bundle(for: LokeyAuditTests.self).url(forResource: "lokey_emoji", withExtension: "bin"))
+        let emojiData = try Data(contentsOf: emojiURL)
+        XCTAssertLessThanOrEqual(emojiData.count, 16_384, "Lokey-Audit must bundle minimal permissive demo lokey_emoji.bin")
+
+        let env = try makeIsolatedSession()
+        defer {
+            env.store.close()
+            try? FileManager.default.removeItem(at: env.tempDir)
+        }
+
+        XCTAssertTrue(env.store.upsertShortcut(code: "yx", phrase: "audit@lokey.local", rank: 1))
+        for ch in "yx" { _ = env.session.handleLetterTap(char: ch) }
+        XCTAssertEqual(env.session.currentDecode.candidates.first?.text, "audit@lokey.local")
+        env.session.resetComposing()
+
+        let rimeWeightsSample = "\u{FEFF}#@/db_type\tstabledb\r\n次选\tdz\t20\r\n首选\tdz\t80\r\n异常\tdz\tnan\r\n"
+        XCTAssertEqual(env.store.importCustomPhraseText(rimeWeightsSample, replaceExisting: false), 3)
+        XCTAssertTrue(env.store.allShortcuts().filter({ $0.code == "stabledb" }).isEmpty)
+        let dzShortcuts = env.store.allShortcuts().filter { $0.code == "dz" }
+        XCTAssertEqual(Array(dzShortcuts.prefix(2).map(\.phrase)), ["首选", "次选"])
+        XCTAssertEqual(Array(dzShortcuts.prefix(2).map(\.rank)), [1, 2])
+
+        env.store.recordCommit(surface: "发财", syllables: ["fa", "cai"], isCustomComposed: true)
+        var twSettings = LokeySettings()
+        twSettings.chineseScriptMode = .traditionalTW
+        env.session.settings = twSettings
+        for ch in "facai" { _ = env.session.handleLetterTap(char: ch) }
+        let twCand = try XCTUnwrap(env.session.currentDecode.candidates.first(where: { $0.text == "發財" }))
+        XCTAssertTrue(env.session.deleteExplicitUserCandidate(twCand, canonical: nil))
+        XCTAssertFalse(env.session.deleteExplicitUserCandidate(twCand, canonical: nil))
+        env.session.resetComposing()
+
+        var spSettings = LokeySettings()
+        spSettings.pinyinScheme = .xiaohe
+        spSettings.chineseScriptMode = .traditionalTW
+        spSettings.enableDateTimeShortcuts = true
+        env.session.settings = spSettings
+        for ch in "xq" { _ = env.session.handleLetterTap(char: ch) }
+        let xqCands = env.session.currentDecode.candidates.map(\.text)
+        XCTAssertGreaterThanOrEqual(xqCands.count, 5)
+        XCTAssertTrue(xqCands[3].hasPrefix("星期"))
+        XCTAssertTrue(xqCands[4].hasPrefix("週"))
+        env.session.resetComposing()
+
+        env.session.settings = LokeySettings()
+        for ch in "yi" { _ = env.session.handleLetterTap(char: ch) }
+        let catalog = try XCTUnwrap(env.session.buildExpandedFilterCatalog(metaTable: meta))
+        XCTAssertFalse(catalog.pinyinOptions.isEmpty)
+
+        let grid = KeyGridView(frame: CGRect(x: 0, y: 0, width: 393.0, height: 206.0))
+        grid.pinyinScheme = .xiaohe
+        grid.showShuangpinKeyHints = true
+        grid.oneHandedMode = .left
+        grid.layoutIfNeeded()
+        XCTAssertEqual(grid.debugSubHintText(for: .letter("q")), "iu")
+        XCTAssertEqual(grid.oneHandedRestoreButtonForTesting?.isHidden, false)
     }
 }

@@ -1185,9 +1185,31 @@ public final class ViterbiDecoder: @unchecked Sendable {
             candidates.append(c)
         }
 
-        // 5A. System Text Replacements / Contacts supplementary matches (highest explicit user intent)
+        // 5A. Explicit user shortcuts (`user_shortcuts` rank == 1) & iOS System Text Replacements / Contacts (`UILexicon`)
+        var exactUserHitCount = 0
+        var deferredCustomShortcuts: [UserLexiconStore.CustomShortcut] = []
         if !cleanLower.isEmpty {
+            for sc in userSnap.customShortcuts(forCode: cleanLower) {
+                if sc.rank <= 1 {
+                    let prev = candidates.count
+                    appendCandidate(
+                        LokeyCandidate(
+                            text: sc.phrase,
+                            consumedInputCount: n,
+                            matchedSyllables: [],
+                            scoreQ8: -150,
+                            kind: .userPhrase
+                        )
+                    )
+                    if candidates.count > prev {
+                        exactUserHitCount += 1
+                    }
+                } else {
+                    deferredCustomShortcuts.append(sc)
+                }
+            }
             for (shortcut, phrase) in supplementaryShortcuts where shortcut == cleanLower {
+                let prev = candidates.count
                 appendCandidate(
                     LokeyCandidate(
                         text: phrase,
@@ -1197,6 +1219,9 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         kind: .userPhrase
                     )
                 )
+                if candidates.count > prev {
+                    exactUserHitCount += 1
+                }
             }
             for item in supplementaryContacts {
                 let code: String
@@ -1206,6 +1231,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
                 case .ziranma: code = item.ziranmaCode
                 }
                 guard !code.isEmpty, code == cleanLower else { continue }
+                let prev = candidates.count
                 appendCandidate(
                     LokeyCandidate(
                         text: item.phrase,
@@ -1215,12 +1241,14 @@ public final class ViterbiDecoder: @unchecked Sendable {
                         kind: .userPhrase
                     )
                 )
+                if candidates.count > prev {
+                    exactUserHitCount += 1
+                }
             }
         }
 
         // 5B. User SQLite learned phrases (lock-free O(1) exact, Jianpin, and Shuangpin match for full buffer)
         let userHits = userSnap.fullBufferPhrases(cleanLower: cleanLower, scheme: settings.pinyinScheme, limit: 6)
-        var exactUserHitCount = 0
         for up in userHits {
             let prevCount = candidates.count
             appendCandidate(
@@ -2217,7 +2245,34 @@ public final class ViterbiDecoder: @unchecked Sendable {
             }
         }
 
-        // 5E.5. Prefix ASCII Text Replacements & >= 3-char Contacts Jianpin (never clobbers everyday Chinese words)
+        // 5E.5. Prefix ASCII Text Replacements & >= 3-char Contacts Jianpin (secondary ranked `user_shortcuts` splice after 5G/Emoji)
+        func spliceDeferredCustomShortcuts() {
+            guard !deferredCustomShortcuts.isEmpty else { return }
+            for sc in deferredCustomShortcuts {
+                let desiredIdx = max(1, sc.rank - 1)
+                let shortcutCand = LokeyCandidate(
+                    text: sc.phrase,
+                    consumedInputCount: n,
+                    matchedSyllables: [],
+                    scoreQ8: -320 - sc.rank * 20,
+                    kind: .userPhrase
+                )
+                if let existingIdx = candidates.firstIndex(where: { $0.text == sc.phrase }) {
+                    if existingIdx <= desiredIdx {
+                        if candidates[existingIdx].consumedInputCount < n {
+                            candidates.remove(at: existingIdx)
+                            candidates.insert(shortcutCand, at: min(desiredIdx, candidates.count))
+                        }
+                        continue
+                    }
+                    candidates.remove(at: existingIdx)
+                } else {
+                    _ = seenTexts.insert(sc.phrase)
+                }
+                let targetIdx = min(desiredIdx, candidates.count)
+                candidates.insert(shortcutCand, at: targetIdx)
+            }
+        }
         if cleanLower.count >= 2 {
             var prefixShortcutHits = 0
             for (shortcut, phrase) in supplementaryShortcuts where shortcut.hasPrefix(cleanLower) && shortcut != cleanLower {
@@ -2252,6 +2307,7 @@ public final class ViterbiDecoder: @unchecked Sendable {
         }
 
         if !candidates.isEmpty && n >= 10 && isUrgentCommit() {
+            spliceDeferredCustomShortcuts()
             return DecodeResult(preeditDisplay: rawString, candidates: candidates)
         }
 
@@ -2493,37 +2549,77 @@ public final class ViterbiDecoder: @unchecked Sendable {
             }
         }
 
-        // 5H. Native iOS 1:1 Inline Emoji Mixed Input (`haha -> [哈哈, 😂, ...]`, `daku -> [大哭, 😭, ...]`)
-        // Strictly keeps Chinese text at Slot #0. Requires clean, exact 0-penalty reading match so incomplete/noisy
-        // prefixes never inject emojis into top-4, and places emojis at Slot #3 on ultra-high-frequency (`> -1850`)
-        // or homophone-contested 2+ char words.
+        // Inline Emoji Mixed Input (`haha -> [哈哈, 😂, ...]`, `xiaoku -> [笑哭, 😂, ...]`, `daku -> [大哭, 😭, ...]`)
+        // Strictly keeps Chinese text at Slot #0. Tolerates natural off-center thumb strikes when zero key substitution
+        // occurred, and falls back to top exact-reading multi-character candidates when Slot #0 has no Emoji mapping.
         if settings.enableEmojiCandidates,
            !hasApostrophe,
            !candidates.prefix(4).contains(where: { $0.kind == .emoji }),
            let topCand = candidates.first,
-           topCand.consumedInputCount == n,
-           (topCand.kind == .lexiconPhrase || topCand.kind == .userPhrase || (topCand.kind == .sentence && topCand.matchedSyllables.count >= 2)),
-           !topCand.matchedSyllables.isEmpty {
-            let isExactCleanReading: Bool = {
-                if settings.pinyinScheme == .quanpin {
-                    let leadSyllableStr = topCand.matchedSyllables.joined()
-                    if leadSyllableStr == cleanLower { return true }
-                    if leadSyllableStr.count == cleanLower.count {
-                        return leadSyllableStr.replacingOccurrences(of: "v", with: "u") == cleanLower
-                    }
+           topCand.consumedInputCount == n {
+            func hasCleanExactReading(_ cand: LokeyCandidate) -> Bool {
+                guard !cand.matchedSyllables.isEmpty,
+                      cand.matchedSyllables.allSatisfy({ lexicon.syllableToID[$0] != nil }) else {
                     return false
+                }
+                let isExact: Bool
+                if settings.pinyinScheme == .quanpin {
+                    let sylStr = cand.matchedSyllables.joined()
+                    if sylStr == cleanLower {
+                        isExact = true
+                    } else if sylStr.count == cleanLower.count {
+                        isExact = (sylStr.replacingOccurrences(of: "v", with: "u") == cleanLower)
+                    } else {
+                        isExact = false
+                    }
                 } else {
-                    let spCodes = topCand.matchedSyllables.compactMap {
+                    let spCodes = cand.matchedSyllables.compactMap {
                         PinyinSyllableAutomaton.primaryShuangpinCode(forCanonicalSyllable: $0, scheme: settings.pinyinScheme)
                     }
-                    return spCodes.count == topCand.matchedSyllables.count && spCodes.joined() == cleanLower
+                    isExact = (spCodes.count == cand.matchedSyllables.count && spCodes.joined() == cleanLower)
                 }
-            }()
-            let leadPenaltyQ8 = fullSpanByText[topCand.text]?.penaltyQ8 ?? bestSentence?.penaltyQ8 ?? 0
-            let leadHasKeySub = fullSpanByText[topCand.text]?.hasKeySubstitution ?? bestSentence?.hasKeySubstitution ?? false
-            if isExactCleanReading && leadPenaltyQ8 == 0 && !leadHasKeySub {
-                let emojis = lexicon.lookupEmojis(forWord: topCand.text, limit: 1)
-                if let em = emojis.first, seenTexts.insert(em).inserted {
+                guard isExact else { return false }
+                if let span = fullSpanByText[cand.text] {
+                    return !span.hasKeySubstitution && span.penaltyQ8 <= max(220, n * 180)
+                }
+                if cand.kind == .lexiconPhrase {
+                    return false
+                }
+                if cand.text == topCand.text, let sent = bestSentence {
+                    return !sent.hasKeySubstitution && sent.penaltyQ8 <= max(220, n * 180)
+                }
+                return cand.kind == .userPhrase
+            }
+
+            var matchedEmoji: String?
+            var matchedSourceIdx = 0
+            let maxProbe = min(4, candidates.count)
+            for idx in 0..<maxProbe {
+                let cand = candidates[idx]
+                guard cand.consumedInputCount == n else { continue }
+                let validKind = (cand.kind == .lexiconPhrase || cand.kind == .userPhrase || (cand.kind == .sentence && cand.matchedSyllables.count >= 2))
+                guard validKind else { continue }
+                if idx > 0 {
+                    guard cand.text.count >= 2,
+                          cand.matchedSyllables.count >= 2,
+                          cand.scoreQ8 >= topCand.scoreQ8 - 1100 else {
+                        continue
+                    }
+                }
+                guard hasCleanExactReading(cand),
+                      let em = lexicon.lookupEmojis(forWord: cand.text, limit: 1).first else {
+                    continue
+                }
+                matchedEmoji = em
+                matchedSourceIdx = idx
+                break
+            }
+
+            if let em = matchedEmoji, seenTexts.insert(em).inserted {
+                let targetSlot: Int
+                if matchedSourceIdx > 0 {
+                    targetSlot = min(max(matchedSourceIdx + 1, 2), min(3, candidates.count))
+                } else {
                     let isUltraHighFreqCommonWord = (fullSpanByText[topCand.text]?.scoreQ8 ?? topCand.scoreQ8) > -1630
                     let hasContestedTwoCharHomophone = topCand.text.count >= 2 && candidates.dropFirst().prefix(3).contains(where: { other in
                         other.consumedInputCount == n
@@ -2532,20 +2628,24 @@ public final class ViterbiDecoder: @unchecked Sendable {
                             && other.scoreQ8 >= -2300
                             && other.scoreQ8 >= topCand.scoreQ8 - 250
                     })
-                    let targetSlot = (isUltraHighFreqCommonWord || hasContestedTwoCharHomophone)
+                    targetSlot = (isUltraHighFreqCommonWord || hasContestedTwoCharHomophone)
                         ? min(3, candidates.count)
                         : min(1, candidates.count)
-                    let emojiCand = LokeyCandidate(
-                        text: em,
-                        consumedInputCount: n,
-                        matchedSyllables: [],
-                        scoreQ8: topCand.scoreQ8 - 1,
-                        kind: .emoji
-                    )
-                    candidates.insert(emojiCand, at: targetSlot)
                 }
+                let emojiCand = LokeyCandidate(
+                    text: em,
+                    consumedInputCount: n,
+                    matchedSyllables: [],
+                    scoreQ8: candidates[matchedSourceIdx].scoreQ8 - 1,
+                    kind: .emoji
+                )
+                candidates.insert(emojiCand, at: targetSlot)
             }
         }
+
+        // Splice secondary ranked custom shortcuts (`rank >= 2`, i.e. #2 / #3) after raw ASCII & Emoji injection
+        // so user-specified candidate slots are never pushed down by raw English or inline Emoji insertions.
+        spliceDeferredCustomShortcuts()
 
         // Format raw-key-preserving preedit string:
         // Strictly preserves every pressed key (`preedit.replacingOccurrences(of: "'", with: "") == rawWithoutApostrophe`),

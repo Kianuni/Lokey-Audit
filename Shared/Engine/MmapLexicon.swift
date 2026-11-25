@@ -4520,3 +4520,307 @@ public enum LokeyLexiconPackManager {
         return (nil, nil, didFallback)
     }
 }
+
+// MARK: - Read-Only Zero-Copy Hanzi Radical & Stroke Metadata (`lokey_hanzi_meta.bin`, `LKHM` v1)
+
+public final class HanziMetadataTable: @unchecked Sendable {
+    public struct Entry: Sendable, Equatable {
+        public let radicalID: UInt8
+        public let radicalLabel: String
+        public let totalStrokes: Int
+    }
+
+    public enum StrokeBucket: Int, CaseIterable, Sendable, Equatable {
+        case s1_4 = 0
+        case s5_7 = 1
+        case s8_10 = 2
+        case s11_13 = 3
+        case s14Plus = 4
+
+        public var title: String {
+            switch self {
+            case .s1_4: return "1–4画"
+            case .s5_7: return "5–7画"
+            case .s8_10: return "8–10画"
+            case .s11_13: return "11–13画"
+            case .s14Plus: return "14画+"
+            }
+        }
+
+        public func contains(_ strokes: Int) -> Bool {
+            switch self {
+            case .s1_4: return (1...4).contains(strokes)
+            case .s5_7: return (5...7).contains(strokes)
+            case .s8_10: return (8...10).contains(strokes)
+            case .s11_13: return (11...13).contains(strokes)
+            case .s14Plus: return strokes >= 14
+            }
+        }
+
+        public static func bucket(for strokes: Int) -> StrokeBucket? {
+            guard strokes >= 1 else { return nil }
+            if strokes <= 4 { return .s1_4 }
+            if strokes <= 7 { return .s5_7 }
+            if strokes <= 10 { return .s8_10 }
+            if strokes <= 13 { return .s11_13 }
+            return .s14Plus
+        }
+    }
+
+    public static let shared: HanziMetadataTable? = HanziMetadataTable.loadBundled()
+
+    private let mappedData: NSData
+    private let startCodepoint: UInt32
+    private let charCount: Int
+    private let charTableOffset: Int
+    private let radicalLabels: [String] // 1-based (`radicalLabels[0] == ""`)
+    private let syllableCount: Int
+    private let sylOffsetsStart: Int
+    private let sylBlobStart: Int
+    private let sylBlobByteLen: Int
+    private let postOffsetsStart: Int
+    private let postCodepointsStart: Int
+    private let totalPostingsCount: Int
+
+    private static let traditionalRadicalLabels: [String: String] = [
+        "户": "戶",
+        "纟": "糹",
+        "见": "見",
+        "讠": "言",
+        "贝": "貝",
+        "车": "車",
+        "钅": "金",
+        "长": "長",
+        "门": "門",
+        "韦": "韋",
+        "页": "頁",
+        "风": "風",
+        "飞": "飛",
+        "饣": "食",
+        "马": "馬",
+        "鱼": "魚",
+        "鸟": "鳥",
+        "卤": "鹵",
+        "麦": "麥",
+        "黄": "黃",
+        "黾": "黽",
+        "齐": "齊",
+        "齿": "齒",
+        "龙": "龍",
+        "龟": "龜",
+    ]
+
+    @inline(__always)
+    public static func displayRadicalLabel(_ simplifiedLabel: String, scriptMode: ChineseScriptMode) -> String {
+        guard scriptMode != .simplified else { return simplifiedLabel }
+        return traditionalRadicalLabels[simplifiedLabel] ?? simplifiedLabel
+    }
+
+    public var isLoaded: Bool { charCount > 0 && radicalLabels.count > 1 }
+
+    public init?(mappedData: NSData) {
+        let len = mappedData.length
+        guard len >= 20 else { return nil }
+        let base = mappedData.bytes.assumingMemoryBound(to: UInt8.self)
+        guard base[0] == 0x4C, base[1] == 0x4B, base[2] == 0x48, base[3] == 0x4D else { return nil } // "LKHM"
+
+        func readU16(_ off: Int) -> UInt16 {
+            UInt16(base[off]) | (UInt16(base[off + 1]) << 8)
+        }
+        func readU32(_ off: Int) -> UInt32 {
+            UInt32(base[off])
+                | (UInt32(base[off + 1]) << 8)
+                | (UInt32(base[off + 2]) << 16)
+                | (UInt32(base[off + 3]) << 24)
+        }
+
+        let version = readU16(4)
+        guard version == 1 else { return nil }
+        let startCP = UInt32(readU16(6))
+        let count = Int(readU32(8))
+        let radCount = Int(readU16(12))
+        let rawSylCount = Int(readU16(14))
+        guard count > 0, count <= 65536, radCount > 0, radCount <= 255 else { return nil }
+
+        let offsetsStart = 16
+        let offsetsByteLen = (radCount + 1) * 2
+        guard offsetsStart + offsetsByteLen <= len else { return nil }
+
+        var offsets: [Int] = []
+        offsets.reserveCapacity(radCount + 1)
+        for i in 0...radCount {
+            offsets.append(Int(readU16(offsetsStart + i * 2)))
+        }
+        guard let blobLen = offsets.last, blobLen >= 0 else { return nil }
+        let blobStart = offsetsStart + offsetsByteLen
+        let paddedBlobLen = blobLen + (blobLen % 2)
+        let tableStart = blobStart + paddedBlobLen
+        let tableByteLen = count * 2
+        guard blobStart + blobLen <= len, tableStart + tableByteLen <= len else { return nil }
+
+        var labels: [String] = [""]
+        labels.reserveCapacity(radCount + 1)
+        for i in 0..<radCount {
+            let s = offsets[i]
+            let e = offsets[i + 1]
+            guard s <= e, e <= blobLen else { return nil }
+            let slice = UnsafeBufferPointer(start: base.advanced(by: blobStart + s), count: e - s)
+            labels.append(String(decoding: slice, as: UTF8.self))
+        }
+
+        var parsedSylCount = 0
+        var sOffStart = 0
+        var sBlobStart = 0
+        var sBlobByteLen = 0
+        var pOffStart = 0
+        var pCPStart = 0
+        var pTotal = 0
+
+        let afterTable = tableStart + tableByteLen
+        if rawSylCount > 0, rawSylCount <= 1024 {
+            let candidateSylOffStart = afterTable
+            let sylOffBytes = (rawSylCount + 1) * 2
+            if candidateSylOffStart + sylOffBytes <= len {
+                let sylBlobLen = Int(readU16(candidateSylOffStart + rawSylCount * 2))
+                let candidateSylBlobStart = candidateSylOffStart + sylOffBytes
+                let unalignedAfterSylBlob = candidateSylBlobStart + sylBlobLen
+                let alignedPostOffStart = (unalignedAfterSylBlob + 3) & ~3
+                let postOffBytes = (rawSylCount + 1) * 4
+                if unalignedAfterSylBlob <= len, alignedPostOffStart + postOffBytes <= len {
+                    let postEndCount = Int(readU32(alignedPostOffStart + rawSylCount * 4))
+                    let candidatePostCPStart = alignedPostOffStart + postOffBytes
+                    if postEndCount >= 0, candidatePostCPStart + postEndCount * 2 <= len {
+                        parsedSylCount = rawSylCount
+                        sOffStart = candidateSylOffStart
+                        sBlobStart = candidateSylBlobStart
+                        sBlobByteLen = sylBlobLen
+                        pOffStart = alignedPostOffStart
+                        pCPStart = candidatePostCPStart
+                        pTotal = postEndCount
+                    }
+                }
+            }
+        }
+
+        self.mappedData = mappedData
+        self.startCodepoint = startCP
+        self.charCount = count
+        self.charTableOffset = tableStart
+        self.radicalLabels = labels
+        self.syllableCount = parsedSylCount
+        self.sylOffsetsStart = sOffStart
+        self.sylBlobStart = sBlobStart
+        self.sylBlobByteLen = sBlobByteLen
+        self.postOffsetsStart = pOffStart
+        self.postCodepointsStart = pCPStart
+        self.totalPostingsCount = pTotal
+    }
+
+    public static func loadBundled() -> HanziMetadataTable? {
+        let bundles: [Bundle] = [
+            Bundle(for: MmapLexicon.self),
+            Bundle.main,
+        ] + Bundle.allBundles
+        for b in bundles {
+            if let url = b.url(forResource: "lokey_hanzi_meta", withExtension: "bin"),
+               let data = try? NSData(contentsOf: url, options: [.mappedIfSafe]),
+               let table = HanziMetadataTable(mappedData: data) {
+                return table
+            }
+        }
+        return nil
+    }
+
+    @inline(__always)
+    public func lookup(_ ch: Character) -> Entry? {
+        guard ch.unicodeScalars.count == 1, let scalar = ch.unicodeScalars.first else { return nil }
+        let cp = scalar.value
+        guard cp >= startCodepoint else { return nil }
+        let idx = Int(cp - startCodepoint)
+        guard idx >= 0, idx < charCount else { return nil }
+        let base = mappedData.bytes.assumingMemoryBound(to: UInt8.self)
+        let off = charTableOffset + idx * 2
+        let radID = base[off]
+        let strokes = Int(base[off + 1])
+        guard radID > 0, Int(radID) < radicalLabels.count, strokes > 0 else { return nil }
+        return Entry(radicalID: radID, radicalLabel: radicalLabels[Int(radID)], totalStrokes: strokes)
+    }
+
+    public func radicalLabel(for id: UInt8) -> String? {
+        let idx = Int(id)
+        guard idx > 0, idx < radicalLabels.count else { return nil }
+        return radicalLabels[idx]
+    }
+
+    /// Zero-copy O(log M) lookup of Unihan `kTGHZ2013` / Mainland CJK single characters for `syllable` (e.g. `"yi"` -> `祎`, `"yun"` -> `鋆`).
+    public func characters(forSyllable syllable: String, limit: Int = 256) -> [Character] {
+        guard syllableCount > 0, limit > 0 else { return [] }
+        let queryBytes = Array(syllable.lowercased().utf8)
+        guard !queryBytes.isEmpty else { return [] }
+        let base = mappedData.bytes.assumingMemoryBound(to: UInt8.self)
+
+        func readU16(_ off: Int) -> Int {
+            Int(UInt16(base[off]) | (UInt16(base[off + 1]) << 8))
+        }
+        func readU32(_ off: Int) -> Int {
+            Int(
+                UInt32(base[off])
+                    | (UInt32(base[off + 1]) << 8)
+                    | (UInt32(base[off + 2]) << 16)
+                    | (UInt32(base[off + 3]) << 24)
+            )
+        }
+
+        let len = mappedData.length
+        var lo = 0
+        var hi = syllableCount - 1
+        var matchedIdx: Int? = nil
+        while lo <= hi {
+            let mid = (lo + hi) >> 1
+            guard sylOffsetsStart + (mid + 2) * 2 <= len else { return [] }
+            let s = readU16(sylOffsetsStart + mid * 2)
+            let e = readU16(sylOffsetsStart + (mid + 1) * 2)
+            guard s >= 0, s <= e, e <= sylBlobByteLen, sylBlobStart + e <= len else { return [] }
+            let mLen = e - s
+            var cmp = 0
+            let minLen = min(mLen, queryBytes.count)
+            for k in 0..<minLen {
+                let mb = base[sylBlobStart + s + k]
+                let qb = queryBytes[k]
+                if mb != qb {
+                    cmp = mb < qb ? -1 : 1
+                    break
+                }
+            }
+            if cmp == 0 && mLen != queryBytes.count {
+                cmp = mLen < queryBytes.count ? -1 : 1
+            }
+            if cmp == 0 {
+                matchedIdx = mid
+                break
+            } else if cmp < 0 {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+
+        guard let sIdx = matchedIdx,
+              postOffsetsStart + (sIdx + 2) * 4 <= len else { return [] }
+        let pStart = readU32(postOffsetsStart + sIdx * 4)
+        let pEnd = readU32(postOffsetsStart + (sIdx + 1) * 4)
+        guard pStart >= 0, pStart < pEnd, pEnd <= totalPostingsCount,
+              postCodepointsStart + pEnd * 2 <= len else { return [] }
+
+        let takeCount = min(limit, pEnd - pStart)
+        var out: [Character] = []
+        out.reserveCapacity(takeCount)
+        for i in 0..<takeCount {
+            let cp = UInt32(readU16(postCodepointsStart + (pStart + i) * 2))
+            if let scalar = UnicodeScalar(cp) {
+                out.append(Character(scalar))
+            }
+        }
+        return out
+    }
+}

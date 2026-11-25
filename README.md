@@ -38,8 +38,8 @@
 
 **Lokey** 是一款纯离线、物理级零联网的 iOS 26 键全拼与小鹤/自然码双拼中文输入法，**兼顾「1:1 原生手感 · 零学习适应成本」与「端侧智能 · 源码级零联网隐私」**：
 
-- **1:1 原生手感，零学习适应成本**：透明根视图透出 iOS 26 Liquid Glass 原生液态玻璃底座，精确对齐常规 iPhone 四档高度及 iPhone Duo 内外双屏几何与光学中心；保留空框高频起始候选、120Hz 异步键帽气泡、左滑删除键（`⌫`）清空待上屏长句、横拖 `Shift` / 长按空格移动拼音光标、智能数字时间半角标点（`12:00` / `3.14` / `localhost:8080`）与 `CoreHaptics` `0%–100%` 无级震动，从系统自带键盘切换过来无需重新适应。
-- **自研「落墨 · Inkstone」离线引擎**：支持 **26 键盲打热区自适应校准**（`2×2` 协方差高斯实时贴合拇指落点）、**双向神经网络长句语义与邻键误触纠错**、**句内无缝中英混输**、**OpenCC 词级简繁实时切换**（简体 / 台灣正體 / 香港標準）及 **本机 SQLite 自造词记忆**，并支持只读 `mmap` 零拷贝热挂载可选 `55.3 万词` [白霜 `.lokeypack` 扩展包](https://github.com/Kianuni/lokey-frost-pack) 与个人 Rime 词表。
+- **1:1 原生手感，零学习适应成本**：透明根视图透出 iOS 26 Liquid Glass 原生液态玻璃底座，精确对齐常规 iPhone 四档高度及 iPhone Duo 内外双屏几何与光学中心；保留空框高频起始候选、120Hz 异步键帽气泡、左滑删除键（`⌫`）清空待上屏长句、横拖 `Shift` / 长按空格移动拼音光标、长按表情键快切左右单手模式、空格左侧可配置快捷标点（关闭 / 逗号 / 句号）、成对括号引号自动闭合、智能数字时间半角标点（`12:00` / `3.14` / `localhost:8080`）与 `CoreHaptics` `0%–100%` 无级震动，从系统自带键盘切换过来无需重新适应。
+- **自研「落墨 · Inkstone」离线引擎**：支持 **26 键盲打热区自适应校准**（`2×2` 协方差高斯实时贴合拇指落点）、**双向神经网络长句语义与邻键误触纠错**、**展开候选面板拼音/部首/笔画多维快筛**、**句内无缝中英混输**、**OpenCC 词级简繁实时切换**（简体 / 台灣正體 / 香港標準）、**本机 SQLite 自造词记忆（21 天遗忘曲线）与自定义快捷短语**（支持 `rq`/`sj`/`xq` 动态日期时间、系统文本替换与 Rime `custom_phrase.txt` 双向互通），并支持只读 `mmap` 零拷贝热挂载可选 `55.3 万词` [白霜 `.lokeypack` 扩展包](https://github.com/Kianuni/lokey-frost-pack) 与个人 Rime 词表。
 - **物理级零联网，源码与二进制独立可审计**：全工程源码与编译产物均不含任何网络框架、Socket 符号或数据采集，关闭系统「允许完全访问」即可使用默认 26 键全拼与内置词库离线盲打；开启仅用于本机 App Group 同步双拼/OpenCC 繁体/模糊音等偏好、个人词库、外置包与触感震动，依然零联网；本仓库即面向公开 `otool -L` / `nm -u` 与 `codesign` 核验的开源安全审计仓。
 
 `Lokey-Audit` 是 **Lokey**（iOS 26 键全拼与小鹤/自然码双拼离线输入法）的公开安全审计仓库，用于让安全研究者与用户独立验证键盘扩展的**物理级零联网隔离**、**隐私清单（Privacy Manifest）** 与**纯本地拼音解码逻辑**。
@@ -48,7 +48,7 @@
 
 - **`Shared/Engine/*.swift`（12 个文件）与 `KeyboardExtension/**/*.swift`（6 个文件）**：与商业版 `Lokey` 主仓库 **100% 字节级一致（SHA-256 完全匹配）**，未做任何删改或脱敏隐藏。
 - **`AuditDemoApp/`**：极简 SwiftUI 宿主壳应用，仅保留键盘启用状态检测、实时试打沙盒、系统设置引导与零联网声明；省略了商业版宿主应用的 `StoreKit 2` 买断管理、`.lokeypack` 外部词库管理器、Rime 个人词库导入与备份 UI、诊断日志浏览及打包脚本。
-- **`Shared/Resources/`**：仅包含由 `scripts/build_demo_lexicon.py` 离线编译的最小化开放许可示范词库（`demo_lexicon.bin` 约 4,000 词条 + 中性 `LNLM-v2` 占位权重，覆盖全部 416 个标准汉语拼音音节）、最小化 `lokey_emoji.bin` 与 `lokey_opencc.bin`（不含商业版内置词典与模型参数资源，且完全不含 GPL/LGPL 数据）。构建时由 Xcode Build Phase 将 `demo_lexicon.bin` 复制为包内的 `lokey_lexicon.bin`，从而在不改动任何核心引擎 Swift 源码的前提下完成完整编译与测试。
+- **`Shared/Resources/`**：仅包含由 `scripts/build_demo_lexicon.py`（及 `scripts/build_hanzi_meta.py`）离线编译的最小化示范词库（`demo_lexicon.bin` 约 4,000 词条 + 中性 `LNLM-v2` 占位权重，覆盖全部 416 个标准汉语拼音音节）、最小化 `lokey_emoji.bin`、`lokey_opencc.bin` 与 `lokey_hanzi_meta.bin`（汉字部首、总笔画与读音索引表，约 80 KB；不含商业版内置词典与模型参数资源）。构建时由 Xcode Build Phase 将 `demo_lexicon.bin` 复制为包内的 `lokey_lexicon.bin`，从而在不改动任何核心引擎 Swift 源码的前提下完成完整编译与测试。
 
 ### 快速审计与本地验证
 
@@ -140,7 +140,7 @@ python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml -o dist/my-c
 
 > 🌐 **Product Showcase & Interactive Demo**: **<https://kianuni.github.io/Lokey-Audit/>** · ✈️ **TestFlight Beta**: **[Join on TestFlight](https://testflight.apple.com/join/Bx9gxXTN)** · Companion Lexicon Pack: **[`Kianuni/lokey-frost-pack`](https://github.com/Kianuni/lokey-frost-pack)** · Privacy Policy: **[`PRIVACY.md`](./PRIVACY.md)**
 
-**Lokey** is an offline, physically zero-network iOS 26-key Full Pinyin & Xiaohe/Ziranma Shuangpin keyboard built around **1:1 native iOS ergonomics (zero learning curve)** and **auditable zero-data-collection privacy**. Powered on-device by the **Inkstone** engine, it pairs adaptive 26-key blind-typing heatmap calibration, bidirectional neural sentence semantics, inline CN-EN mixed decoding, word-level OpenCC Simplified/Traditional conversion, local user-phrase memory, continuous `CoreHaptics`, and zero-copy `.lokeypack` `mmap` mounting—with zero networking frameworks or tracking in source or compiled binaries.
+**Lokey** is an offline, physically zero-network iOS 26-key Full Pinyin & Xiaohe/Ziranma Shuangpin keyboard built around **1:1 native iOS ergonomics (zero learning curve)** and **auditable zero-data-collection privacy**. Powered on-device by the **Inkstone** engine, it pairs adaptive 26-key blind-typing heatmap calibration, bidirectional neural sentence semantics, Pinyin/Radical/Stroke candidate filtering, inline CN-EN mixed decoding, word-level OpenCC Simplified/Traditional conversion, left/right one-handed layouts, local user-phrase memory with custom phrase shortcuts, continuous `CoreHaptics`, and zero-copy `.lokeypack` `mmap` mounting—with zero networking frameworks or tracking in source or compiled binaries.
 
 `Lokey-Audit` is the source-available security audit repository for **Lokey**. It allows researchers and users to independently verify physical zero-network isolation, Apple Privacy Manifest declarations, and offline Pinyin decoding behavior.
 
@@ -148,9 +148,9 @@ python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml -o dist/my-c
 
 - **`Shared/Engine/*.swift` (12 files) & `KeyboardExtension/**/*.swift` (6 files)**: **100% byte-for-byte identical (matching SHA-256)** to the commercial `Lokey` repository, with zero redactions.
 - **`AuditDemoApp/`**: Minimal SwiftUI host shell providing keyboard activation status, a live typing sandbox, iOS Settings onboarding, and zero-network documentation. Commercial host-only `StoreKit 2` entitlement UI, `.lokeypack` pack management, Rime/backup UI, diagnostic viewer, and packaging scripts are omitted.
-- **`Shared/Resources/`**: Contains minimal permissive demonstration binaries compiled by `scripts/build_demo_lexicon.py`:
-  - `demo_lexicon.bin`: ~4,000 permissive entries covering all 416 canonical Mandarin syllables, basic English words, clean next-word bigrams, and neutral `LNLM-v2` placeholder weights (omitting commercial lexicon/model assets and containing zero GPL/LGPL data). Copied as `lokey_lexicon.bin` inside built app/extension/test bundles at build time so all engine & keyboard `.swift` files stay byte-identical.
-  - `lokey_emoji.bin` & `lokey_opencc.bin`: Minimal Emoji association and Simplified/Traditional conversion tables.
+- **`Shared/Resources/`**: Contains minimal demonstration binaries compiled offline by `scripts/build_demo_lexicon.py` and `scripts/build_hanzi_meta.py`:
+  - `demo_lexicon.bin`: ~4,000 entries covering all 416 canonical Mandarin syllables, basic English words, clean next-word bigrams, and neutral `LNLM-v2` placeholder weights (omitting commercial lexicon/model assets). Copied as `lokey_lexicon.bin` inside built app/extension/test bundles at build time so all engine & keyboard `.swift` files stay byte-identical.
+  - `lokey_emoji.bin`, `lokey_opencc.bin`, & `lokey_hanzi_meta.bin`: Minimal Emoji association, Simplified/Traditional conversion, and CJK radical/stroke/syllable metadata (`LKHM-v1`, ~80 KB) tables.
 
 ### Audit & Verification Commands
 
@@ -176,7 +176,7 @@ python3 scripts/build_lokeypack.py --extra-dict my_domain.dict.yaml -o dist/my-c
 
 ### License
 - Repository source code is governed by the **Source-Available Security Audit License** (`LICENSE`), permitting security inspection and local build/test verification while prohibiting `.ipa`/binary redistribution and commercial/App Store republishing.
-- Permissive upstream data attributions for `demo_lexicon.bin`, `lokey_emoji.bin`, and `lokey_opencc.bin` are included in `LICENSES/`.
+- Permissive upstream data attributions for `demo_lexicon.bin`, `lokey_emoji.bin`, `lokey_opencc.bin`, and `lokey_hanzi_meta.bin` are included in `LICENSES/`.
 
 ---
 

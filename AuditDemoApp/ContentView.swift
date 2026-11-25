@@ -18,7 +18,7 @@ struct ContentView: View {
     @FocusState private var isSandboxFocused: Bool
 
     private let appVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.0"
-    private let buildVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "94"
+    private let buildVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "100"
 
     var body: some View {
         NavigationStack {
@@ -102,7 +102,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("1. 启用 Lokey 键盘（可选「允许完全访问」）")
                                 .font(.subheadline.weight(.medium))
-                            Text("前往「设置 -> 通用 -> 键盘 -> 键盘 -> 添加新键盘」选择 Lokey。关闭「允许完全访问」（hasFullAccess == false）即可使用内置示范词库 100% 离线全拼打字；开启完全访问仅用于本机 App Group 状态同步与按键震动/音效反馈。")
+                            Text("前往「设置 → 通用 → 键盘 → 键盘 → 添加新键盘」选择 Lokey。关闭「允许完全访问」即可使用内置示范词库 100% 离线打字；开启完全访问仅用于本机 App Group 状态同步与按键震动、音效反馈。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -125,6 +125,36 @@ struct ContentView: View {
                     }
                 } header: {
                     Text("启用说明")
+                }
+
+                // Official Website & Public Audit Repository Links
+                Section {
+                    if let siteURL = URL(string: "https://kianuni.github.io/Lokey-Audit/") {
+                        Link(destination: siteURL) {
+                            HStack {
+                                Label("Lokey 官方网站", systemImage: "globe")
+                                Spacer()
+                                Image(systemName: "arrow.up.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    if let repoURL = URL(string: "https://github.com/Kianuni/Lokey-Audit") {
+                        Link(destination: repoURL) {
+                            HStack {
+                                Label("GitHub 公开可审计仓库", systemImage: "checkmark.shield")
+                                Spacer()
+                                Image(systemName: "arrow.up.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("公开审计与官方网站")
+                } footer: {
+                    Text("点击将由系统 Safari 打开外部页面；应用本体与键盘扩展不含任何网络框架或 Socket 符号。")
                 }
 
                 // Zero-Network Physical Isolation & Source-Available Audit Notice

@@ -283,3 +283,165 @@ final class KeyCalloutBubbleView: UIView {
         shapeLayer.shadowPath = nil
     }
 }
+
+/// Floating 3-segment one-handed mode slide-selector capsule (`左侧单手 · 标准全宽 · 右侧单手`)
+/// anchored above the `😊` Emoji key on long-press, matching native iOS Globe popover ergonomics.
+final class OneHandedSelectorPopupView: UIView {
+    static let orderedModes: [OneHandedMode] = [.left, .off, .right]
+    private static let cardWidth: CGFloat = 164.0
+    private static let cardHeight: CGFloat = 48.0
+    private static let sidePadding: CGFloat = 6.0
+    private static let verticalPadding: CGFloat = 5.0
+    private static let segmentWidth: CGFloat = 48.0
+    private static let segmentGap: CGFloat = 4.0
+
+    private let cardView = UIView()
+    private let selectionPillView = UIView()
+    private var iconViews: [UIImageView] = []
+    private var lastAppliedDark: Bool?
+    private(set) var highlightedMode: OneHandedMode = .off
+
+    internal var cardFrameInContainerForTesting: CGRect { cardView.frame }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        isHidden = true
+
+        cardView.layer.cornerRadius = 16.0
+        cardView.layer.cornerCurve = .continuous
+        cardView.layer.borderWidth = 0.5
+        cardView.layer.shadowColor = UIColor.black.cgColor
+        cardView.layer.shadowOffset = CGSize(width: 0, height: 4.0)
+        cardView.layer.shadowRadius = 14.0
+        addSubview(cardView)
+
+        selectionPillView.layer.cornerRadius = 11.5
+        selectionPillView.layer.cornerCurve = .continuous
+        cardView.addSubview(selectionPillView)
+
+        let symbolNames = ["keyboard.onehanded.left", "keyboard", "keyboard.onehanded.right"]
+        let symCfg = UIImage.SymbolConfiguration(pointSize: 20.0, weight: .regular)
+        for (idx, name) in symbolNames.enumerated() {
+            let iv = UIImageView()
+            iv.contentMode = .center
+            iv.image = UIImage(systemName: name, withConfiguration: symCfg)?.withRenderingMode(.alwaysTemplate)
+                ?? Self.fallbackVectorIcon(for: Self.orderedModes[idx])
+            cardView.addSubview(iv)
+            iconViews.append(iv)
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private static func fallbackVectorIcon(for mode: OneHandedMode) -> UIImage {
+        let size = CGSize(width: 24, height: 18)
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 3.0
+        fmt.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: fmt).image { _ in
+            UIColor.black.setStroke()
+            UIColor.black.setFill()
+            let rect: CGRect
+            switch mode {
+            case .left:
+                rect = CGRect(x: 1.5, y: 2.5, width: 15.5, height: 13.0)
+            case .off:
+                rect = CGRect(x: 2.0, y: 2.5, width: 20.0, height: 13.0)
+            case .right:
+                rect = CGRect(x: 7.0, y: 2.5, width: 15.5, height: 13.0)
+            }
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: 2.5)
+            path.lineWidth = 1.35
+            path.stroke()
+        }.withRenderingMode(.alwaysTemplate)
+    }
+
+    private func segmentFrame(at index: Int) -> CGRect {
+        let clamped = max(0, min(2, index))
+        let x = Self.sidePadding + CGFloat(clamped) * (Self.segmentWidth + Self.segmentGap)
+        return CGRect(
+            x: x,
+            y: Self.verticalPadding,
+            width: Self.segmentWidth,
+            height: Self.cardHeight - Self.verticalPadding * 2.0
+        )
+    }
+
+    func show(
+        anchorKeyFrame: CGRect,
+        containerWidth: CGFloat,
+        initialMode: OneHandedMode,
+        dark: Bool
+    ) {
+        let cw = max(Self.cardWidth + 12.0, containerWidth)
+        let cardX = max(6.0, min(cw - Self.cardWidth - 6.0, anchorKeyFrame.midX - Self.cardWidth * 0.5))
+        let cardY = max(2.0, anchorKeyFrame.minY - Self.cardHeight - 10.0)
+        let targetCardFrame = CGRect(x: cardX, y: cardY, width: Self.cardWidth, height: Self.cardHeight)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        cardView.frame = targetCardFrame
+        cardView.layer.shadowPath = UIBezierPath(roundedRect: cardView.bounds, cornerRadius: 16.0).cgPath
+        for i in 0..<iconViews.count {
+            iconViews[i].frame = segmentFrame(at: i)
+        }
+        applyAppearance(dark: dark)
+        highlightedMode = initialMode
+        let idx = Self.orderedModes.firstIndex(of: initialMode) ?? 1
+        selectionPillView.frame = segmentFrame(at: idx)
+        isHidden = false
+        CATransaction.commit()
+    }
+
+    func updateHighlightedMode(_ mode: OneHandedMode, animated: Bool = true) {
+        guard highlightedMode != mode else { return }
+        highlightedMode = mode
+        let idx = Self.orderedModes.firstIndex(of: mode) ?? 1
+        let target = segmentFrame(at: idx)
+        if animated && window != nil {
+            UIView.animate(withDuration: 0.12, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
+                self.selectionPillView.frame = target
+            }
+        } else {
+            selectionPillView.frame = target
+        }
+    }
+
+    func resolveMode(forContainerPoint pt: CGPoint) -> OneHandedMode {
+        let localX = pt.x - cardView.frame.minX
+        let firstSplit = Self.sidePadding + Self.segmentWidth + Self.segmentGap * 0.5
+        let secondSplit = firstSplit + Self.segmentWidth + Self.segmentGap
+        if localX < firstSplit {
+            return .left
+        } else if localX <= secondSplit {
+            return .off
+        } else {
+            return .right
+        }
+    }
+
+    func hide() {
+        guard !isHidden else { return }
+        isHidden = true
+    }
+
+    private func applyAppearance(dark: Bool) {
+        guard lastAppliedDark != dark else { return }
+        lastAppliedDark = dark
+        cardView.backgroundColor = KeyboardTheme.calloutBubbleFill(dark: dark)
+        cardView.layer.borderColor = KeyboardTheme.calloutStrokeColor(dark: dark).cgColor
+        cardView.layer.shadowOpacity = dark ? 0.34 : 0.14
+        selectionPillView.backgroundColor = dark
+            ? UIColor(white: 1.0, alpha: 0.18)
+            : UIColor(white: 0.0, alpha: 0.085)
+        let tint = KeyboardTheme.primaryKeyTextColor(dark: dark)
+        for iv in iconViews {
+            iv.tintColor = tint
+        }
+    }
+}

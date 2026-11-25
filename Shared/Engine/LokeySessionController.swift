@@ -529,20 +529,349 @@ public final class LokeySessionController {
         commitCandidate(at: index)
     }
 
+    /// Commits an explicitly chosen candidate (such as a deep single-character homophone recalled via Radical/Stroke filter
+    /// in the expanded candidate panel), seamlessly supporting partial commits, custom-phrase composition, and unigram boosts.
+    @discardableResult
+    public func selectExplicitCandidate(_ candidate: LokeyCandidate, canonical: LokeyCandidate? = nil) -> KeyActionResult? {
+        guard !samples.isEmpty else { return nil }
+        if let existingIdx = currentDecode.candidates.firstIndex(where: {
+            $0.text == candidate.text && $0.consumedInputCount == candidate.consumedInputCount
+        }) {
+            return commitCandidate(at: existingIdx)
+        }
+        var augDisplay = currentDecode.candidates
+        augDisplay.append(candidate)
+        currentDecode = DecodeResult(preeditDisplay: currentDecode.preeditDisplay, candidates: augDisplay)
+        canonicalCurrentCandidates.append(canonical ?? candidate)
+        return commitCandidate(at: augDisplay.count - 1)
+    }
+
+    public struct ExpandedFilterCatalog: Sendable, Equatable {
+        public struct PinyinOption: Sendable, Equatable {
+            public let syllable: String
+            public let consumedCount: Int
+
+            public init(syllable: String, consumedCount: Int) {
+                self.syllable = syllable
+                self.consumedCount = consumedCount
+            }
+        }
+
+        public struct CharCandidate: Sendable, Equatable {
+            public let displayCandidate: LokeyCandidate
+            public let canonicalCandidate: LokeyCandidate
+            public let syllable: String
+            public let radicalID: UInt8
+            public let radicalLabel: String
+            public let totalStrokes: Int
+        }
+
+        public let pinyinOptions: [PinyinOption]
+        public let charCandidates: [CharCandidate]
+        public let availableRadicals: [(id: UInt8, label: String, count: Int)]
+        public let availableStrokeBuckets: [HanziMetadataTable.StrokeBucket]
+        public let availableExactStrokes: [Int]
+
+        public static func == (lhs: ExpandedFilterCatalog, rhs: ExpandedFilterCatalog) -> Bool {
+            lhs.pinyinOptions == rhs.pinyinOptions
+                && lhs.charCandidates == rhs.charCandidates
+                && lhs.availableStrokeBuckets == rhs.availableStrokeBuckets
+                && lhs.availableExactStrokes == rhs.availableExactStrokes
+                && lhs.availableRadicals.count == rhs.availableRadicals.count
+                && zip(lhs.availableRadicals, rhs.availableRadicals).allSatisfy {
+                    $0.id == $1.id && $0.label == $1.label && $0.count == $1.count
+                }
+        }
+    }
+
+    /// Builds the on-demand syllable, radical, and stroke filter catalog for the expanded candidate panel (`⌄`).
+    /// Recalls up to 512 single-character homophones per matched leading syllable so rare personal-name characters
+    /// (e.g. `祎`, `熠`, `鋆`, `镕`) beyond the top-64 strip are immediately reachable within 1 tap.
+    public func buildExpandedFilterCatalog(metaTable: HanziMetadataTable? = .shared) -> ExpandedFilterCatalog? {
+        guard !samples.isEmpty else { return nil }
+        let lexicon = decoder.lexicon
+        let rawChars = samples.map { Character($0.primaryChar.lowercased()) }
+        let n = rawChars.count
+
+        // Collect leading ASCII letters up to the first separator `'` (max 6 letters for a syllable)
+        var leadLetters = ""
+        var sampleConsumedForLen: [Int] = [0]
+        for (i, ch) in rawChars.enumerated() {
+            if ch == "'" {
+                if !leadLetters.isEmpty { break }
+                continue
+            }
+            guard ch >= "a" && ch <= "z" else { break }
+            leadLetters.append(ch)
+            sampleConsumedForLen.append(i + 1)
+            if leadLetters.count >= 6 { break }
+        }
+
+        var options: [ExpandedFilterCatalog.PinyinOption] = []
+        var seenSyllables = Set<String>()
+        func addOption(_ syl: String, consumed: Int) {
+            let clean = syl.lowercased()
+            guard !clean.isEmpty, consumed >= 1, consumed <= n, seenSyllables.insert(clean).inserted else { return }
+            options.append(ExpandedFilterCatalog.PinyinOption(syllable: clean, consumedCount: consumed))
+        }
+
+        // 1. Exact & fuzzy leading syllables from the typed letters (longest match first)
+        if settings.pinyinScheme == .quanpin {
+            if !leadLetters.isEmpty {
+                for len in stride(from: leadLetters.count, through: 1, by: -1) {
+                    let pref = String(leadLetters.prefix(len))
+                    let consumed = sampleConsumedForLen[len]
+                    let expanded = PinyinSyllableAutomaton.matchSyllables(
+                        raw: pref,
+                        in: lexicon,
+                        fuzzy: settings.fuzzyOptions,
+                        allowTransposition: false,
+                        allowClipped: false
+                    )
+                    for ex in expanded where ex.penaltyQ8 <= 120 {
+                        if len == 1 && leadLetters.count >= 2 && ex.canonical.count > 1 {
+                            continue
+                        }
+                        addOption(ex.canonical, consumed: consumed)
+                        if options.count >= 10 { break }
+                    }
+                    if options.count >= 10 { break }
+                }
+                if options.isEmpty && (leadLetters.count == 1 || leadLetters == "zh" || leadLetters == "ch" || leadLetters == "sh") {
+                    let hits = lexicon.stepByInitialPrefix(from: 0, prefix: leadLetters, limit: 8)
+                    let consumed = sampleConsumedForLen[leadLetters.count]
+                    for h in hits {
+                        addOption(h.syllable, consumed: consumed)
+                    }
+                }
+            }
+        } else {
+            let leadBytes = Array(leadLetters.utf8)
+            if leadBytes.count >= 2 {
+                let consumed = sampleConsumedForLen[2]
+                let hits = PinyinSyllableAutomaton.matchShuangpinPair(
+                    b0: leadBytes[0],
+                    b1: leadBytes[1],
+                    scheme: settings.pinyinScheme,
+                    in: lexicon,
+                    fuzzy: settings.fuzzyOptions
+                )
+                for h in hits {
+                    addOption(h.canonical, consumed: consumed)
+                }
+            } else if leadBytes.count == 1,
+                      let ini = PinyinSyllableAutomaton.shuangpinInitialString(forKeyByte: leadBytes[0], scheme: settings.pinyinScheme) {
+                let hits = lexicon.stepByInitialPrefix(from: 0, prefix: ini, limit: 8)
+                for h in hits {
+                    addOption(h.syllable, consumed: sampleConsumedForLen[1])
+                }
+            }
+        }
+
+        // 2. Include leading syllables from already-decoded candidates (captures spatial neighbor corrections)
+        for cand in canonicalCurrentCandidates.prefix(16) {
+            guard let firstSyl = cand.matchedSyllables.first, !firstSyl.isEmpty else { continue }
+            let estConsumed: Int
+            if cand.matchedSyllables.count == 1 {
+                estConsumed = cand.consumedInputCount
+            } else if settings.pinyinScheme != .quanpin {
+                estConsumed = min(n, 2)
+            } else {
+                estConsumed = min(n, firstSyl.count)
+            }
+            addOption(firstSyl, consumed: max(1, estConsumed))
+            if options.count >= 12 { break }
+        }
+
+        guard !options.isEmpty else { return nil }
+
+        let userSnap = decoder.userStore.decodeSnapshot(for: settings.pinyinScheme)
+        let scriptMode = settings.chineseScriptMode
+        var charCandidates: [ExpandedFilterCatalog.CharCandidate] = []
+        charCandidates.reserveCapacity(128)
+        var seenDisplaySyl = Set<String>()
+        var radicalCounts: [UInt8: Int] = [:]
+        var radicalLabels: [UInt8: String] = [:]
+        var radicalFirstSeenOrder: [UInt8] = []
+        var strokeSet = Set<Int>()
+        var bucketSet = Set<HanziMetadataTable.StrokeBucket>()
+
+        for opt in options.prefix(8) {
+            guard let sid = lexicon.syllableToID[opt.syllable],
+                  let node = lexicon.step(from: lexicon.rootNodeIndex, syllableID: sid) else {
+                continue
+            }
+            let uniMap = userSnap.unigramEntries(compactPinyin: opt.syllable)
+            var rawCharItems = lexicon.words(at: node, limit: 512).filter { $0.text.count == 1 }
+            if let metaChars = metaTable?.characters(forSyllable: opt.syllable, limit: 256), !metaChars.isEmpty {
+                var existing = Set(rawCharItems.map(\.text))
+                for (mIdx, mCh) in metaChars.enumerated() {
+                    let s = String(mCh)
+                    if existing.insert(s).inserted {
+                        rawCharItems.append(MmapLexicon.WordHit(text: s, scoreQ8: -6500 - mIdx))
+                    }
+                }
+            }
+            let topBaseScore = rawCharItems.first?.scoreQ8 ?? -1800
+            let secondBaseScore = rawCharItems.dropFirst().first?.scoreQ8 ?? (topBaseScore - 120)
+            var scoredCharItems: [(origIdx: Int, text: String, scoreQ8: Int, hasUserUnigram: Bool)] = []
+            scoredCharItems.reserveCapacity(rawCharItems.count)
+            for (origIdx, w) in rawCharItems.enumerated() {
+                var score = w.scoreQ8
+                var hasUni = false
+                if let entry = uniMap?[w.text] {
+                    hasUni = true
+                    let eff = Double(entry.count) * entry.recencyDecay
+                    let linearBoost = Int((min(4.0, eff) * 480.0).rounded())
+                    if eff >= 1.8 {
+                        score = max(w.scoreQ8 + linearBoost, min(topBaseScore - 40, secondBaseScore + Int((min(3.0, eff) * 120.0).rounded())))
+                    } else {
+                        score = w.scoreQ8 + linearBoost
+                    }
+                }
+                scoredCharItems.append((origIdx, w.text, score, hasUni))
+            }
+            if uniMap != nil && scoredCharItems.count > 1 {
+                scoredCharItems.sort { a, b in
+                    if a.scoreQ8 != b.scoreQ8 { return a.scoreQ8 > b.scoreQ8 }
+                    return a.origIdx < b.origIdx
+                }
+            }
+
+            for item in scoredCharItems {
+                let score = item.scoreQ8
+                let canonCand = LokeyCandidate(
+                    text: item.text,
+                    consumedInputCount: opt.consumedCount,
+                    matchedSyllables: [opt.syllable],
+                    scoreQ8: score,
+                    kind: .lexiconPhrase,
+                    isDeletableUserPhrase: item.hasUserUnigram
+                )
+                let dispText: String
+                if scriptMode == .simplified {
+                    dispText = item.text
+                } else {
+                    dispText = OpenCCConverter.shared.convert(item.text, mode: scriptMode)
+                }
+                guard dispText.count == 1, let ch = dispText.first else { continue }
+                let dedupKey = "\(dispText)|\(opt.syllable)"
+                guard seenDisplaySyl.insert(dedupKey).inserted else { continue }
+
+                let dispCand = (dispText == item.text)
+                    ? canonCand
+                    : LokeyCandidate(
+                        text: dispText,
+                        consumedInputCount: opt.consumedCount,
+                        matchedSyllables: [opt.syllable],
+                        scoreQ8: score,
+                        kind: .lexiconPhrase,
+                        isDeletableUserPhrase: item.hasUserUnigram
+                    )
+                if dispText != item.text {
+                    displayToCanonicalSurface[dispText] = item.text
+                }
+
+                let meta = metaTable?.lookup(ch) ?? item.text.first.flatMap { metaTable?.lookup($0) }
+                let radID = meta?.radicalID ?? 0
+                let rawRadLabel = meta?.radicalLabel ?? ""
+                let radLabel = HanziMetadataTable.displayRadicalLabel(rawRadLabel, scriptMode: scriptMode)
+                let strokes = meta?.totalStrokes ?? 0
+                if radID > 0 && !radLabel.isEmpty {
+                    if radicalCounts[radID] == nil {
+                        radicalFirstSeenOrder.append(radID)
+                        radicalLabels[radID] = radLabel
+                    }
+                    radicalCounts[radID, default: 0] += 1
+                }
+                if strokes > 0 {
+                    strokeSet.insert(strokes)
+                    if let b = HanziMetadataTable.StrokeBucket.bucket(for: strokes) {
+                        bucketSet.insert(b)
+                    }
+                }
+                charCandidates.append(
+                    ExpandedFilterCatalog.CharCandidate(
+                        displayCandidate: dispCand,
+                        canonicalCandidate: canonCand,
+                        syllable: opt.syllable,
+                        radicalID: radID,
+                        radicalLabel: radLabel,
+                        totalStrokes: strokes
+                    )
+                )
+            }
+        }
+
+        // Order radicals by frequency in the active homophone set (tie-broken by first appearance among common chars)
+        let firstOrderIndex = Dictionary(uniqueKeysWithValues: radicalFirstSeenOrder.enumerated().map { ($0.element, $0.offset) })
+        let sortedRadicals: [(id: UInt8, label: String, count: Int)] = radicalCounts.keys.sorted { a, b in
+            let ca = radicalCounts[a] ?? 0
+            let cb = radicalCounts[b] ?? 0
+            if ca != cb { return ca > cb }
+            return (firstOrderIndex[a] ?? 999) < (firstOrderIndex[b] ?? 999)
+        }.compactMap { id in
+            guard let lbl = radicalLabels[id], let cnt = radicalCounts[id] else { return nil }
+            return (id: id, label: lbl, count: cnt)
+        }
+
+        let sortedBuckets = HanziMetadataTable.StrokeBucket.allCases.filter { bucketSet.contains($0) }
+        let sortedStrokes = strokeSet.sorted()
+
+        return ExpandedFilterCatalog(
+            pinyinOptions: options,
+            charCandidates: charCandidates,
+            availableRadicals: sortedRadicals,
+            availableStrokeBuckets: sortedBuckets,
+            availableExactStrokes: sortedStrokes
+        )
+    }
+
     /// Deletes a user-learned phrase from SQLite and refreshes the candidate bar immediately.
     @discardableResult
     public func deleteUserCandidate(at index: Int) -> DecodeResult {
+        _ = deleteUserCandidateIfDeletable(at: index)
+        return currentDecode
+    }
+
+    /// Deletes a user-learned phrase at `index` in `currentDecode.candidates` if deletable, returning `true` when deleted.
+    @discardableResult
+    public func deleteUserCandidateIfDeletable(at index: Int) -> Bool {
         guard index >= 0 && index < currentDecode.candidates.count else {
-            return currentDecode
+            return false
         }
         let cand = currentDecode.candidates[index]
         guard cand.isDeletableUserPhrase else {
-            return currentDecode
+            return false
         }
         let canonicalSurface = canonicalCandidate(at: index)?.text ?? cand.text
-        decoder.userStore.deletePhrase(surface: canonicalSurface)
+        guard decoder.userStore.deletePhrase(surface: canonicalSurface) else {
+            return false
+        }
         redecode()
-        return currentDecode
+        return true
+    }
+
+    /// Deletes an explicit filtered candidate (e.g. from `ExpandedCandidateGridView` Pinyin/Radical/Stroke tabs) by canonical surface.
+    @discardableResult
+    public func deleteExplicitUserCandidate(_ candidate: LokeyCandidate, canonical: LokeyCandidate? = nil) -> Bool {
+        let matchedCanonFromCurrent: LokeyCandidate? = canonical ?? currentDecode.candidates.firstIndex(where: {
+            $0.text == candidate.text && $0.consumedInputCount == candidate.consumedInputCount
+        }).flatMap { canonicalCandidate(at: $0) }
+        guard candidate.isDeletableUserPhrase || matchedCanonFromCurrent?.isDeletableUserPhrase == true else {
+            return false
+        }
+        let canonicalSurface = matchedCanonFromCurrent?.text
+            ?? displayToCanonicalSurface[candidate.text]
+            ?? canonicalizeContext(candidate.text)
+        guard !canonicalSurface.isEmpty,
+              decoder.userStore.deletePhrase(surface: canonicalSurface) else {
+            return false
+        }
+        if isComposing {
+            redecode()
+        }
+        return true
     }
 
     /// Deletes an idle or predictive user-learned phrase by its display surface, mapping Traditional output back to canonical Simplified.
@@ -656,22 +985,46 @@ public final class LokeySessionController {
 
     /// Smart period string (`。` vs `.`) for the optional period key beside Space.
     public func smartPeriodString(contextBefore: String? = nil) -> String {
+        smartPunctuationString(for: .period, contextBefore: contextBefore)
+    }
+
+    /// Context-aware fullwidth/halfwidth punctuation string (`，`/`,` or `。`/`.`) for the configurable Space-left key.
+    public func smartSpaceLeftPunctuationString(contextBefore: String? = nil) -> String {
+        let mode = (settings.spaceLeftPunctuation == .comma) ? SpaceLeftPunctuationMode.comma : .period
+        return smartPunctuationString(for: mode, contextBefore: contextBefore)
+    }
+
+    public func smartPunctuationString(for mode: SpaceLeftPunctuationMode, contextBefore: String? = nil) -> String {
+        let fullwidth = (mode == .comma) ? "，" : "。"
+        let halfwidth = (mode == .comma) ? "," : "."
         if inputMode == .englishASCII {
-            return "."
+            return halfwidth
         }
         if let ctx = contextBefore {
             if let last = ctx.last {
-                if Self.isASCIIDigit(last) || Self.isASCIILetter(last) {
-                    return "."
+                if Self.isASCIILetter(last) {
+                    return halfwidth
+                }
+                if Self.isASCIIDigit(last) {
+                    if mode == .period {
+                        return "."
+                    }
+                    // For comma after digits: keep halfwidth `,` in pure ASCII/numeric runs (e.g. `1,000` or `item 1,`),
+                    // and fullwidth `，` when following CJK text (e.g. `我有100，`).
+                    let hasRecentCJK = ctx.suffix(8).contains(where: { Self.isCJKOrFullwidth($0) })
+                    return (hasRecentCJK || lastCommittedWasChinese) ? "，" : ","
                 }
                 if Self.isCJKOrFullwidth(last) {
-                    return "。"
+                    return fullwidth
+                }
+                if last == "," || last == "." || last == ";" || last == ":" || last == "?" || last == "!" {
+                    return halfwidth
                 }
             } else {
-                return "。"
+                return fullwidth
             }
         }
-        return lastCommittedWasChinese ? "。" : "."
+        return lastCommittedWasChinese ? fullwidth : halfwidth
     }
 
     private static func isASCIIDigit(_ ch: Character) -> Bool {
@@ -1340,6 +1693,45 @@ public final class LokeySessionController {
         return best
     }
 
+    private static let chineseWeekdayNames = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]
+    private static let shortWeekdayNames = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+    private static let traditionalShortWeekdayNames = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"]
+
+    public static func dynamicDateTimeMacroStrings(
+        forCode code: String,
+        now: Date = Date(),
+        scriptMode: ChineseScriptMode = .simplified
+    ) -> [String] {
+        let lowerCode = code.lowercased()
+        guard lowerCode == "rq" || lowerCode == "sj" || lowerCode == "xq" else { return [] }
+        var cal = Calendar(identifier: .gregorian)
+        cal.locale = Locale(identifier: "zh_CN")
+        let comps = cal.dateComponents([.year, .month, .day, .hour, .minute, .weekday], from: now)
+        guard let y = comps.year, let m = comps.month, let d = comps.day,
+              let hh = comps.hour, let mm = comps.minute, let wd = comps.weekday else {
+            return []
+        }
+        switch lowerCode {
+        case "rq":
+            return [
+                String(format: "%04d-%02d-%02d", y, m, d),
+                "\(y)年\(m)月\(d)日",
+                String(format: "%04d/%02d/%02d", y, m, d),
+            ]
+        case "sj":
+            return [
+                String(format: "%02d:%02d", hh, mm),
+                String(format: "%04d-%02d-%02d %02d:%02d", y, m, d, hh, mm),
+            ]
+        case "xq":
+            let idx = max(0, min(6, wd - 1))
+            let shortNames = (scriptMode == .simplified) ? Self.shortWeekdayNames : Self.traditionalShortWeekdayNames
+            return [Self.chineseWeekdayNames[idx], shortNames[idx]]
+        default:
+            return []
+        }
+    }
+
     private func installDecode(_ rawResult: DecodeResult) {
         lastRawSimplifiedDecode = rawResult
         lastAppliedScriptMode = settings.chineseScriptMode
@@ -1348,6 +1740,83 @@ public final class LokeySessionController {
         canonicalCurrentCandidates = mapped.canonicals
         hasPublishedRanking = true
         needsImmediateCandidateRefresh = true
+        if !isSecureContext, settings.enableDateTimeShortcuts, samples.count == 2 {
+            let raw2Lower = String(samples.map(\.primaryChar)).lowercased()
+            let nowDate = Date()
+            let dispMacros = Self.dynamicDateTimeMacroStrings(
+                forCode: raw2Lower,
+                now: nowDate,
+                scriptMode: settings.chineseScriptMode
+            )
+            if !dispMacros.isEmpty {
+                let canonMacros = (settings.chineseScriptMode == .simplified)
+                    ? dispMacros
+                    : Self.dynamicDateTimeMacroStrings(forCode: raw2Lower, now: nowDate, scriptMode: .simplified)
+                var augDisp = currentDecode.candidates
+                var augCanon = canonicalCurrentCandidates
+                if augCanon.count != augDisp.count {
+                    augCanon = augDisp
+                }
+                let matchesValidShuangpinSyllable: Bool
+                if settings.pinyinScheme != .quanpin {
+                    let utf8 = Array(raw2Lower.utf8)
+                    matchesValidShuangpinSyllable = utf8.count == 2 && !PinyinSyllableAutomaton.matchShuangpinPair(
+                        b0: utf8[0],
+                        b1: utf8[1],
+                        scheme: settings.pinyinScheme,
+                        in: decoder.lexicon,
+                        fuzzy: settings.fuzzyOptions
+                    ).isEmpty
+                } else {
+                    matchesValidShuangpinSyllable = false
+                }
+                // Preserve the top 3 Shuangpin single characters (place date/weekday items starting at #4 / index 3)
+                // when the 2-letter code is a valid Shuangpin syllable (e.g. `sj -> san`, `xq -> xiu`).
+                var insertAt = min(matchesValidShuangpinSyllable ? 3 : 1, augDisp.count)
+                for (mIdx, dispText) in dispMacros.enumerated() where !augDisp.contains(where: { $0.text == dispText }) {
+                    let canonText = mIdx < canonMacros.count ? canonMacros[mIdx] : dispText
+                    let dispCand = LokeyCandidate(
+                        text: dispText,
+                        consumedInputCount: 2,
+                        matchedSyllables: [],
+                        scoreQ8: -260,
+                        kind: .userPhrase
+                    )
+                    let canonCand = (canonText == dispText)
+                        ? dispCand
+                        : LokeyCandidate(
+                            text: canonText,
+                            consumedInputCount: 2,
+                            matchedSyllables: [],
+                            scoreQ8: -260,
+                            kind: .userPhrase
+                        )
+                    augDisp.insert(dispCand, at: insertAt)
+                    augCanon.insert(canonCand, at: min(insertAt, augCanon.count))
+                    insertAt += 1
+                }
+                // Re-pin any user-configured `rank >= 2` custom shortcuts for this 2-letter code so date/time macros never push them down.
+                let rankedShortcuts = decoder.userStore
+                    .decodeSnapshot(for: settings.pinyinScheme)
+                    .customShortcuts(forCode: raw2Lower)
+                    .filter { $0.rank >= 2 }
+                for sc in rankedShortcuts {
+                    let desiredIdx = min(max(1, sc.rank - 1), max(0, augDisp.count - 1))
+                    if let curIdx = augDisp.indices.first(where: { idx in
+                        augDisp[idx].text == sc.phrase || (idx < augCanon.count && augCanon[idx].text == sc.phrase)
+                    }), curIdx > desiredIdx {
+                        let movedDisp = augDisp.remove(at: curIdx)
+                        augDisp.insert(movedDisp, at: desiredIdx)
+                        if curIdx < augCanon.count {
+                            let movedCanon = augCanon.remove(at: curIdx)
+                            augCanon.insert(movedCanon, at: min(desiredIdx, augCanon.count))
+                        }
+                    }
+                }
+                currentDecode = DecodeResult(preeditDisplay: currentDecode.preeditDisplay, candidates: augDisp)
+                canonicalCurrentCandidates = augCanon
+            }
+        }
         if !isSecureContext, settings.enableDiagnosticLogging,
            samples.count == 8,
            String(samples.map(\.primaryChar)) == "lokeylog" {
@@ -1653,6 +2122,9 @@ public final class LokeySessionController {
             return !cand.text.utf8.allSatisfy { $0 < 0x80 }
         case .sentence, .lexiconPhrase, .userPhrase, .jianpin:
             if cand.text == "📋输出诊断日志" || cand.text == "📋输出选词样本" { return false }
+            if cand.kind == .userPhrase && cand.matchedSyllables.isEmpty {
+                return false
+            }
             return !cand.text.utf8.allSatisfy { $0 < 0x80 }
         }
     }

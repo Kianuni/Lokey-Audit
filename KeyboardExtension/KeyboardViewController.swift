@@ -627,6 +627,7 @@ public final class KeyboardViewController: UIInputViewController {
     private let expandedGrid = ExpandedCandidateGridView()
     private var emojiKeyboard: EmojiKeyboardView?
     private let calloutBubble = KeyCalloutBubbleView()
+    private let oneHandedPopup = OneHandedSelectorPopupView()
     private let windowAttachmentObserver = WindowAttachmentObserverView(frame: .zero)
     internal let diagnosticTouchSniffer = DiagnosticTouchSnifferGestureRecognizer(target: nil, action: nil)
 
@@ -777,7 +778,20 @@ public final class KeyboardViewController: UIInputViewController {
     private var pendingBaseLexiconReloadDefaults: UserDefaults?
     private var cachedSupplementaryEntries: [(String, String)] = []
     private var lastSupplementaryRefreshUptime: TimeInterval = -100
+    private var autoPairClosingStack: [Character] = []
+    private var isImmediateEmptyAutoPair: Bool = false
+    private static let autoPairClosingMap: [String: Character] = [
+        "（": "）", "(": ")",
+        "《": "》", "「": "」", "『": "』",
+        "【": "】", "[": "]",
+        "｛": "｝", "{": "}",
+        "“": "”", "\"": "\"",
+    ]
     private static let extensionStateIOQueue = DispatchQueue(label: "com.kianuni.lokey.extStateIO", qos: .userInitiated)
+
+    internal static func flushPendingExtensionStateIOForTesting() {
+        extensionStateIOQueue.sync {}
+    }
 
     private var isRunningInExtensionProcess: Bool {
         Bundle.main.bundleURL.pathExtension == "appex"
@@ -987,6 +1001,8 @@ public final class KeyboardViewController: UIInputViewController {
         hasSyncedTraitsForActiveDocument = false
         activeDocumentID = currentDocumentIdentifier()
         composingContextAnchor = ""
+        autoPairClosingStack.removeAll(keepingCapacity: true)
+        isImmediateEmptyAutoPair = false
         let appearBefore = textDocumentProxy.documentContextBeforeInput
         contextTracker.reset(proxyBefore: appearBefore)
         session?.resetTopicMemory()
@@ -1120,6 +1136,8 @@ public final class KeyboardViewController: UIInputViewController {
         activeDocumentID = nil
         activeDocumentGeneration &+= 1
         composingContextAnchor = ""
+        autoPairClosingStack.removeAll(keepingCapacity: true)
+        isImmediateEmptyAutoPair = false
         contextTracker.reset(proxyBefore: nil)
         session?.resetTopicMemory()
         session?.notifyContextBreak()
@@ -1375,6 +1393,8 @@ public final class KeyboardViewController: UIInputViewController {
             return
         }
         super.selectionDidChange(textInput)
+        autoPairClosingStack.removeAll(keepingCapacity: true)
+        isImmediateEmptyAutoPair = false
         contextTracker.recordCursorMove()
         scheduleContextReconciliation(generation: contextTracker.editGeneration, delay: 0.08)
     }
@@ -1439,6 +1459,8 @@ public final class KeyboardViewController: UIInputViewController {
             markedTextCoalescer.resetFlushedMarkedText()
             lastMarkedTextSent = ""
             composingContextAnchor = ""
+            autoPairClosingStack.removeAll(keepingCapacity: true)
+            isImmediateEmptyAutoPair = false
             contextTracker.reset(proxyBefore: nil)
             session?.resetComposing()
             session?.resetTopicMemory()
@@ -1523,6 +1545,10 @@ public final class KeyboardViewController: UIInputViewController {
             proxyBefore: liveBefore,
             isComposing: isComposing
         )
+        if didBreak || didSwitchDoc || (liveBefore ?? "").isEmpty {
+            autoPairClosingStack.removeAll(keepingCapacity: true)
+            isImmediateEmptyAutoPair = false
+        }
         if didBreak || didSwitchDoc {
             if didSwitchDoc {
                 session?.resetTopicMemory()
@@ -1657,7 +1683,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func refreshSupplementaryLexiconIfNeeded(force: Bool = false) {
         let now = ProcessInfo.processInfo.systemUptime
-        guard force || (now - lastSupplementaryRefreshUptime) >= 60.0 else { return }
+        guard force || (now - lastSupplementaryRefreshUptime) >= 10.0 else { return }
         lastSupplementaryRefreshUptime = now
         requestSupplementaryLexicon { [weak self] uiLexicon in
             guard unsafeBitCast(uiLexicon, to: AnyObject?.self) != nil else { return }
@@ -1894,6 +1920,9 @@ public final class KeyboardViewController: UIInputViewController {
         LokeyDiagnosticLogger.shared.isEnabled = latest.enableDiagnosticLogging
         LokeySelectionFeedbackLogger.shared.isEnabled = latest.enableSelectionFeedbackLogging
         keyGrid.spaceWatermarkTitle = latest.pinyinScheme.spaceWatermark
+        keyGrid.pinyinScheme = latest.pinyinScheme
+        keyGrid.showShuangpinKeyHints = latest.showShuangpinKeyHints
+        keyGrid.oneHandedMode = latest.oneHandedMode
         keyGrid.enableTopRowNumberSwipe = latest.enableTopRowNumberSwipe
         keyGrid.hapticStrength = latest.hapticStrength
         keyGrid.hapticFeedbackIntensity = latest.hapticFeedbackIntensity
@@ -1901,7 +1930,7 @@ public final class KeyboardViewController: UIInputViewController {
         keyGrid.enableComposingSpaceTrackpad = latest.enableComposingSpaceTrackpad
         keyGrid.hasFullAccess = cachedHasFullAccess
         keyGrid.applyBottomRowLayoutOptions(
-            showPeriodBesideSpace: latest.showPeriodBesideSpace,
+            spaceLeftPunctuation: latest.spaceLeftPunctuation,
             needsGlobeKey: needsGlobeKey ?? keyGrid.needsGlobeKey
         )
         if (session?.isComposing == true || prevScriptMode != latest.chineseScriptMode || prevScheme != latest.pinyinScheme) && !candidateBar.hasActiveTouch {
@@ -1914,6 +1943,7 @@ public final class KeyboardViewController: UIInputViewController {
         keyGrid.translatesAutoresizingMaskIntoConstraints = false
         expandedGrid.translatesAutoresizingMaskIntoConstraints = false
         calloutBubble.translatesAutoresizingMaskIntoConstraints = false
+        oneHandedPopup.translatesAutoresizingMaskIntoConstraints = false
 
         expandedGrid.isHidden = true
 
@@ -1924,6 +1954,7 @@ public final class KeyboardViewController: UIInputViewController {
         view.addSubview(expandedGrid)
         view.addSubview(candidateBar)
         view.addSubview(calloutBubble)
+        view.addSubview(oneHandedPopup)
 
         windowAttachmentObserver.onHierarchyChanged = { [weak self] in
             guard let self else { return }
@@ -1947,6 +1978,7 @@ public final class KeyboardViewController: UIInputViewController {
             }
         }
         keyGrid.calloutBubble = calloutBubble
+        keyGrid.oneHandedPopup = oneHandedPopup
 
         let initialHeight = desiredKeyboardHeight()
         preferredContentSize = CGSize(width: 0, height: initialHeight)
@@ -1981,6 +2013,11 @@ public final class KeyboardViewController: UIInputViewController {
             calloutBubble.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             calloutBubble.topAnchor.constraint(equalTo: view.topAnchor),
             calloutBubble.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            oneHandedPopup.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            oneHandedPopup.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            oneHandedPopup.topAnchor.constraint(equalTo: view.topAnchor),
+            oneHandedPopup.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
 
@@ -2051,6 +2088,7 @@ public final class KeyboardViewController: UIInputViewController {
         ])
         panel.onInsertEmoji = { [weak self] emoji in
             guard let self else { return }
+            self.isImmediateEmptyAutoPair = false
             self.pollSettingsBeforeTouchIfNeeded()
             self.keyGrid.triggerHaptic()
             self.keyGrid.playKeySound(type: .standard)
@@ -2116,6 +2154,7 @@ public final class KeyboardViewController: UIInputViewController {
 
         keyGrid.onLetterTap = { [weak self] ch, normPt, isShifted, seq in
             guard let self else { return }
+            self.isImmediateEmptyAutoPair = false
             guard let session = self.session else {
                 let s = isShifted ? String(ch.uppercased()) : String(ch)
                 LokeyDiagnosticLogger.shared.recordLetterDispositionFast(
@@ -2151,6 +2190,7 @@ public final class KeyboardViewController: UIInputViewController {
 
         keyGrid.onPeriodTap = { [weak self] in
             guard let self else { return }
+            self.isImmediateEmptyAutoPair = false
             let now = ProcessInfo.processInfo.systemUptime
             self.lastUserInteractionUptime = now
             let baseBeforeFlush: String = (!self.lastMarkedTextSent.isEmpty || !self.composingContextAnchor.isEmpty)
@@ -2159,8 +2199,13 @@ public final class KeyboardViewController: UIInputViewController {
             if let flushed = self.session?.flushTopCandidateIfComposing() {
                 let hadActiveMarked = !self.lastMarkedTextSent.isEmpty
                 let ctxBefore = baseBeforeFlush + flushed
-                let p = self.session?.smartPeriodString(contextBefore: ctxBefore) ?? "。"
-                self.session?.notifyContextBreak()
+                let p = self.session?.smartSpaceLeftPunctuationString(contextBefore: ctxBefore) ?? "。"
+                if p == "，" {
+                    self.session?.externalContextBeforeInput = ctxBefore
+                    self.session?.notifyClauseComma()
+                } else {
+                    self.session?.notifyContextBreak()
+                }
                 if hadActiveMarked {
                     self.commitTextReplacingMarkedRange(flushed + p)
                 } else {
@@ -2169,8 +2214,13 @@ public final class KeyboardViewController: UIInputViewController {
                 }
             } else {
                 let ctxBefore = self.effectiveContextBeforeInput()
-                let p = self.session?.smartPeriodString(contextBefore: ctxBefore) ?? "。"
-                self.session?.notifyContextBreak()
+                let p = self.session?.smartSpaceLeftPunctuationString(contextBefore: ctxBefore) ?? "。"
+                if p == "，" {
+                    self.session?.externalContextBeforeInput = ctxBefore
+                    self.session?.notifyClauseComma()
+                } else {
+                    self.session?.notifyContextBreak()
+                }
                 self.insertDocumentTextAndTrackContext(p)
             }
             self.syncModeUI()
@@ -2192,6 +2242,7 @@ public final class KeyboardViewController: UIInputViewController {
 
         keyGrid.onSpaceTap = { [weak self] in
             guard let self else { return }
+            self.isImmediateEmptyAutoPair = false
             self.lastUserInteractionUptime = ProcessInfo.processInfo.systemUptime
             guard let session = self.session else {
                 self.insertDocumentTextAndTrackContext(" ")
@@ -2214,6 +2265,8 @@ public final class KeyboardViewController: UIInputViewController {
 
         keyGrid.onReturnTap = { [weak self] in
             guard let self else { return }
+            self.autoPairClosingStack.removeAll(keepingCapacity: true)
+            self.isImmediateEmptyAutoPair = false
             let now = ProcessInfo.processInfo.systemUptime
             self.lastUserInteractionUptime = now
             guard let session = self.session else {
@@ -2243,6 +2296,8 @@ public final class KeyboardViewController: UIInputViewController {
 
         keyGrid.onMoveCursor = { [weak self] step in
             guard let self else { return }
+            self.autoPairClosingStack.removeAll(keepingCapacity: true)
+            self.isImmediateEmptyAutoPair = false
             if let session = self.session, session.isComposing {
                 let previousCaret = session.preeditCaretUTF16Offset
                 _ = session.moveComposingCursor(by: step)
@@ -2300,13 +2355,60 @@ public final class KeyboardViewController: UIInputViewController {
             self.setExpandedGrid(!self.isCandidateGridExpanded, reason: "顶栏箭头")
         }
 
+        let applyOneHandedSelection: (OneHandedMode) -> Void = { [weak self] targetMode in
+            guard let self else { return }
+            self.pendingGlobeSwitchDeparture = false
+            self.keyGrid.oneHandedMode = targetMode
+            if var updated = self.session?.settings, updated.oneHandedMode != targetMode {
+                updated.oneHandedMode = targetMode
+                self.session?.settings = updated
+                Self.extensionStateIOQueue.async { [weak self] in
+                    updated.save()
+                    let gen = LokeyIPC.settingsGeneration
+                    let mtime = LokeyAppGroup.sharedSettingsModificationTime()
+                    DispatchQueue.main.async { [weak self] in
+                        self?.lastSettingsGeneration = gen
+                        self?.lastLoadedSettingsMTime = mtime
+                    }
+                }
+            }
+        }
+        keyGrid.onRestoreFullWidthTap = {
+            applyOneHandedSelection(.off)
+        }
+        keyGrid.onSelectOneHandedMode = applyOneHandedSelection
+
         // Expanded candidate grid callbacks
+        expandedGrid.filterCatalogProvider = { [weak self] in
+            self?.session?.buildExpandedFilterCatalog()
+        }
         expandedGrid.onSelectCandidate = { [weak self] idx in
             self?.pendingGlobeSwitchDeparture = false
             self?.selectCandidate(at: idx)
         }
+        expandedGrid.onSelectExplicitCandidate = { [weak self] cand, canon in
+            guard let self else { return }
+            self.pendingGlobeSwitchDeparture = false
+            self.isImmediateEmptyAutoPair = false
+            self.renderPendingCandidates()
+            self.lastUserInteractionUptime = ProcessInfo.processInfo.systemUptime
+            self.pollSettingsBeforeTouchIfNeeded()
+            self.keyGrid.triggerHaptic()
+            self.keyGrid.playKeySound(type: .standard)
+            if self.session?.isComposing == true {
+                if !self.candidateBar.isSelectingDisplayedCandidate && !self.expandedGrid.isSelectingDisplayedCandidate {
+                    self.finishCandidateDecoding()
+                }
+                if let res = self.session?.selectExplicitCandidate(cand, canonical: canon) {
+                    self.applyActionResult(res)
+                }
+            }
+        }
         expandedGrid.onDeleteCandidate = { [weak self] idx in
             self?.deleteUserCandidate(at: idx)
+        }
+        expandedGrid.onDeleteExplicitCandidate = { [weak self] cand, canon in
+            self?.deleteExplicitUserCandidate(cand, canonical: canon)
         }
 
         // Emoji keyboard trigger (EmojiKeyboardView is instantiated lazily on first presentation)
@@ -2400,6 +2502,10 @@ public final class KeyboardViewController: UIInputViewController {
                 self.session?.notifyContextBreak()
             }
             let beforeEmpty = (effectiveLiveBefore ?? "").isEmpty
+            if switchedDuringEcho || didBreak || beforeEmpty {
+                self.autoPairClosingStack.removeAll(keepingCapacity: true)
+                self.isImmediateEmptyAutoPair = false
+            }
             if self.cachedEnablesReturnKeyAutomatically && beforeEmpty {
                 self.cachedDocumentHasExternalText = proxy.hasText
             } else {
@@ -2537,6 +2643,46 @@ public final class KeyboardViewController: UIInputViewController {
     private func insertSmartSymbol(_ rawSymbol: String) {
         let wasMomentaryNumericSlide = keyGrid.isCommittingMomentaryNumericSymbol
         let now = ProcessInfo.processInfo.systemUptime
+
+        // Skip-over closing bracket/quote if the user explicitly types the closing half for an active auto-paired bracket
+        // (including when composing Pinyin inside an open auto-paired bracket, e.g. `（` -> `beijing` -> `）` -> `（北京）|`)
+        if session?.settings.enableAutoPairPunctuation == true,
+           let pendingClose = autoPairClosingStack.last,
+           rawSymbol == String(pendingClose) {
+            _ = autoPairClosingStack.popLast()
+            isImmediateEmptyAutoPair = false
+            let closeStr = String(pendingClose)
+            let baseBeforeFlush: String = (!lastMarkedTextSent.isEmpty || !composingContextAnchor.isEmpty)
+                ? composingContextAnchor
+                : contextTracker.cachedContext(at: now)
+            let flushed = session?.flushTopCandidateIfComposing()
+            if let flushed {
+                commitTextReplacingMarkedRange(flushed)
+            }
+            let priorCtx = flushed.map { baseBeforeFlush + $0 } ?? contextTracker.cachedContext(at: now)
+            let gen = contextTracker.recordInsert(closeStr, currentProxyBefore: priorCtx, now: now)
+            session?.notifyContextBreak()
+            writeDocument { [weak self] proxy in
+                self?.noteSelfHostWrite()
+                proxy.adjustTextPosition(byCharacterOffset: 1)
+            }
+            scheduleContextReconciliation(generation: gen)
+            let shouldReturn = wasMomentaryNumericSlide || (session?.shouldAutoReturnToAlphabeticAfterSymbol(
+                rawSymbol,
+                resolvedText: closeStr,
+                contextBefore: priorCtx
+            ) ?? false)
+            syncModeUI()
+            if shouldReturn && keyGrid.page != .alphabetic {
+                keyGrid.scheduleAutoReturnToAlphabetic()
+            } else {
+                refreshCandidateUI()
+            }
+            flushPendingBaseLexiconReloadIfNeeded()
+            return
+        }
+        isImmediateEmptyAutoPair = false
+
         let baseBeforeFlush: String = (!lastMarkedTextSent.isEmpty || !composingContextAnchor.isEmpty)
             ? composingContextAnchor
             : contextTracker.cachedContext(at: now)
@@ -2549,6 +2695,10 @@ public final class KeyboardViewController: UIInputViewController {
             resolvedText: action.textToInsert,
             contextBefore: ctxBefore
         ) ?? false)
+        let autoPairClosing: Character? = (session?.settings.enableAutoPairPunctuation == true)
+            ? Self.autoPairClosingMap[action.textToInsert]
+            : nil
+        let proxyInsertText = autoPairClosing.map { action.textToInsert + String($0) } ?? action.textToInsert
 
         if let flushed {
             let hadActiveMarked = !lastMarkedTextSent.isEmpty
@@ -2562,13 +2712,43 @@ public final class KeyboardViewController: UIInputViewController {
                 session?.notifyContextBreak()
             }
             if hadActiveMarked && remainingDeletes == 0 {
-                commitTextReplacingMarkedRange(trimmedFlushed + action.textToInsert)
+                if autoPairClosing != nil {
+                    markedTextCoalescer.cancel()
+                    let gen = contextTracker.recordInsert(
+                        trimmedFlushed + action.textToInsert,
+                        currentProxyBefore: baseBeforeFlush,
+                        now: now
+                    )
+                    lastMarkedTextSent = ""
+                    markedTextCoalescer.resetFlushedMarkedText(to: "")
+                    lastMarkedTextMutationUptime = now
+                    composingContextAnchor = ""
+                    replaceAndUnmark(trimmedFlushed + proxyInsertText)
+                    writeDocument { [weak self] proxy in
+                        self?.noteSelfHostWrite()
+                        proxy.adjustTextPosition(byCharacterOffset: -1)
+                    }
+                    scheduleContextReconciliation(generation: gen)
+                } else {
+                    commitTextReplacingMarkedRange(trimmedFlushed + action.textToInsert)
+                }
             } else {
                 commitTextReplacingMarkedRange(trimmedFlushed)
                 for _ in 0..<remainingDeletes {
                     deleteDocumentBackwardAndTrackContext()
                 }
-                insertDocumentTextAndTrackContext(action.textToInsert)
+                if autoPairClosing != nil {
+                    let priorContext = contextTracker.cachedContext(at: now)
+                    let gen = contextTracker.recordInsert(action.textToInsert, currentProxyBefore: priorContext, now: now)
+                    writeDocument { [weak self] proxy in
+                        self?.noteSelfHostWrite(count: 2)
+                        proxy.insertText(proxyInsertText)
+                        proxy.adjustTextPosition(byCharacterOffset: -1)
+                    }
+                    scheduleContextReconciliation(generation: gen)
+                } else {
+                    insertDocumentTextAndTrackContext(action.textToInsert)
+                }
             }
         } else {
             if action.deletePreviousCount > 0 {
@@ -2582,7 +2762,25 @@ public final class KeyboardViewController: UIInputViewController {
             } else {
                 session?.notifyContextBreak()
             }
-            insertDocumentTextAndTrackContext(action.textToInsert)
+            if autoPairClosing != nil {
+                let priorContext = contextTracker.cachedContext(at: now)
+                let gen = contextTracker.recordInsert(action.textToInsert, currentProxyBefore: priorContext, now: now)
+                writeDocument { [weak self] proxy in
+                    self?.noteSelfHostWrite(count: 2)
+                    proxy.insertText(proxyInsertText)
+                    proxy.adjustTextPosition(byCharacterOffset: -1)
+                }
+                scheduleContextReconciliation(generation: gen)
+            } else {
+                insertDocumentTextAndTrackContext(action.textToInsert)
+            }
+        }
+        if let autoPairClosing {
+            if autoPairClosingStack.count >= 8 {
+                autoPairClosingStack.removeFirst()
+            }
+            autoPairClosingStack.append(autoPairClosing)
+            isImmediateEmptyAutoPair = true
         }
         syncModeUI()
         if shouldAutoReturn && keyGrid.page != .alphabetic {
@@ -2597,6 +2795,8 @@ public final class KeyboardViewController: UIInputViewController {
         let now = ProcessInfo.processInfo.systemUptime
         lastUserInteractionUptime = now
         guard let session else {
+            autoPairClosingStack.removeAll(keepingCapacity: true)
+            isImmediateEmptyAutoPair = false
             deleteDocumentBackwardAndTrackContext()
             return
         }
@@ -2604,6 +2804,24 @@ public final class KeyboardViewController: UIInputViewController {
         switch res {
         case .passThroughToDocument:
             session.notifyContextBreak()
+            if isImmediateEmptyAutoPair {
+                isImmediateEmptyAutoPair = false
+                if !autoPairClosingStack.isEmpty {
+                    _ = autoPairClosingStack.popLast()
+                }
+                let priorContext = contextTracker.cachedContext(at: now)
+                let gen = contextTracker.recordBackspacePassThrough(currentProxyBefore: priorContext, now: now)
+                writeDocument { [weak self] proxy in
+                    self?.noteSelfHostWrite(count: 3)
+                    proxy.adjustTextPosition(byCharacterOffset: 1)
+                    proxy.deleteBackward()
+                    proxy.deleteBackward()
+                }
+                scheduleContextReconciliation(generation: gen)
+                refreshCandidateUI()
+                return
+            }
+            autoPairClosingStack.removeAll(keepingCapacity: true)
             deleteDocumentBackwardAndTrackContext()
             refreshCandidateUI()
         default:
@@ -2616,6 +2834,7 @@ public final class KeyboardViewController: UIInputViewController {
         lastUserInteractionUptime = now
 
         if wasComposingAtTouchDown || session?.isComposing == true {
+            isImmediateEmptyAutoPair = false
             let clearedPreedit = session?.currentDecode.preeditDisplay ?? ""
             session?.resetComposing()
             session?.notifyContextBreak()
@@ -2635,6 +2854,9 @@ public final class KeyboardViewController: UIInputViewController {
             flushPendingBaseLexiconReloadIfNeeded()
             return
         }
+
+        autoPairClosingStack.removeAll(keepingCapacity: true)
+        isImmediateEmptyAutoPair = false
 
         // The initial down already removed one grapheme. The optimistic length also works
         // when the host has not acknowledged that deletion yet.
@@ -2657,6 +2879,7 @@ public final class KeyboardViewController: UIInputViewController {
     }
 
     private func selectCandidate(at index: Int) {
+        isImmediateEmptyAutoPair = false
         renderPendingCandidates()
         lastUserInteractionUptime = ProcessInfo.processInfo.systemUptime
         pollSettingsBeforeTouchIfNeeded()
@@ -2697,11 +2920,11 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func deleteUserCandidate(at index: Int) {
         pollSettingsBeforeTouchIfNeeded()
-        keyGrid.triggerHaptic()
+        var didDelete = false
 
         if session?.isComposing == true {
             guard let session else { return }
-            _ = session.deleteUserCandidate(at: index)
+            didDelete = session.deleteUserCandidateIfDeletable(at: index)
         } else if index >= 0 && index < currentIdleCandidates.count {
             let item = currentIdleCandidates[index]
             if item.isDeletableUserPhrase {
@@ -2710,8 +2933,21 @@ public final class KeyboardViewController: UIInputViewController {
                 } else {
                     SharedLexiconHolder.userStore.deletePhrase(surface: item.text)
                 }
+                didDelete = true
             }
         }
+        guard didDelete else { return }
+        keyGrid.triggerHaptic()
+        refreshCandidateUI()
+        candidateBar.flashDeletedNotice()
+    }
+
+    private func deleteExplicitUserCandidate(_ candidate: LokeyCandidate, canonical: LokeyCandidate?) {
+        pollSettingsBeforeTouchIfNeeded()
+        guard let session, session.deleteExplicitUserCandidate(candidate, canonical: canonical) else {
+            return
+        }
+        keyGrid.triggerHaptic()
         refreshCandidateUI()
         candidateBar.flashDeletedNotice()
     }
@@ -2820,7 +3056,11 @@ public final class KeyboardViewController: UIInputViewController {
     /// Explicitly flushes any pending coalesced marked text mutation immediately with zero delay.
     /// Used by automated unit/integration test harnesses or explicit flush checkpoints.
     public func flushPendingMarkedText() {
-        deliverPendingDocumentEdits()
+        while !pendingDocumentEdits.isEmpty {
+            documentEditDelivery?.cancel()
+            documentEditDelivery = nil
+            deliverPendingDocumentEdits()
+        }
         finishCandidateDecoding()
         markedTextCoalescer.flushImmediately(proxy: textDocumentProxy)
     }
@@ -3054,6 +3294,7 @@ public final class KeyboardViewController: UIInputViewController {
                 preservingScrollOffset: preservingScrollOffset
             )
             if isCandidateGridExpanded {
+                expandedGrid.setComposingFilterEnabled(isComposing)
                 expandedGrid.update(candidates: activeCandidates, highlightFirst: highlightFirst,
                                     preservingScrollOffset: preservingScrollOffset)
             }
@@ -3097,6 +3338,9 @@ public final class KeyboardViewController: UIInputViewController {
         }
         let displayed = candidateBar.displayedCandidates
         guard !open || !displayed.isEmpty else { return }
+        if open {
+            expandedGrid.setComposingFilterEnabled(session?.isComposing == true)
+        }
         updateGridVisibility(open, reason: reason)
         if open {
             expandedGrid.update(candidates: displayed, highlightFirst: session?.isComposing == true)

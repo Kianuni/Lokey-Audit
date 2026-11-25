@@ -282,8 +282,9 @@ internal final class CandidateGridVerticalScrollView: UIScrollView {
     }
 
     func snapNegativeOverscrollIfIdle() {
-        if !isTracking && !isDragging && !isDecelerating && contentOffset.y < 0.0 {
-            setContentOffset(.zero, animated: false)
+        let minY = -contentInset.top
+        if !isTracking && !isDragging && !isDecelerating && contentOffset.y < minY {
+            setContentOffset(CGPoint(x: 0.0, y: minY), animated: false)
         }
     }
 
@@ -1709,7 +1710,7 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
     }
 
     func flashDeletedNotice() {
-        noticeLabel.text = "已删除该自造词"
+        noticeLabel.text = "已从个人词库移除"
         noticeLabel.isHidden = false
         scrollView.alpha = 0.15
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
@@ -2401,8 +2402,43 @@ final class CandidateBarView: UIView, UIScrollViewDelegate {
 // MARK: - Expanded Full-Area Multi-Row Candidate Grid
 
 final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
+    enum FilterTab: Int, CaseIterable {
+        case all = 0
+        case pinyin = 1
+        case radical = 2
+        case stroke = 3
+
+        var title: String {
+            switch self {
+            case .all: return "全部"
+            case .pinyin: return "拼音"
+            case .radical: return "部首"
+            case .stroke: return "笔画"
+            }
+        }
+    }
+
+    enum StrokeFilterChip: Equatable {
+        case all
+        case bucket(HanziMetadataTable.StrokeBucket)
+        case exact(Int)
+
+        var title: String {
+            switch self {
+            case .all: return "全部"
+            case let .bucket(b): return b.title
+            case let .exact(n): return "\(n)画"
+            }
+        }
+    }
+
     var onSelectCandidate: ((Int) -> Void)?
+    var onSelectExplicitCandidate: ((LokeyCandidate, LokeyCandidate?) -> Void)?
+    var filterCatalogProvider: (() -> LokeySessionController.ExpandedFilterCatalog?)?
     private(set) var isSelectingDisplayedCandidate = false
+    private(set) var showsComposingFilterBar = false
+    private(set) var isFilterBarRevealed = false
+    private(set) var activeFilterTab: FilterTab = .all
     private var scrollTrace: CandidateScrollTrace?
     private var scrollInteractionInProgress = false
     var onInteractionEnded: (() -> Void)?
@@ -2414,13 +2450,21 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         )
         isSelectingDisplayedCandidate = true
         defer { isSelectingDisplayedCandidate = false }
+        if activeFilterTab != .all, index >= 0, index < activeFilteredPairs.count {
+            let pair = activeFilteredPairs[index]
+            if let onSelectExplicitCandidate {
+                onSelectExplicitCandidate(pair.display, pair.canonical)
+                return
+            }
+        }
         onSelectCandidate?(index)
     }
     var onDeleteCandidate: ((Int) -> Void)?
+    var onDeleteExplicitCandidate: ((LokeyCandidate, LokeyCandidate?) -> Void)?
     var headerBarHeight: CGFloat = 0.0 {
         didSet {
             guard abs(oldValue - headerBarHeight) > 0.25 else { return }
-            if visibleCellCount > 0 {
+            if visibleCellCount > 0 || showsComposingFilterBar {
                 let w = layoutChromeFrames()
                 rebuildRowsAndLayoutCells(scrollWidth: w)
             }
@@ -2441,8 +2485,9 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
     }
 
     static let maxLogicalCandidates = 64
-    static let maxRecycledPoolCells = 42
-    private static let initialPrewarmPoolCells = 42
+    static let maxFilteredCandidates = 256
+    static let maxRecycledPoolCells = 54
+    static let initialPrewarmPoolCells = 42
 
     private final class GridPoolButton: UIButton {
         var preferredTitleMidY: CGFloat?
@@ -2461,6 +2506,8 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         }
     }
 
+    private let scrollViewportView = UIView()
+    private let viewportMaskLayer = CALayer()
     private let scrollView = CandidateGridVerticalScrollView()
 
     private var cellButtons: [GridPoolButton] = []
@@ -2487,6 +2534,7 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
     private var lastLaidOutScrollWidth: CGFloat = -1
     private var lastLaidOutHeaderBarHeight: CGFloat = -1
     private var lastLaidOutHighlightsFirst: Bool?
+    private var lastLaidOutUseFlowRow0: Bool?
     private var row0PreferredTitleMidY: CGFloat = 13.9
     private var pendingTouchStartOffsetY: CGFloat = 0
     private var rescuableTap: RescuableGridTap?
@@ -2494,9 +2542,35 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
     private var lastGridCommitUptime: TimeInterval = -10
     private var lastGridBrakeCommitUptime: TimeInterval = -10
     private var lastGridScrollNoteUptime: TimeInterval = 0
+    private var baseUnfilteredCandidates: [LokeyCandidate] = []
+    private var baseHighlightFirst: Bool = false
+    private var cachedFilterCatalog: LokeySessionController.ExpandedFilterCatalog?
+    private var selectedSyllable: String?
+    private var selectedRadicalID: UInt8?
+    private var selectedStrokeChip: StrokeFilterChip = .all
+    private var activeFilteredPairs: [(display: LokeyCandidate, canonical: LokeyCandidate?)] = []
+    private var lastLaidOutTopChromeHeight: CGFloat = 0
+    private var isAdjustingFilterChromeInset = false
+    private var filterHeaderContainer: UIView?
+    private var filterTrackView: UIView?
+    private var filterActivePillView: UIView?
+    private var filterBottomHairline: UIView?
+    private var subFilterHairline: UIView?
+    private var subFilterScrollView: CandidateScrollView?
+    private var subFilterChipButtons: [UIButton] = []
+    private var subFilterChipActions: [() -> Void] = []
+    private var filterTabButtons: [UIButton] = []
+    private lazy var filterSelectionFeedback = UISelectionFeedbackGenerator()
 
     internal var pooledButtonCount: Int { cellButtons.count }
     internal var rowDividerCGColorForTesting: CGColor? { dividers.fillColor }
+    internal var displayedGridCandidateTextsForTesting: [String] { gridCandidates.map(\.text) }
+    internal var isFilterBarRevealedForTesting: Bool { isFilterBarRevealed }
+    internal var topChromeHeightForTesting: CGFloat {
+        let effW = bounds.width > 1.0 ? bounds.width : 440.0
+        let effH = (bounds.height > 1.0 && bounds.height <= 420.0) ? bounds.height : 224.5
+        return currentTopChromeHeight(panelWidth: effW, panelHeight: effH)
+    }
 
     private var currentPillCornerRadius: CGFloat {
         guard headerBarHeight > 0.5 else { return 11.0 }
@@ -2511,6 +2585,7 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
                 scrollInteractionInProgress = false
                 rescuableTap = nil
                 scrollView.resetBrakeTouchTracking()
+                resetFilterStateToAll(rebuildUI: false, collapseHeader: true)
                 LokeyDiagnosticLogger.shared.setScrollInteractionActive(false, owner: self)
             }
         }
@@ -2651,26 +2726,28 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
     /// Pre-warms the compact recycled `UIButton` pool off the critical touch path so the very first
     /// chevron tap opens in `< 0.5ms` with zero `UIButton` / `UILabel` allocations.
     func prewarmPoolIfNeeded() {
-        guard cellButtons.count < Self.initialPrewarmPoolCells || !didPrewarmCJKPool else { return }
+        guard cellButtons.count < Self.initialPrewarmPoolCells || !didPrewarmCJKPool || filterHeaderContainer == nil else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         ensureCellPoolCapacity(Self.initialPrewarmPoolCells)
+        ensureFilterChromeCreated()
         warmCJKGlyphLayoutOnceIfNeeded()
     }
 
     func prewarmPoolIncrementallyIfNeeded(batchSize: Int = 14, shouldContinue: @escaping () -> Bool) {
         guard shouldContinue() else { return }
-        guard cellButtons.count < Self.initialPrewarmPoolCells || !didPrewarmCJKPool else { return }
+        guard cellButtons.count < Self.initialPrewarmPoolCells || !didPrewarmCJKPool || filterHeaderContainer == nil else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let target = min(Self.initialPrewarmPoolCells, cellButtons.count + max(1, batchSize))
         ensureCellPoolCapacity(target)
         if cellButtons.count >= Self.initialPrewarmPoolCells {
+            ensureFilterChromeCreated()
             warmCJKGlyphLayoutOnceIfNeeded()
         }
         CATransaction.commit()
-        if cellButtons.count < Self.initialPrewarmPoolCells || !didPrewarmCJKPool {
+        if cellButtons.count < Self.initialPrewarmPoolCells || !didPrewarmCJKPool || filterHeaderContainer == nil {
             DispatchQueue.main.async { [weak self] in
                 self?.prewarmPoolIncrementallyIfNeeded(batchSize: batchSize, shouldContinue: shouldContinue)
             }
@@ -2718,16 +2795,578 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         }
     }
 
+    private func effectiveHeaderRowHeight(panelWidth effW: CGFloat, panelHeight effH: CGFloat) -> CGFloat {
+        if headerBarHeight > 0.5 { return headerBarHeight }
+        return (effW > 520.0 && effH < 210.0) ? 36.0 : 44.0
+    }
+
+    private func currentTopChromeHeight(panelWidth effW: CGFloat, panelHeight effH: CGFloat) -> CGFloat {
+        guard showsComposingFilterBar, (isFilterBarRevealed || activeFilterTab != .all) else { return 0.0 }
+        let isCompactLandscape = effW > 520.0 && effH < 210.0
+        let tabRowH = effectiveHeaderRowHeight(panelWidth: effW, panelHeight: effH)
+        let subRowH: CGFloat = (activeFilterTab == .all) ? 0.0 : (isCompactLandscape ? 28.0 : 32.0)
+        return tabRowH + subRowH
+    }
+
+    private func ensureFilterChromeCreated() {
+        guard filterHeaderContainer == nil else { return }
+        let container = UIView()
+        container.clipsToBounds = true
+        container.backgroundColor = KeyboardTheme.hitTestableClearBacking
+
+        let track = UIView()
+        track.layer.cornerCurve = .continuous
+        container.addSubview(track)
+
+        let activePill = UIView()
+        activePill.isUserInteractionEnabled = false
+        activePill.layer.cornerCurve = .continuous
+        activePill.layer.shadowColor = UIColor.black.cgColor
+        activePill.layer.shadowOffset = CGSize(width: 0, height: 1.0)
+        activePill.layer.shadowRadius = 2.0
+        track.addSubview(activePill)
+
+        var tabs: [UIButton] = []
+        for tab in FilterTab.allCases {
+            let btn = UIButton(type: .custom)
+            btn.tag = tab.rawValue
+            btn.setTitle(tab.title, for: .normal)
+            btn.layer.cornerCurve = .continuous
+            btn.isExclusiveTouch = false
+            btn.addTarget(self, action: #selector(handleFilterTabTap(_:)), for: .touchUpInside)
+            track.addSubview(btn)
+            tabs.append(btn)
+        }
+
+        let midLine = UIView()
+        midLine.isHidden = true
+        container.addSubview(midLine)
+
+        let subScroll = CandidateScrollView()
+        subScroll.showsHorizontalScrollIndicator = false
+        subScroll.showsVerticalScrollIndicator = false
+        subScroll.alwaysBounceHorizontal = true
+        subScroll.alwaysBounceVertical = false
+        subScroll.isDirectionalLockEnabled = false
+        subScroll.delaysContentTouches = false
+        subScroll.canCancelContentTouches = true
+        subScroll.isExclusiveTouch = false
+        subScroll.contentInset = UIEdgeInsets(top: 0, left: 8.0, bottom: 0, right: 8.0)
+        KeyboardTheme.disableScrollEdgeEffects(on: subScroll)
+        subScroll.isHidden = true
+        container.addSubview(subScroll)
+
+        let bottomLine = UIView()
+        container.addSubview(bottomLine)
+
+        container.isHidden = true
+        addSubview(container)
+        self.filterHeaderContainer = container
+        self.filterTrackView = track
+        self.filterActivePillView = activePill
+        self.subFilterHairline = midLine
+        self.subFilterScrollView = subScroll
+        self.filterBottomHairline = bottomLine
+        self.filterTabButtons = tabs
+        updateFilterChromeAppearance()
+    }
+
+    func setComposingFilterEnabled(_ enabled: Bool) {
+        guard showsComposingFilterBar != enabled else {
+            if enabled && filterHeaderContainer != nil {
+                updateFilterChromeAppearance()
+            }
+            return
+        }
+        showsComposingFilterBar = enabled
+        if enabled {
+            if isFilterBarRevealed || activeFilterTab != .all {
+                ensureFilterChromeCreated()
+            }
+            if filterHeaderContainer != nil {
+                updateFilterChromeAppearance()
+            }
+        } else {
+            resetFilterStateToAll(rebuildUI: false, collapseHeader: true)
+            filterHeaderContainer?.isHidden = true
+        }
+        lastLaidOutPanelSize = .zero
+        setNeedsLayout()
+    }
+
+    func revealFilterBar(animated: Bool = true, playHaptic: Bool = false) {
+        guard showsComposingFilterBar, !isFilterBarRevealed else { return }
+        rescuableTap = nil
+        ensureFilterChromeCreated()
+        isFilterBarRevealed = true
+        lastLaidOutPanelSize = .zero
+        if playHaptic {
+            filterSelectionFeedback.selectionChanged()
+            filterSelectionFeedback.prepare()
+        }
+        let effW = bounds.width > 1.0 ? bounds.width : 440.0
+        let effH = (bounds.height > 1.0 && bounds.height <= 420.0) ? bounds.height : 224.5
+        let topH = currentTopChromeHeight(panelWidth: effW, panelHeight: effH)
+        _ = layoutChromeFrames()
+        updateFilterChromeAppearance()
+        if !scrollView.isDragging && !scrollView.isDecelerating && scrollView.contentOffset.y < 0.5 && scrollView.contentOffset.y > -topH {
+            scrollView.setContentOffset(CGPoint(x: 0, y: -topH), animated: animated && window != nil)
+        }
+        renderVisibleRows()
+        if animated, window != nil, let header = filterHeaderContainer {
+            header.alpha = 0.0
+            header.transform = CGAffineTransform(translationX: 0, y: -8.0)
+            UIView.animate(withDuration: 0.18, delay: 0, options: [.beginFromCurrentState, .curveEaseOut, .allowUserInteraction]) {
+                header.alpha = 1.0
+                header.transform = .identity
+            }
+        } else {
+            filterHeaderContainer?.alpha = 1.0
+            filterHeaderContainer?.transform = .identity
+        }
+    }
+
+    internal func revealFilterBarForTesting() {
+        revealFilterBar(animated: false, playHaptic: false)
+    }
+
+    internal var subFilterScrollOffsetXForTesting: CGFloat {
+        subFilterScrollView?.contentOffset.x ?? 0.0
+    }
+
+    internal var subFilterRestingOffsetXForTesting: CGFloat {
+        -(subFilterScrollView?.contentInset.left ?? 0.0)
+    }
+
+    internal func setSubFilterScrollOffsetXForTesting(_ x: CGFloat) {
+        subFilterScrollView?.setContentOffset(CGPoint(x: x, y: 0.0), animated: false)
+    }
+
+    private func resetSubFilterScrollOffset() {
+        guard let subScroll = subFilterScrollView else { return }
+        let restingX = -subScroll.contentInset.left
+        if abs(subScroll.contentOffset.x - restingX) > 0.1 || abs(subScroll.contentOffset.y) > 0.1 {
+            subScroll.setContentOffset(CGPoint(x: restingX, y: 0.0), animated: false)
+        }
+    }
+
+    private func resetFilterStateToAll(rebuildUI: Bool, collapseHeader: Bool = false) {
+        activeFilterTab = .all
+        if collapseHeader {
+            isFilterBarRevealed = false
+        }
+        selectedSyllable = nil
+        selectedRadicalID = nil
+        selectedStrokeChip = .all
+        cachedFilterCatalog = nil
+        activeFilteredPairs.removeAll(keepingCapacity: true)
+        resetSubFilterScrollOffset()
+        subFilterScrollView?.isHidden = true
+        subFilterHairline?.isHidden = true
+        if collapseHeader {
+            filterHeaderContainer?.isHidden = true
+            if scrollView.contentInset.top != 0.0 {
+                isAdjustingFilterChromeInset = true
+                scrollView.contentInset = .zero
+                isAdjustingFilterChromeInset = false
+            }
+            lastLaidOutPanelSize = .zero
+        }
+        updateFilterChromeAppearance()
+        if rebuildUI {
+            lastLaidOutPanelSize = .zero
+            applyActiveCandidatesToGrid(preservingScrollOffset: false)
+        }
+    }
+
+    @objc private func handleFilterTabTap(_ sender: UIButton) {
+        guard let nextTab = FilterTab(rawValue: sender.tag) else { return }
+        selectFilterTab(nextTab)
+    }
+
+    internal func selectFilterTabForTesting(_ tab: FilterTab) {
+        selectFilterTab(tab)
+    }
+
+    internal func selectRadicalChipForTesting(label: String) -> Bool {
+        if activeFilterTab != .radical {
+            selectFilterTab(.radical)
+        }
+        guard let idx = subFilterChipButtons.firstIndex(where: { !$0.isHidden && $0.title(for: .normal) == label }),
+              idx < subFilterChipActions.count else {
+            return false
+        }
+        subFilterChipActions[idx]()
+        return true
+    }
+
+    internal func selectStrokeChipForTesting(title: String) -> Bool {
+        if activeFilterTab != .stroke {
+            selectFilterTab(.stroke)
+        }
+        guard let idx = subFilterChipButtons.firstIndex(where: { !$0.isHidden && $0.title(for: .normal) == title }),
+              idx < subFilterChipActions.count else {
+            return false
+        }
+        subFilterChipActions[idx]()
+        return true
+    }
+
+    internal func selectPinyinChipForTesting(syllable: String) -> Bool {
+        if activeFilterTab != .pinyin {
+            selectFilterTab(.pinyin)
+        }
+        guard let idx = subFilterChipButtons.firstIndex(where: { !$0.isHidden && $0.title(for: .normal) == syllable }),
+              idx < subFilterChipActions.count else {
+            return false
+        }
+        subFilterChipActions[idx]()
+        return true
+    }
+
+    private func selectFilterTab(_ nextTab: FilterTab) {
+        if showsComposingFilterBar && !isFilterBarRevealed {
+            ensureFilterChromeCreated()
+            isFilterBarRevealed = true
+        }
+        if activeFilterTab == nextTab {
+            if nextTab != .all {
+                selectedRadicalID = nil
+                selectedStrokeChip = .all
+                if nextTab == .pinyin {
+                    selectedSyllable = resolvedCatalog()?.pinyinOptions.first?.syllable
+                }
+                rebuildSubFilterChips()
+                resetSubFilterScrollOffset()
+                applyActiveCandidatesToGrid(preservingScrollOffset: false)
+            }
+            return
+        }
+        activeFilterTab = nextTab
+        if nextTab == .pinyin && selectedSyllable == nil {
+            selectedSyllable = resolvedCatalog()?.pinyinOptions.first?.syllable
+        }
+        rebuildSubFilterChips()
+        resetSubFilterScrollOffset()
+        updateFilterChromeAppearance()
+        lastLaidOutPanelSize = .zero
+        applyActiveCandidatesToGrid(preservingScrollOffset: false)
+    }
+
+    private func resolvedCatalog() -> LokeySessionController.ExpandedFilterCatalog? {
+        if let cached = cachedFilterCatalog {
+            return cached
+        }
+        let built = filterCatalogProvider?()
+        cachedFilterCatalog = built
+        return built
+    }
+
+    private func updateFilterChromeAppearance() {
+        guard let container = filterHeaderContainer else { return }
+        let dark = traitCollection.userInterfaceStyle == .dark
+        container.backgroundColor = KeyboardTheme.hitTestableClearBacking
+        filterTrackView?.backgroundColor = dark
+            ? UIColor(white: 1.0, alpha: 0.11)
+            : UIColor(white: 0.0, alpha: 0.065)
+        filterActivePillView?.backgroundColor = KeyboardTheme.candidateHighlightPillFill(dark: dark)
+        filterActivePillView?.layer.shadowOpacity = dark ? 0.0 : 0.06
+        filterBottomHairline?.backgroundColor = KeyboardTheme.expandedGridRowDivider(dark: dark)
+        subFilterHairline?.backgroundColor = KeyboardTheme.expandedGridRowDivider(dark: dark)
+
+        let inactiveText = KeyboardTheme.dynamicPrimaryText.withAlphaComponent(0.84)
+        for btn in filterTabButtons {
+            let isSelected = (btn.tag == activeFilterTab.rawValue)
+            btn.titleLabel?.font = .systemFont(ofSize: 14.5, weight: isSelected ? .semibold : .medium)
+            btn.setTitleColor(isSelected ? (dark ? .white : .black) : inactiveText, for: .normal)
+            btn.backgroundColor = .clear
+        }
+        styleSubFilterChips(dark: dark)
+    }
+
+    private func styleSubFilterChips(dark: Bool) {
+        for btn in subFilterChipButtons where !btn.isHidden {
+            let isSelected = btn.isSelected
+            btn.titleLabel?.font = .systemFont(ofSize: 14.0, weight: isSelected ? .semibold : .regular)
+            btn.setTitleColor(isSelected ? (dark ? .white : .black) : KeyboardTheme.dynamicPrimaryText, for: .normal)
+            btn.backgroundColor = isSelected ? KeyboardTheme.candidateHighlightPillFill(dark: dark) : KeyboardTheme.dynamicSubtlePill
+        }
+    }
+
+    @objc private func handleSubFilterChipTap(_ sender: UIButton) {
+        let idx = sender.tag
+        guard idx >= 0, idx < subFilterChipActions.count else { return }
+        subFilterChipActions[idx]()
+    }
+
+    private func rebuildSubFilterChips() {
+        guard showsComposingFilterBar, let subScroll = subFilterScrollView else { return }
+        guard activeFilterTab != .all, let catalog = resolvedCatalog() else {
+            subScroll.isHidden = true
+            subFilterHairline?.isHidden = true
+            return
+        }
+
+        var items: [(title: String, selected: Bool, action: () -> Void)] = []
+        switch activeFilterTab {
+        case .all:
+            break
+        case .pinyin:
+            if selectedSyllable == nil || !catalog.pinyinOptions.contains(where: { $0.syllable == selectedSyllable }) {
+                selectedSyllable = catalog.pinyinOptions.first?.syllable
+            }
+            for opt in catalog.pinyinOptions {
+                let syl = opt.syllable
+                items.append((syl, selectedSyllable == syl, { [weak self] in
+                    guard let self else { return }
+                    self.selectedSyllable = syl
+                    self.rebuildSubFilterChips()
+                    self.applyActiveCandidatesToGrid(preservingScrollOffset: false)
+                }))
+            }
+        case .radical:
+            if let selRad = selectedRadicalID, !catalog.availableRadicals.contains(where: { $0.id == selRad }) {
+                selectedRadicalID = nil
+            }
+            items.append(("全部", selectedRadicalID == nil, { [weak self] in
+                guard let self else { return }
+                self.selectedRadicalID = nil
+                self.rebuildSubFilterChips()
+                self.applyActiveCandidatesToGrid(preservingScrollOffset: false)
+            }))
+            for rad in catalog.availableRadicals {
+                let radID = rad.id
+                items.append((rad.label, selectedRadicalID == radID, { [weak self] in
+                    guard let self else { return }
+                    self.selectedRadicalID = radID
+                    self.rebuildSubFilterChips()
+                    self.applyActiveCandidatesToGrid(preservingScrollOffset: false)
+                }))
+            }
+        case .stroke:
+            switch selectedStrokeChip {
+            case .all:
+                break
+            case let .bucket(b):
+                if !catalog.availableStrokeBuckets.contains(b) { selectedStrokeChip = .all }
+            case let .exact(n):
+                if !catalog.availableExactStrokes.contains(n) { selectedStrokeChip = .all }
+            }
+            items.append(("全部", selectedStrokeChip == .all, { [weak self] in
+                guard let self else { return }
+                self.selectedStrokeChip = .all
+                self.rebuildSubFilterChips()
+                self.applyActiveCandidatesToGrid(preservingScrollOffset: false)
+            }))
+            for bucket in catalog.availableStrokeBuckets {
+                let chip = StrokeFilterChip.bucket(bucket)
+                items.append((chip.title, selectedStrokeChip == chip, { [weak self] in
+                    guard let self else { return }
+                    self.selectedStrokeChip = chip
+                    self.rebuildSubFilterChips()
+                    self.applyActiveCandidatesToGrid(preservingScrollOffset: false)
+                }))
+            }
+            for exactN in catalog.availableExactStrokes.prefix(24) {
+                let chip = StrokeFilterChip.exact(exactN)
+                items.append((chip.title, selectedStrokeChip == chip, { [weak self] in
+                    guard let self else { return }
+                    self.selectedStrokeChip = chip
+                    self.rebuildSubFilterChips()
+                    self.applyActiveCandidatesToGrid(preservingScrollOffset: false)
+                }))
+            }
+        }
+
+        while subFilterChipButtons.count < items.count {
+            let btn = UIButton(type: .custom)
+            btn.layer.cornerRadius = 11.5
+            btn.layer.cornerCurve = .continuous
+            btn.isExclusiveTouch = false
+            btn.addTarget(self, action: #selector(handleSubFilterChipTap(_:)), for: .touchUpInside)
+            subScroll.addSubview(btn)
+            subFilterChipButtons.append(btn)
+        }
+        subFilterChipActions = items.map(\.action)
+
+        let chipFont = UIFont.systemFont(ofSize: 14.0, weight: .medium)
+        let chipAttrs: [NSAttributedString.Key: Any] = [.font: chipFont]
+        let subH: CGFloat = (bounds.width > 520.0 && bounds.height < 210.0) ? 28.0 : 32.0
+        let chipH: CGFloat = subH - 6.0
+        let chipY: CGFloat = (subH - chipH) * 0.5
+        var curX: CGFloat = 0.0
+        for i in 0..<subFilterChipButtons.count {
+            let btn = subFilterChipButtons[i]
+            if i < items.count {
+                let item = items[i]
+                btn.tag = i
+                btn.setTitle(item.title, for: .normal)
+                btn.isSelected = item.selected
+                let textW = ceil((item.title as NSString).size(withAttributes: chipAttrs).width)
+                let w = max(34.0, textW + 18.0)
+                btn.frame = CGRect(x: curX, y: chipY, width: w, height: chipH)
+                btn.isHidden = false
+                curX += w + 6.0
+            } else {
+                btn.isHidden = true
+            }
+        }
+        subScroll.contentSize = CGSize(width: max(0.0, curX - 6.0), height: subH)
+        subScroll.isHidden = false
+        subFilterHairline?.isHidden = false
+        styleSubFilterChips(dark: traitCollection.userInterfaceStyle == .dark)
+    }
+
+    private func buildFilteredPairsForActiveTab() -> [(display: LokeyCandidate, canonical: LokeyCandidate?)] {
+        guard showsComposingFilterBar, activeFilterTab != .all, let catalog = resolvedCatalog() else {
+            return baseUnfilteredCandidates.prefix(Self.maxLogicalCandidates).map { ($0, nil) }
+        }
+        var out: [(display: LokeyCandidate, canonical: LokeyCandidate?)] = []
+        out.reserveCapacity(64)
+        var seenSurfaces = Set<String>()
+
+        switch activeFilterTab {
+        case .all:
+            return baseUnfilteredCandidates.prefix(Self.maxLogicalCandidates).map { ($0, nil) }
+        case .pinyin:
+            let syl = selectedSyllable ?? catalog.pinyinOptions.first?.syllable ?? ""
+            for base in baseUnfilteredCandidates where base.matchedSyllables.first?.lowercased() == syl {
+                if seenSurfaces.insert(base.text).inserted {
+                    out.append((base, nil))
+                    if out.count >= Self.maxFilteredCandidates { return out }
+                }
+            }
+            for item in catalog.charCandidates where item.syllable == syl {
+                if seenSurfaces.insert(item.displayCandidate.text).inserted {
+                    out.append((item.displayCandidate, item.canonicalCandidate))
+                    if out.count >= Self.maxFilteredCandidates { return out }
+                }
+            }
+        case .radical:
+            for item in catalog.charCandidates {
+                if let radID = selectedRadicalID, item.radicalID != radID { continue }
+                if seenSurfaces.insert(item.displayCandidate.text).inserted {
+                    out.append((item.displayCandidate, item.canonicalCandidate))
+                    if out.count >= Self.maxFilteredCandidates { return out }
+                }
+            }
+        case .stroke:
+            for item in catalog.charCandidates {
+                let matches: Bool
+                switch selectedStrokeChip {
+                case .all:
+                    matches = true
+                case let .bucket(b):
+                    matches = b.contains(item.totalStrokes)
+                case let .exact(n):
+                    matches = (item.totalStrokes == n)
+                }
+                guard matches else { continue }
+                if seenSurfaces.insert(item.displayCandidate.text).inserted {
+                    out.append((item.displayCandidate, item.canonicalCandidate))
+                    if out.count >= Self.maxFilteredCandidates { return out }
+                }
+            }
+        }
+        return out
+    }
+
     @discardableResult
     private func layoutChromeFrames() -> CGFloat {
         let effW = bounds.width > 1.0 ? bounds.width : 440.0
         let effH = (bounds.height > 1.0 && bounds.height <= 420.0) ? bounds.height : 224.5
         let targetSize = CGSize(width: effW, height: effH)
         let gridW = max(120.0, effW - (effW >= 260.0 ? 45.5 : 0.0))
+        let topChromeH = currentTopChromeHeight(panelWidth: effW, panelHeight: effH)
 
-        if lastLaidOutPanelSize != targetSize {
+        if lastLaidOutPanelSize != targetSize || abs(lastLaidOutTopChromeHeight - topChromeH) > 0.25 {
             lastLaidOutPanelSize = targetSize
-            scrollView.frame = CGRect(x: 0, y: 0, width: effW, height: effH)
+            lastLaidOutTopChromeHeight = topChromeH
+            let fullFrame = CGRect(x: 0, y: 0, width: effW, height: effH)
+            if scrollViewportView.frame != fullFrame {
+                scrollViewportView.frame = fullFrame
+            }
+            if scrollView.frame != fullFrame {
+                scrollView.frame = fullFrame
+            }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            viewportMaskLayer.frame = CGRect(
+                x: 0,
+                y: topChromeH,
+                width: effW,
+                height: max(1.0, effH - topChromeH)
+            )
+            CATransaction.commit()
+
+            if abs(scrollView.contentInset.top - topChromeH) > 0.25 {
+                let preservedOffset = scrollView.contentOffset
+                isAdjustingFilterChromeInset = true
+                scrollView.contentInset = UIEdgeInsets(top: topChromeH, left: 0, bottom: 0, right: 0)
+                if scrollView.isDragging || scrollView.isDecelerating || preservedOffset.y > 0.5 {
+                    scrollView.contentOffset = preservedOffset
+                }
+                isAdjustingFilterChromeInset = false
+            }
+        }
+
+        if let container = filterHeaderContainer {
+            if topChromeH > 0.5 {
+                container.isHidden = false
+                container.frame = CGRect(x: 0, y: 0, width: effW, height: topChromeH)
+                if subviews.last !== container {
+                    bringSubviewToFront(container)
+                }
+                let isCompactLandscape = effW > 520.0 && effH < 210.0
+                let tabRowH = effectiveHeaderRowHeight(panelWidth: effW, panelHeight: effH)
+                let subRowH = max(0.0, topChromeH - tabRowH)
+
+                let rightReserved: CGFloat = effW >= 260.0 ? 49.0 : 40.0
+                let trackLeft: CGFloat = 8.0
+                let trackW = max(140.0, effW - trackLeft - rightReserved)
+                let trackH: CGFloat = isCompactLandscape ? 28.0 : 34.0
+                let vMetrics = CandidateBarView.computeVerticalMetrics(width: effW, height: tabRowH)
+                let trackY = max(2.0, min(tabRowH - trackH - 2.0, vMetrics.pillCenterY - trackH * 0.5))
+                filterTrackView?.frame = CGRect(x: trackLeft, y: trackY, width: trackW, height: trackH)
+                filterTrackView?.layer.cornerRadius = trackH * 0.5
+
+                let tabCount = CGFloat(max(1, filterTabButtons.count))
+                let innerInset: CGFloat = 2.0
+                let innerW = max(60.0, trackW - innerInset * 2.0)
+                let segW = innerW / tabCount
+                let segH = max(20.0, trackH - innerInset * 2.0)
+                for (idx, btn) in filterTabButtons.enumerated() {
+                    btn.frame = CGRect(
+                        x: innerInset + CGFloat(idx) * segW,
+                        y: innerInset,
+                        width: segW,
+                        height: segH
+                    )
+                    btn.layer.cornerRadius = segH * 0.5
+                }
+                let activeIdx = max(0, min(filterTabButtons.count - 1, activeFilterTab.rawValue))
+                let activePillFrame = CGRect(
+                    x: innerInset + CGFloat(activeIdx) * segW,
+                    y: innerInset,
+                    width: segW,
+                    height: segH
+                )
+                filterActivePillView?.frame = activePillFrame
+                filterActivePillView?.layer.cornerRadius = segH * 0.5
+
+                if subRowH > 0.5 {
+                    subFilterHairline?.frame = CGRect(x: 0, y: tabRowH - 0.5, width: gridW, height: 0.5)
+                    subFilterScrollView?.frame = CGRect(x: 0, y: tabRowH, width: effW, height: subRowH - 0.5)
+                    subFilterHairline?.isHidden = false
+                    subFilterScrollView?.isHidden = false
+                } else {
+                    subFilterHairline?.isHidden = true
+                    subFilterScrollView?.isHidden = true
+                }
+                filterBottomHairline?.frame = CGRect(x: 0, y: topChromeH - 0.5, width: gridW, height: 0.5)
+            } else {
+                container.isHidden = true
+            }
         }
         return gridW
     }
@@ -2742,10 +3381,12 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         let prevSize = lastLaidOutPanelSize
         let w = layoutChromeFrames()
         if visibleCellCount > 0 {
+            let nextUseFlowRow0 = (headerBarHeight > 0.5) && (activeFilterTab == .all)
             if abs(w - lastLaidOutScrollWidth) > 0.5
                 || abs(lastLaidOutPanelSize.height - prevSize.height) > 0.5
                 || abs(headerBarHeight - lastLaidOutHeaderBarHeight) > 0.25
-                || lastLaidOutHighlightsFirst != highlightsFirst {
+                || lastLaidOutHighlightsFirst != highlightsFirst
+                || lastLaidOutUseFlowRow0 != nextUseFlowRow0 {
                 rebuildRowsAndLayoutCells(scrollWidth: w)
             } else {
                 renderVisibleRows()
@@ -2766,6 +3407,7 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         lastAppliedDarkStyle = dark
         backgroundColor = .clear
         dividers.fillColor = dividerColor
+        updateFilterChromeAppearance()
         let pillRadius = currentPillCornerRadius
         for slot in cellButtons.indices {
             let candIdx = slotBoundCand[slot]
@@ -2782,6 +3424,11 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
 
     private func setupViews(prewarmPool: Bool) {
         backgroundColor = .clear
+        scrollViewportView.backgroundColor = .clear
+        viewportMaskLayer.backgroundColor = UIColor.black.cgColor
+        scrollViewportView.layer.mask = viewportMaskLayer
+        addSubview(scrollViewportView)
+
         scrollView.backgroundColor = KeyboardTheme.hitTestableClearBacking
         scrollView.delegate = self
         scrollView.layer.addSublayer(dividers)
@@ -2790,11 +3437,12 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         scrollView.delaysContentTouches = false
         scrollView.canCancelContentTouches = true
         scrollView.isExclusiveTouch = false
+        scrollView.clipsToBounds = true
         KeyboardTheme.disableScrollEdgeEffects(on: scrollView)
         scrollView.onDecelerationBrakeTap = { [weak self] pt in
             self?.handleDecelerationBrakeTap(at: pt)
         }
-        addSubview(scrollView)
+        scrollViewportView.addSubview(scrollView)
 
         _ = layoutChromeFrames()
         if prewarmPool {
@@ -2864,16 +3512,40 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
     }
 
     func update(candidates: [LokeyCandidate], highlightFirst: Bool = true, preservingScrollOffset: Bool = false) {
+        baseUnfilteredCandidates = candidates
+        baseHighlightFirst = highlightFirst
+        cachedFilterCatalog = nil
+        if showsComposingFilterBar && activeFilterTab != .all {
+            rebuildSubFilterChips()
+        }
+        applyActiveCandidatesToGrid(preservingScrollOffset: preservingScrollOffset)
+    }
+
+    private func applyActiveCandidatesToGrid(preservingScrollOffset: Bool) {
         applyTheme()
-        let next = candidates.prefix(Self.maxLogicalCandidates)
+        let effectiveHighlightFirst: Bool
+        let nextSlice: [LokeyCandidate]
+        if showsComposingFilterBar && activeFilterTab != .all {
+            activeFilteredPairs = buildFilteredPairsForActiveTab()
+            nextSlice = activeFilteredPairs.map(\.display)
+            effectiveHighlightFirst = false
+        } else {
+            activeFilteredPairs.removeAll(keepingCapacity: true)
+            nextSlice = Array(baseUnfilteredCandidates.prefix(Self.maxLogicalCandidates))
+            effectiveHighlightFirst = baseHighlightFirst
+        }
         let effW = bounds.width > 1.0 ? bounds.width : 440.0
         let effH = (bounds.height > 1.0 && bounds.height <= 420.0) ? bounds.height : 224.5
+        let topChromeH = currentTopChromeHeight(panelWidth: effW, panelHeight: effH)
+        let nextUseFlowRow0 = (headerBarHeight > 0.5) && (activeFilterTab == .all)
         // Scores and readings can change without changing any cell's layout or action.
-        if highlightsFirst == highlightFirst,
+        if highlightsFirst == effectiveHighlightFirst,
            lastLaidOutPanelSize == CGSize(width: effW, height: effH),
+           abs(lastLaidOutTopChromeHeight - topChromeH) <= 0.25,
            abs(lastLaidOutHeaderBarHeight - headerBarHeight) <= 0.25,
-           gridCandidates.count == next.count,
-           zip(gridCandidates, next).allSatisfy({ old, new in
+           lastLaidOutUseFlowRow0 == nextUseFlowRow0,
+           gridCandidates.count == nextSlice.count,
+           zip(gridCandidates, nextSlice).allSatisfy({ old, new in
                old.text == new.text && old.consumedInputCount == new.consumedInputCount
                    && old.isDeletableUserPhrase == new.isDeletableUserPhrase
            }) { return }
@@ -2883,12 +3555,12 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         defer { CATransaction.commit() }
 
         let previousOffset = scrollView.contentOffset.y
-        if let tap = rescuableTap, !next.indices.contains(tap.index) || next[tap.index].text != tap.title {
+        if let tap = rescuableTap, !nextSlice.indices.contains(tap.index) || nextSlice[tap.index].text != tap.title {
             rescuableTap = nil
         }
 
-        gridCandidates = Array(next)
-        highlightsFirst = highlightFirst
+        gridCandidates = nextSlice
+        highlightsFirst = effectiveHighlightFirst
         visibleCellCount = gridCandidates.count
 
         gridCandidateEmojiFlags.removeAll(keepingCapacity: true)
@@ -2923,8 +3595,9 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         let scrollW = layoutChromeFrames()
         rebuildRowsAndLayoutCells(scrollWidth: scrollW, renderImmediately: false)
 
-        let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
-        let offset = CGPoint(x: 0, y: preservingScrollOffset ? min(max(previousOffset, 0), maxOffset) : 0)
+        let minOffset = -topChromeH
+        let maxOffset = max(minOffset, scrollView.contentSize.height - scrollView.bounds.height)
+        let offset = CGPoint(x: 0, y: preservingScrollOffset ? min(max(previousOffset, minOffset), maxOffset) : minOffset)
         if scrollView.contentOffset != offset || scrollView.isDecelerating {
             scrollView.setContentOffset(offset, animated: false)
         }
@@ -2948,9 +3621,11 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
 
     // Pure Swift width & row packing (`< 15µs` for 64 candidates, zero `UIButton.titleLabel` sizing).
     private func rebuildRowsAndLayoutCells(scrollWidth: CGFloat, renderImmediately: Bool = true) {
+        let useFlowRow0 = (headerBarHeight > 0.5) && (activeFilterTab == .all)
         lastLaidOutScrollWidth = scrollWidth
         lastLaidOutHeaderBarHeight = headerBarHeight
         lastLaidOutHighlightsFirst = highlightsFirst
+        lastLaidOutUseFlowRow0 = useFlowRow0
         rowsModel.removeAll(keepingCapacity: true)
         rowYOrigins.removeAll(keepingCapacity: true)
         rowHeights.removeAll(keepingCapacity: true)
@@ -2974,14 +3649,16 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
             frames.removeSubrange(visibleCellCount..<frames.count)
         }
 
+        let effW = bounds.width > 1.0 ? bounds.width : 440.0
         let effH = (bounds.height > 1.0 && bounds.height <= 420.0) ? bounds.height : 224.5
-        let useFlowRow0 = headerBarHeight > 0.5
+        let canonicalHeaderH = effectiveHeaderRowHeight(panelWidth: effW, panelHeight: effH)
         let headerH: CGFloat = useFlowRow0 ? headerBarHeight : 0.0
-        let bodyH = max(120.0, effH - headerH)
-        let bodyPitch = max(36.0, bodyH / 5.0)
+        let reservedHeaderH: CGFloat = (headerBarHeight > 0.5 || showsComposingFilterBar) ? canonicalHeaderH : 0.0
+        let fullBodyH = max(96.0, effH - reservedHeaderH)
+        let bodyPitch = max(36.0, fullBodyH / 5.0)
         // Align Row 0 identically with `CandidateBarView` (`topInset .. pillBottom` + exact same optical center)
         // so expanding / collapsing produces 0.0pt vertical jump on Row 0 candidates and `#0` composing pill!
-        let row0Metrics = CandidateBarView.computeVerticalMetrics(width: bounds.width, height: headerH)
+        let row0Metrics = CandidateBarView.computeVerticalMetrics(width: bounds.width, height: canonicalHeaderH)
         let pillH: CGFloat = row0Metrics.pillHeight
         let row0TopInset: CGFloat = row0Metrics.topInset
         let row0OpticalY: CGFloat = row0Metrics.opticalCenterY(highlightFirst: highlightsFirst)
@@ -3111,7 +3788,7 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
               frames.count == visibleCellCount else { return }
         let y = max(0, scrollView.contentOffset.y)
         let height = scrollView.bounds.height > 0 ? scrollView.bounds.height : max(42, bounds.height)
-        let visibleBottom = y + height
+        let visibleBottom = max(y + 42, scrollView.contentOffset.y + height)
         let prefetchRows = (scrollInteractionInProgress || y > 1.0) ? 1 : 0
 
         var startRow = 0
@@ -3194,7 +3871,7 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
     @discardableResult
     private func bindCell(at index: Int) -> UIButton {
         let emoji = gridCandidateEmojiFlags[index]
-        let isRow0 = (headerBarHeight > 0.5 && !rowsModel.isEmpty && index < rowsModel[0].count)
+        let isRow0 = (lastLaidOutUseFlowRow0 == true && !rowsModel.isEmpty && index < rowsModel[0].count)
         let targetMidY: CGFloat? = isRow0 ? (emoji ? max(9.5, row0PreferredTitleMidY) : row0PreferredTitleMidY) : nil
         let targetCorner: CGFloat = (index == 0 && highlightsFirst) ? currentPillCornerRadius : 0
 
@@ -3279,7 +3956,27 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         LokeyDiagnosticLogger.shared.setScrollInteractionActive(true, owner: self)
     }
 
+    private func checkAutoRevealFilterBarOnScroll(_ scrollView: UIScrollView) {
+        guard showsComposingFilterBar, !isFilterBarRevealed, !isHidden else { return }
+        let offsetY = scrollView.contentOffset.y
+        // 1. Native pull-down at top (`<= -18pt` overscroll while dragging, or `<= -22pt` programmatic pull)
+        if offsetY <= -18.0 && (isActivelyDraggingGrid || offsetY <= -22.0) {
+            revealFilterBar(animated: window != nil, playHaptic: isActivelyDraggingGrid)
+            return
+        }
+        // 2. Auto-reveal when scrolling down past ~1 screen looking for rare characters
+        let effW = bounds.width > 1.0 ? bounds.width : 440.0
+        let effH = (bounds.height > 1.0 && bounds.height <= 420.0) ? bounds.height : 224.5
+        let headerH = effectiveHeaderRowHeight(panelWidth: effW, panelHeight: effH)
+        let oneScreenThreshold = max(128.0, (effH - headerH) * 0.72)
+        if offsetY >= oneScreenThreshold && scrollView.contentSize.height > effH + 36.0 {
+            revealFilterBar(animated: window != nil, playHaptic: false)
+        }
+    }
+
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if isAdjustingFilterChromeInset { return }
+        checkAutoRevealFilterBarOnScroll(scrollView)
         renderVisibleRows()
         scrollTrace?.moved(scrollView)
         if isActivelyDraggingGrid || scrollView.isDecelerating {
@@ -3291,15 +3988,29 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         }
     }
 
+    func scrollViewWillEndDragging(
+        _ scrollView: UIScrollView,
+        withVelocity velocity: CGPoint,
+        targetContentOffset: UnsafeMutablePointer<CGPoint>
+    ) {
+        let minY = -scrollView.contentInset.top
+        if minY < -0.5, targetContentOffset.pointee.y > minY, targetContentOffset.pointee.y < 0.0 {
+            targetContentOffset.pointee.y = (velocity.y > 0.35) ? 0.0 : minY
+        }
+    }
+
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         scrollTrace?.record(decelerate ? "松手进入惯性" : "松手停稳", scrollView)
         if !decelerate { scrollTrace = nil }
         scrollInteractionInProgress = decelerate
         defer { if !decelerate { onInteractionEnded?() } }
+        let minY = -scrollView.contentInset.top
         if !decelerate {
             LokeyDiagnosticLogger.shared.setScrollInteractionActive(false, owner: self)
-            if scrollView.contentOffset.y < 0.0 {
-                scrollView.setContentOffset(.zero, animated: false)
+            if scrollView.contentOffset.y < minY {
+                scrollView.setContentOffset(CGPoint(x: 0.0, y: minY), animated: false)
+            } else if minY < -0.5 && scrollView.contentOffset.y < 0.0 && scrollView.contentOffset.y > minY {
+                scrollView.setContentOffset(CGPoint(x: 0.0, y: minY), animated: window != nil)
             }
         }
         guard !decelerate, let rescue = rescuableTap else {
@@ -3334,17 +4045,18 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastGridCommitUptime > 0.06 else { return }
         rescuableTap = nil
+        let minY = -scrollView.contentInset.top
         for idx in frames.indices where frames[idx].insetBy(dx: -4.0, dy: -3.0).contains(ptInScroll) {
-            if scrollView.isDecelerating || scrollView.contentOffset.y < 0.0 {
-                scrollView.setContentOffset(CGPoint(x: 0.0, y: max(0.0, scrollView.contentOffset.y)), animated: false)
+            if scrollView.isDecelerating || scrollView.contentOffset.y < minY {
+                scrollView.setContentOffset(CGPoint(x: 0.0, y: max(minY, scrollView.contentOffset.y)), animated: false)
             }
             lastGridCommitUptime = now
             lastGridBrakeCommitUptime = now
             dispatchDisplayedCandidate(idx, source: "惯性点选")
             return
         }
-        if scrollView.contentOffset.y < 0.0 {
-            scrollView.setContentOffset(.zero, animated: false)
+        if scrollView.contentOffset.y < minY {
+            scrollView.setContentOffset(CGPoint(x: 0.0, y: minY), animated: false)
         }
     }
 
@@ -3400,8 +4112,9 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
         }
         let idx = sender.tag
         guard idx >= 0 && idx < visibleCellCount else { return }
-        if scrollView.isDecelerating || scrollView.contentOffset.y < 0.0 {
-            scrollView.setContentOffset(CGPoint(x: 0.0, y: max(0.0, scrollView.contentOffset.y)), animated: false)
+        let minY = -scrollView.contentInset.top
+        if scrollView.isDecelerating || scrollView.contentOffset.y < minY {
+            scrollView.setContentOffset(CGPoint(x: 0.0, y: max(minY, scrollView.contentOffset.y)), animated: false)
         }
         lastGridCommitUptime = now
         dispatchDisplayedCandidate(idx, source: "点击")
@@ -3433,12 +4146,23 @@ final class ExpandedCandidateGridView: UIView, UIScrollViewDelegate {
 
     @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
         guard recognizer.state == .began, !isActivelyDraggingGrid, let btn = recognizer.view as? UIButton else { return }
+        let index = btn.tag
+        guard index >= 0, index < gridCandidates.count else { return }
         didTriggerLongPressDelete = true
         rescuableTap = nil
-        if scrollView.isDecelerating || scrollView.contentOffset.y < 0.0 {
-            scrollView.setContentOffset(CGPoint(x: 0.0, y: max(0.0, scrollView.contentOffset.y)), animated: false)
+        let minY = -scrollView.contentInset.top
+        if scrollView.isDecelerating || scrollView.contentOffset.y < minY {
+            scrollView.setContentOffset(CGPoint(x: 0.0, y: max(minY, scrollView.contentOffset.y)), animated: false)
         }
-        LokeyDiagnosticLogger.shared.recordCandidateBarEventFast(event: .expandedLongPressDelete(btn.tag))
-        onDeleteCandidate?(btn.tag)
+        LokeyDiagnosticLogger.shared.recordCandidateBarEventFast(event: .expandedLongPressDelete(index))
+        if activeFilterTab != .all {
+            guard index < activeFilteredPairs.count else { return }
+            let pair = activeFilteredPairs[index]
+            guard pair.display.isDeletableUserPhrase || pair.canonical?.isDeletableUserPhrase == true else { return }
+            onDeleteExplicitCandidate?(pair.display, pair.canonical)
+            return
+        }
+        guard gridCandidates[index].isDeletableUserPhrase else { return }
+        onDeleteCandidate?(index)
     }
 }

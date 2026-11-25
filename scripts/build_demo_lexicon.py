@@ -8,6 +8,7 @@ Generates minimal, 100% GPL-free binary assets in `Shared/Resources/`:
      zero `=` spoken-reading entries, zero `target-deltas.tsv`/`commit-deltas.tsv`).
   2. `lokey_emoji.bin` (`LEMJ-v1`, ~60–100 common emoji keywords).
   3. `lokey_opencc.bin` (`LOCC-v1`, ~250–600 essential OpenCC mappings).
+  4. `lokey_hanzi_meta.bin` (`LKHM-v1`, ~80 KB CJK radical, stroke & syllable table).
 
 Sources (strictly permissive):
   - rime/rime-pinyin-simp (Apache-2.0)
@@ -1228,6 +1229,40 @@ def compile_demo_opencc(permissive_dir: Optional[Path], out_dir: Path) -> Dict[s
     }
 
 
+def compile_demo_hanzi_meta(permissive_dir: Optional[Path], out_dir: Path) -> Dict[str, int]:
+    out_path = out_dir / "lokey_hanzi_meta.bin"
+    unihan_zip: Optional[Path] = None
+    if permissive_dir is not None:
+        cand = permissive_dir / "unihan" / "Unihan.zip"
+        if cand.exists():
+            unihan_zip = cand
+
+    if unihan_zip is not None:
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import build_hanzi_meta
+
+        payload = build_hanzi_meta.build_binary(unihan_zip)
+        out_path.write_bytes(payload)
+        return {"bytes": len(payload), "rebuilt": 1}
+
+    if out_path.exists():
+        return {"bytes": out_path.stat().st_size, "rebuilt": 0}
+
+    # Minimal valid LKHM v1 fallback if Unihan.zip is unavailable and no prebuilt binary exists
+    char_count = 0x9FFF - 0x4E00 + 1
+    rad_blob = "一".encode("utf-8")
+    offsets = struct.pack("<2H", 0, len(rad_blob))
+    if len(rad_blob) % 2 == 1:
+        rad_blob += b"\x00"
+    header = struct.pack("<4sHHIHH", b"LKHM", 1, 0x4E00, char_count, 1, 0)
+    char_table = bytes([1, 1]) * char_count
+    payload = header + offsets + rad_blob + char_table
+    out_path.write_bytes(payload)
+    return {"bytes": len(payload), "rebuilt": 1}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build minimal permissive demo binaries for Lokey-Audit.")
     parser.add_argument("--permissive-dir", type=Path, default=None, help="Path to permissive upstream sources.")
@@ -1252,6 +1287,7 @@ def main() -> int:
     lex_stats = compile_demo_lexicon(permissive_dir, out_dir)
     emoji_stats = compile_demo_emoji(permissive_dir, out_dir)
     opencc_stats = compile_demo_opencc(permissive_dir, out_dir)
+    hanzi_stats = compile_demo_hanzi_meta(permissive_dir, out_dir)
 
     print(
         f"    demo_lexicon.bin: {lex_stats['bytes']:,} B "
@@ -1265,6 +1301,7 @@ def main() -> int:
         f"(st_chars={opencc_stats['st_chars']}, st_phrases={opencc_stats['st_phrases']}, "
         f"tw_phrases={opencc_stats['tw_phrases']})"
     )
+    print(f"    lokey_hanzi_meta.bin: {hanzi_stats['bytes']:,} B (rebuilt={hanzi_stats['rebuilt']})")
     return 0
 
 
