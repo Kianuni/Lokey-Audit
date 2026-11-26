@@ -273,6 +273,17 @@ public final class LokeySessionController {
     /// Zeroed immediately whenever `isSecureContext` is toggled or `resetTopicMemory()` is called.
     public private(set) var topicMemoryVector: NeuralSentenceScorer.Vec32 = .zero
 
+    /// Platform-independent mirror of `UITextAutocapitalizationType` raw values (`0..3`).
+    public enum AutoCapitalizationMode: Int, Sendable, Equatable {
+        case none = 0
+        case words = 1
+        case sentences = 2
+        case allCharacters = 3
+    }
+
+    /// Host text field's active autocapitalization trait, supplied by `KeyboardViewController`.
+    public var activeAutoCapitalizationMode: AutoCapitalizationMode = .none
+
     /// Live document text immediately preceding the composing insertion point, supplied by `KeyboardViewController`.
     public var externalContextBeforeInput: String? = nil
 
@@ -280,11 +291,142 @@ public final class LokeySessionController {
     public var isSecureContext = false {
         didSet {
             if isSecureContext != oldValue {
+                if isSecureContext {
+                    activeAutoCapitalizationMode = .none
+                }
                 topicMemoryVector = .zero
                 resetComposing()
                 notifyContextBreak()
             }
         }
+    }
+
+    /// Evaluates whether the insertion point after `contextBefore` should auto-capitalize under `mode`.
+    public static func shouldAutoCapitalize(contextBefore: String?, mode: AutoCapitalizationMode) -> Bool {
+        switch mode {
+        case .none:
+            return false
+        case .allCharacters:
+            return true
+        case .words:
+            guard let ctx = contextBefore, !ctx.isEmpty else { return true }
+            guard let last = ctx.last else { return true }
+            if last.isWhitespace || last.isNewline { return true }
+            switch last {
+            case "(", "[", "{", "\"", "'", "“", "‘", "（", "【", "「", "『", "《", "/", "-":
+                return true
+            default:
+                return false
+            }
+        case .sentences:
+            guard let ctx = contextBefore, !ctx.isEmpty else { return true }
+            let chars = Array(ctx)
+            var idx = chars.count - 1
+            var sawSpace = false
+            while idx >= 0 {
+                let ch = chars[idx]
+                if ch == "\n" || ch == "\r" {
+                    return true
+                }
+                if ch == " " || ch == "\t" || ch == "\u{00A0}" || ch == "\u{3000}" {
+                    sawSpace = true
+                    idx -= 1
+                    continue
+                }
+                switch ch {
+                case "\"", "'", "“", "‘", "(", "[", "（", "「", "『", "《":
+                    idx -= 1
+                    continue
+                default:
+                    break
+                }
+                break
+            }
+            if idx < 0 {
+                return true
+            }
+            // Allow closing quotes/brackets immediately following a sentence terminator (e.g. `Hello." ` or `你好。”`).
+            while idx >= 0 {
+                let ch = chars[idx]
+                switch ch {
+                case "\"", "'", "”", "’", ")", "]", "）", "」", "』", "》":
+                    idx -= 1
+                    continue
+                default:
+                    break
+                }
+                break
+            }
+            guard idx >= 0 else { return true }
+            let term = chars[idx]
+            if term == "。" || term == "！" || term == "？" {
+                return true
+            }
+            if (term == "." || term == "!" || term == "?") && sawSpace {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// Applies sentence/word/all-caps auto-capitalization to an English output string while preserving
+    /// branded internal camelCase (e.g. `iPhone`, `macOS`, `eSIM`) and technical tokens (URLs, emails, paths).
+    public static func autoCapitalizeEnglishOutput(_ text: String, mode: AutoCapitalizationMode) -> String {
+        guard !text.isEmpty, mode != .none else { return text }
+        let lower = text.lowercased()
+        if text.contains("@") || text.contains("/") || text.contains("\\") || text.contains("_") || text.contains(":")
+            || lower.hasPrefix("www.") || lower.hasPrefix("http") {
+            return text
+        }
+        switch mode {
+        case .none:
+            return text
+        case .allCharacters:
+            guard text.allSatisfy({ ($0.isASCII && $0.isLetter) || $0 == " " || $0 == "'" || $0 == "-" }) else {
+                return text
+            }
+            return text.uppercased()
+        case .sentences:
+            guard let first = text.first, first.isASCII && first.isLowercase else { return text }
+            if text.dropFirst().contains(where: { $0.isUppercase || $0.isNumber }) {
+                return text
+            }
+            return first.uppercased() + text.dropFirst()
+        case .words:
+            if text.dropFirst().contains(where: { $0.isUppercase || $0.isNumber }) {
+                return text
+            }
+            var out = ""
+            out.reserveCapacity(text.count)
+            var capNext = true
+            for ch in text {
+                if capNext && ch.isASCII && ch.isLowercase {
+                    out.append(ch.uppercased())
+                    capNext = false
+                } else {
+                    out.append(ch)
+                    capNext = (ch == " " || ch == "-")
+                }
+            }
+            return out
+        }
+    }
+
+    private var shouldAutoCapitalizeCurrentComposingEnglish: Bool {
+        guard inputMode == .chineseMixed,
+              !isSecureContext,
+              settings.enableAutoCapitalization,
+              activeAutoCapitalizationMode != .none,
+              pendingSegments.isEmpty else {
+            return false
+        }
+        if samples.contains(where: { $0.primaryChar.isUppercase }) {
+            return false
+        }
+        return Self.shouldAutoCapitalize(
+            contextBefore: externalContextBeforeInput,
+            mode: activeAutoCapitalizationMode
+        )
     }
 
     public func resetTopicMemory() {
@@ -510,16 +652,26 @@ public final class LokeySessionController {
         return .commitText(raw, remaining: currentDecode)
     }
 
-    /// Handles Return key: native iOS Pinyin commits raw English letters when composing, or newline/submit when idle.
+    /// Handles Return key: native iOS Pinyin commits raw English letters when composing (applying
+    /// sentence/word/all-caps auto-capitalization when active), or newline/submit when idle.
     @discardableResult
     public func handleReturn() -> KeyActionResult {
         guard !samples.isEmpty else {
             return .passThroughToDocument
         }
+        let shouldAutoCap = shouldAutoCapitalizeCurrentComposingEnglish
         let raw = String(samples.map(\.primaryChar))
+        let committed: String
+        if shouldAutoCap,
+           !raw.contains("'"),
+           raw.allSatisfy({ $0.isASCII && $0.isLetter }) {
+            committed = Self.autoCapitalizeEnglishOutput(raw, mode: activeAutoCapitalizationMode)
+        } else {
+            committed = raw
+        }
         resetComposing()
         lastCommittedWasChinese = false
-        return .commitText(raw, remaining: currentDecode)
+        return .commitText(committed, remaining: currentDecode)
     }
 
     /// Commits a specific candidate by index from `currentDecode.candidates`.
@@ -1025,6 +1177,21 @@ public final class LokeySessionController {
             }
         }
         return lastCommittedWasChinese ? fullwidth : halfwidth
+    }
+
+    /// Resolves the double-space period shortcut replacement (`"。" ` after Chinese ideographs in Chinese mode,
+    /// or `". "` after ASCII letters/digits), returning `nil` after whitespace, newlines, or existing punctuation.
+    public static func resolveDoubleSpacePeriodReplacement(
+        precedingChar: Character,
+        isChineseMode: Bool
+    ) -> String? {
+        if ViterbiDecoder.isCJKIdeograph(precedingChar) {
+            return isChineseMode ? "。" : ". "
+        }
+        if isASCIILetter(precedingChar) || isASCIIDigit(precedingChar) {
+            return ". "
+        }
+        return nil
     }
 
     private static func isASCIIDigit(_ ch: Character) -> Bool {
@@ -1736,8 +1903,55 @@ public final class LokeySessionController {
         lastRawSimplifiedDecode = rawResult
         lastAppliedScriptMode = settings.chineseScriptMode
         let mapped = applyScriptConversion(to: rawResult)
-        currentDecode = mapped.display
-        canonicalCurrentCandidates = mapped.canonicals
+        if shouldAutoCapitalizeCurrentComposingEnglish && !mapped.display.candidates.isEmpty {
+            var adjustedDisplay: [LokeyCandidate] = []
+            var adjustedCanonical: [LokeyCandidate] = []
+            adjustedDisplay.reserveCapacity(mapped.display.candidates.count)
+            adjustedCanonical.reserveCapacity(mapped.canonicals.count)
+            var seenTexts = Set<String>()
+            seenTexts.reserveCapacity(mapped.display.candidates.count)
+            let capMode = activeAutoCapitalizationMode
+            for idx in mapped.display.candidates.indices {
+                let disp = mapped.display.candidates[idx]
+                let canon = idx < mapped.canonicals.count ? mapped.canonicals[idx] : disp
+                if disp.kind == .english {
+                    let cappedText = Self.autoCapitalizeEnglishOutput(disp.text, mode: capMode)
+                    guard seenTexts.insert(cappedText).inserted else { continue }
+                    if cappedText != disp.text {
+                        adjustedDisplay.append(LokeyCandidate(
+                            text: cappedText,
+                            consumedInputCount: disp.consumedInputCount,
+                            matchedSyllables: disp.matchedSyllables,
+                            scoreQ8: disp.scoreQ8,
+                            kind: disp.kind,
+                            isDeletableUserPhrase: disp.isDeletableUserPhrase,
+                            trailingWord: disp.trailingWord
+                        ))
+                        adjustedCanonical.append(LokeyCandidate(
+                            text: cappedText,
+                            consumedInputCount: canon.consumedInputCount,
+                            matchedSyllables: canon.matchedSyllables,
+                            scoreQ8: canon.scoreQ8,
+                            kind: canon.kind,
+                            isDeletableUserPhrase: canon.isDeletableUserPhrase,
+                            trailingWord: canon.trailingWord
+                        ))
+                    } else {
+                        adjustedDisplay.append(disp)
+                        adjustedCanonical.append(canon)
+                    }
+                } else {
+                    guard seenTexts.insert(disp.text).inserted else { continue }
+                    adjustedDisplay.append(disp)
+                    adjustedCanonical.append(canon)
+                }
+            }
+            currentDecode = DecodeResult(preeditDisplay: mapped.display.preeditDisplay, candidates: adjustedDisplay)
+            canonicalCurrentCandidates = adjustedCanonical
+        } else {
+            currentDecode = mapped.display
+            canonicalCurrentCandidates = mapped.canonicals
+        }
         hasPublishedRanking = true
         needsImmediateCandidateRefresh = true
         if !isSecureContext, settings.enableDateTimeShortcuts, samples.count == 2 {
@@ -2664,6 +2878,12 @@ public struct DocumentContextTracker: Sendable {
             return true
         }
         if !hasText {
+            if !activeMarkedText.isEmpty
+                && composingAnchor.isEmpty
+                && (proxyBefore ?? "").isEmpty
+                && elapsedSinceMarkedMutation <= 1.2 {
+                return false
+            }
             return elapsedSincePartialCommit > 0.35
         }
         if elapsedSincePartialCommit <= 0.35 {

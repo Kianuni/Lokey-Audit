@@ -1304,6 +1304,9 @@ public struct LokeySettings: Codable, Equatable, Sendable {
     public var enableAutoPairPunctuation: Bool
     public var showShuangpinKeyHints: Bool
     public var enableDateTimeShortcuts: Bool
+    public var enableDoubleSpacePeriod: Bool
+    public var enableExpandedCandidateFilter: Bool
+    public var enableAutoCapitalization: Bool
 
     public init(
         hapticStrength: HapticStrength? = nil,
@@ -1322,9 +1325,12 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         pinyinScheme: PinyinScheme = .quanpin,
         enableTopRowNumberSwipe: Bool = false,
         oneHandedMode: OneHandedMode = .off,
-        enableAutoPairPunctuation: Bool = true,
+        enableAutoPairPunctuation: Bool = false,
         showShuangpinKeyHints: Bool = false,
-        enableDateTimeShortcuts: Bool = true
+        enableDateTimeShortcuts: Bool = true,
+        enableDoubleSpacePeriod: Bool = true,
+        enableExpandedCandidateFilter: Bool = true,
+        enableAutoCapitalization: Bool = true
     ) {
         let clamped = min(1.0, max(0.0, hapticFeedbackIntensity))
         self.hapticFeedbackIntensity = clamped
@@ -1362,6 +1368,9 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.enableAutoPairPunctuation = enableAutoPairPunctuation
         self.showShuangpinKeyHints = showShuangpinKeyHints
         self.enableDateTimeShortcuts = enableDateTimeShortcuts
+        self.enableDoubleSpacePeriod = enableDoubleSpacePeriod
+        self.enableExpandedCandidateFilter = enableExpandedCandidateFilter
+        self.enableAutoCapitalization = enableAutoCapitalization
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1385,6 +1394,9 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         case enableAutoPairPunctuation
         case showShuangpinKeyHints
         case enableDateTimeShortcuts
+        case enableDoubleSpacePeriod
+        case enableExpandedCandidateFilter
+        case enableAutoCapitalization
     }
 
     public init(from decoder: Decoder) throws {
@@ -1449,9 +1461,12 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         self.pinyinScheme = try container.decodeIfPresent(PinyinScheme.self, forKey: .pinyinScheme) ?? .quanpin
         self.enableTopRowNumberSwipe = try container.decodeIfPresent(Bool.self, forKey: .enableTopRowNumberSwipe) ?? false
         self.oneHandedMode = try container.decodeIfPresent(OneHandedMode.self, forKey: .oneHandedMode) ?? .off
-        self.enableAutoPairPunctuation = try container.decodeIfPresent(Bool.self, forKey: .enableAutoPairPunctuation) ?? true
+        self.enableAutoPairPunctuation = try container.decodeIfPresent(Bool.self, forKey: .enableAutoPairPunctuation) ?? false
         self.showShuangpinKeyHints = try container.decodeIfPresent(Bool.self, forKey: .showShuangpinKeyHints) ?? false
         self.enableDateTimeShortcuts = try container.decodeIfPresent(Bool.self, forKey: .enableDateTimeShortcuts) ?? true
+        self.enableDoubleSpacePeriod = try container.decodeIfPresent(Bool.self, forKey: .enableDoubleSpacePeriod) ?? true
+        self.enableExpandedCandidateFilter = try container.decodeIfPresent(Bool.self, forKey: .enableExpandedCandidateFilter) ?? true
+        self.enableAutoCapitalization = try container.decodeIfPresent(Bool.self, forKey: .enableAutoCapitalization) ?? true
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1476,6 +1491,9 @@ public struct LokeySettings: Codable, Equatable, Sendable {
         try container.encode(enableAutoPairPunctuation, forKey: .enableAutoPairPunctuation)
         try container.encode(showShuangpinKeyHints, forKey: .showShuangpinKeyHints)
         try container.encode(enableDateTimeShortcuts, forKey: .enableDateTimeShortcuts)
+        try container.encode(enableDoubleSpacePeriod, forKey: .enableDoubleSpacePeriod)
+        try container.encode(enableExpandedCandidateFilter, forKey: .enableExpandedCandidateFilter)
+        try container.encode(enableAutoCapitalization, forKey: .enableAutoCapitalization)
     }
 
     private static let storageKey = "com.kianuni.lokey.settings.v1"
@@ -1641,11 +1659,17 @@ public final class LokeyHapticEngine {
     }
 
     #if canImport(CoreHaptics)
+    private struct PlayerRing {
+        var players: [CHHapticPatternPlayer]
+        var nextIndex: Int = 0
+    }
+
+    private static let playerPoolSizePerBucket = 3
     private var engine: CHHapticEngine?
     private var isEngineRunning = false
     private var engineGeneration: UInt64 = 0
     private var isSuspended = false
-    private var cachedPlayers: [Int: CHHapticPatternPlayer] = [:]
+    private var cachedPlayers: [Int: PlayerRing] = [:]
     private let supportsCoreHaptics: Bool
     #endif
 
@@ -1723,10 +1747,24 @@ public final class LokeyHapticEngine {
     }
 
     /// Plays a key-tap haptic strictly proportional to `intensity` in `0.0 ... 1.0`.
-    /// Dispatches CoreHaptics IPC off the main UI thread so `touchesBegan` returns in `< 0.01 ms`.
-    public func playTap(intensity rawIntensity: Double, avoidCoreHapticsColdStart: Bool = false) {
+    /// Dispatches CoreHaptics IPC off the main UI thread so `touchesBegan` returns in `< 0.01 ms`,
+    /// supporting sub-millisecond hardware `delay` staggering for two-thumb chorded strikes.
+    public func playTap(intensity rawIntensity: Double, avoidCoreHapticsColdStart: Bool = false, delay: TimeInterval = 0.0) {
         let t = min(1.0, max(0.0, rawIntensity))
         guard t > 0.004 else { return }
+        let clampedDelay = min(0.05, max(0.0, delay))
+
+        let dispatchFallback: () -> Void = { [weak self] in
+            if clampedDelay > 0.001 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + clampedDelay) { [weak self] in
+                    self?.playFallbackImpact(normalizedIntensity: t)
+                }
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.playFallbackImpact(normalizedIntensity: t)
+                }
+            }
+        }
 
         #if canImport(CoreHaptics)
         if supportsCoreHaptics && ProcessInfo.processInfo.systemUptime >= coreHapticsCooldownUntilUptime {
@@ -1734,30 +1772,24 @@ public final class LokeyHapticEngine {
                 guard let self else { return }
                 if avoidCoreHapticsColdStart {
                     guard !self.isSuspended, self.isEngineRunning, self.engine != nil else {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.playFallbackImpact(normalizedIntensity: t)
-                        }
+                        dispatchFallback()
                         return
                     }
-                    if !self.playCoreHapticTapOnQueue(normalizedIntensity: t, allowColdStart: false) {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.playFallbackImpact(normalizedIntensity: t)
-                        }
+                    if !self.playCoreHapticTapOnQueue(normalizedIntensity: t, allowColdStart: false, delay: clampedDelay) {
+                        dispatchFallback()
                     }
                     return
                 }
                 self.isSuspended = false
-                if !self.playCoreHapticTapOnQueue(normalizedIntensity: t, allowColdStart: true) {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.playFallbackImpact(normalizedIntensity: t)
-                    }
+                if !self.playCoreHapticTapOnQueue(normalizedIntensity: t, allowColdStart: true, delay: clampedDelay) {
+                    dispatchFallback()
                 }
             }
             return
         }
         #endif
 
-        DispatchQueue.main.async { [weak self] in self?.playFallbackImpact(normalizedIntensity: t) }
+        dispatchFallback()
     }
 
     /// Throttled live preview while the user drags the haptic slider in `Lokey` Host App.
@@ -1855,7 +1887,7 @@ public final class LokeyHapticEngine {
         }
     }
 
-    private func playCoreHapticTapOnQueue(normalizedIntensity t: Double, allowColdStart: Bool = true) -> Bool {
+    private func playCoreHapticTapOnQueue(normalizedIntensity t: Double, allowColdStart: Bool = true, delay: TimeInterval = 0.0) -> Bool {
         guard !isSuspended else { return false }
         if allowColdStart {
             ensureCoreHapticsRunningOnQueue()
@@ -1863,9 +1895,13 @@ public final class LokeyHapticEngine {
         guard !isSuspended, isEngineRunning, let eng = engine else { return false }
 
         let bucket = max(1, min(50, Int((t * 50.0).rounded())))
-        if let existingPlayer = cachedPlayers[bucket] {
+        let startTime: TimeInterval = delay > 0.001 ? (eng.currentTime + delay) : CHHapticTimeImmediate
+        if var ring = cachedPlayers[bucket], !ring.players.isEmpty {
+            let slot = ring.nextIndex % ring.players.count
+            ring.nextIndex = (slot + 1) % ring.players.count
+            cachedPlayers[bucket] = ring
             do {
-                try existingPlayer.start(atTime: CHHapticTimeImmediate)
+                try ring.players[slot].start(atTime: startTime)
                 return true
             } catch {
                 cachedPlayers.removeValue(forKey: bucket)
@@ -1894,6 +1930,16 @@ public final class LokeyHapticEngine {
             let bodyDuration: TimeInterval = 0.010 + 0.014 * u
             events.append(
                 CHHapticEvent(
+                    eventType: .hapticTransient,
+                    parameters: [
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: bodyIntensity * 0.55),
+                        CHHapticEventParameter(parameterID: .hapticSharpness, value: bodySharpness),
+                    ],
+                    relativeTime: 0.003
+                )
+            )
+            events.append(
+                CHHapticEvent(
                     eventType: .hapticContinuous,
                     parameters: [
                         CHHapticEventParameter(parameterID: .hapticIntensity, value: bodyIntensity),
@@ -1907,12 +1953,16 @@ public final class LokeyHapticEngine {
 
         do {
             let pattern = try CHHapticPattern(events: events, parameters: [])
-            let player = try eng.makePlayer(with: pattern)
+            var players: [CHHapticPatternPlayer] = []
+            players.reserveCapacity(Self.playerPoolSizePerBucket)
+            for _ in 0..<Self.playerPoolSizePerBucket {
+                players.append(try eng.makePlayer(with: pattern))
+            }
             if cachedPlayers.count >= 16, cachedPlayers[bucket] == nil, let evictedKey = cachedPlayers.keys.first {
                 cachedPlayers.removeValue(forKey: evictedKey)
             }
-            cachedPlayers[bucket] = player
-            try player.start(atTime: CHHapticTimeImmediate)
+            cachedPlayers[bucket] = PlayerRing(players: players, nextIndex: 1 % players.count)
+            try players[0].start(atTime: startTime)
             return true
         } catch {
             let oldEngine = engine

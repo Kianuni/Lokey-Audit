@@ -70,6 +70,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     var onTouchDownSettingsCheck: (() -> Void)?
     var touchSequence: ((UITouch, UIEvent?) -> UInt64)?
     var onLetterTap: ((Character, CGPoint, Bool, UInt64) -> Void)?
+    var onShiftTap: ((ShiftState) -> Void)?
     var onSymbolTap: ((String) -> Void)?
     var shouldDeferLineBreakDeletion: (() -> Bool)?
     var onBackspaceTap: (() -> Void)?
@@ -320,7 +321,18 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     var spaceTitle: String = ""
 
-    var isComposing: Bool = false
+    var isComposing: Bool = false {
+        didSet {
+            if oldValue != isComposing {
+                if isHandlingTouchDown {
+                    returnKeyNeedsAppearanceRefresh = true
+                    scheduleDeferredAppearanceRefresh()
+                } else {
+                    refreshReturnKeyAppearanceOnly()
+                }
+            }
+        }
+    }
     var enableComposingSpaceTrackpad: Bool = false
 
     private static let audioQueue = DispatchQueue(label: "com.kianuni.lokey.keyAudio", qos: .userInitiated)
@@ -515,7 +527,8 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     private var activeTouches: [UITouch: ActiveTouchState] = [:]
     private var currentlyPressedKeys: Set<Int> = []
     private var lastShiftTapTime: TimeInterval = 0
-    private var lastHapticUptime: TimeInterval = -10
+    private var lastRawHapticTriggerUptime: TimeInterval = -10
+    private var lastScheduledHapticUptime: TimeInterval = -10
     private var lastAudioUptime: TimeInterval = -10
 
     // Spacebar / Shift trackpad state
@@ -625,16 +638,27 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     func triggerHaptic(intensityOverride: Double? = nil, avoidCoreHapticsColdStart: Bool = false) {
         let intensity = intensityOverride ?? hapticFeedbackIntensity
         guard intensity > 0.0 else { return }
+        var staggerDelay: TimeInterval = 0.0
         if intensityOverride == nil {
             let now = ProcessInfo.processInfo.systemUptime
-            if now - lastHapticUptime >= 0 && now - lastHapticUptime < 0.014 {
+            // Guard only against duplicate sub-4ms calls from the same event handler;
+            // stagger genuine 4–14ms two-thumb chorded strikes so the second thumb never drops its haptic pulse.
+            if now - lastRawHapticTriggerUptime >= 0 && now - lastRawHapticTriggerUptime < 0.004 {
                 return
             }
-            lastHapticUptime = now
+            lastRawHapticTriggerUptime = now
+            let minSeparation: TimeInterval = 0.014
+            if lastScheduledHapticUptime > 0 && now < lastScheduledHapticUptime + minSeparation {
+                staggerDelay = min(0.024, (lastScheduledHapticUptime + minSeparation) - now)
+                lastScheduledHapticUptime = now + staggerDelay
+            } else {
+                lastScheduledHapticUptime = now
+            }
         }
         LokeyHapticEngine.shared.playTap(
             intensity: intensity,
-            avoidCoreHapticsColdStart: avoidCoreHapticsColdStart
+            avoidCoreHapticsColdStart: avoidCoreHapticsColdStart,
+            delay: staggerDelay
         )
     }
 
@@ -1559,8 +1583,37 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
     }
 
     private func configureKeyView(_ v: KeycapItemView, role: KeyRole, dark: Bool, pressed: Bool, row: Int = -1, col: Int = -1) {
+        if isTrackpadActive {
+            let blankFill: UIColor
+            switch role {
+            case .letter, .symbol, .smartPeriod, .space:
+                blankFill = KeyboardTheme.letterKeyFill(dark: dark, pressed: false)
+            case .shift, .backspace, .pageSwitch, .globe, .emoji:
+                blankFill = KeyboardTheme.modifierKeyFill(dark: dark, pressed: false)
+            case .returnKey:
+                blankFill = isReturnKeyEnabled
+                    ? KeyboardTheme.modifierKeyFill(dark: dark, pressed: false)
+                    : KeyboardTheme.disabledReturnKeyFill(dark: dark)
+            }
+            v.apply(
+                title: nil,
+                symbolName: nil,
+                customImage: nil,
+                font: Self.letterLowerFont,
+                symbolWeight: .regular,
+                horizontalOffset: 0,
+                verticalOffset: 0,
+                fill: blankFill,
+                foreground: .clear,
+                dark: dark,
+                watermark: nil,
+                subHint: nil
+            )
+            return
+        }
+
         let primaryText = KeyboardTheme.primaryKeyTextColor(dark: dark)
-        let fgPrimary = isTrackpadActive ? primaryText.withAlphaComponent(0.16) : primaryText
+        let fgPrimary = primaryText
 
         switch role {
         case let .letter(ch):
@@ -1746,8 +1799,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             let config = KeyboardTheme.returnKeyConfig(for: returnKeyType)
             if !isReturnKeyEnabled {
                 let disabledFill = KeyboardTheme.disabledReturnKeyFill(dark: dark)
-                let baseDisabledFg = KeyboardTheme.disabledReturnKeyForeground(dark: dark)
-                let fg = isTrackpadActive ? baseDisabledFg.withAlphaComponent(0.16) : baseDisabledFg
+                let fg = KeyboardTheme.disabledReturnKeyForeground(dark: dark)
                 if returnKeyType == .send {
                     v.apply(
                         title: nil,
@@ -1776,12 +1828,26 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                         dark: dark
                     )
                 }
+            } else if isPinyinMode && isComposing {
+                // Native iOS 26 Chinese Pinyin switches Return to neutral "确认" while composing
+                // so tapping Return clearly confirms raw English letters without sending/submitting the field.
+                v.apply(
+                    title: "确认",
+                    symbolName: nil,
+                    customImage: nil,
+                    font: Self.returnTitleRegularFont,
+                    symbolWeight: .regular,
+                    horizontalOffset: 0,
+                    verticalOffset: 0,
+                    fill: KeyboardTheme.modifierKeyFill(dark: dark, pressed: pressed),
+                    foreground: primaryText,
+                    dark: dark
+                )
             } else {
                 let fill = config.isAccent
                     ? KeyboardTheme.accentReturnKeyFill(dark: dark, pressed: pressed)
                     : KeyboardTheme.modifierKeyFill(dark: dark, pressed: pressed)
-                let baseFg: UIColor = config.isAccent ? .white : primaryText
-                let fg = isTrackpadActive ? baseFg.withAlphaComponent(0.16) : baseFg
+                let fg: UIColor = config.isAccent ? .white : primaryText
                 let isSendArrow = (config.symbolName == "arrow.up")
                 let retFont: UIFont
                 if config.title != nil {
@@ -1986,11 +2052,14 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 }
             } else if bestRow == 3 {
                 // Landed on Row 3 (`123`, `emoji`, `space`, `returnKey`): protect Row 2 letters (`z x c v b n m`) on low thumb taps!
-                if point.x >= zFrame.minX - 10.0 && point.x <= mFrame.maxX + 10.0 {
-                    let r3Role = rowItems[3][bestCol].role
+                let r3Role = rowItems[3][bestCol].role
+                let maxProtectedX: CGFloat = (r3Role == .returnKey) ? (mFrame.maxX + 4.0) : (mFrame.maxX + 10.0)
+                if point.x >= zFrame.minX - 10.0 && point.x <= maxProtectedX {
                     let downAllowance: CGFloat
                     switch r3Role {
-                    case .emoji, .returnKey, .pageSwitch:
+                    case .returnKey:
+                        downAllowance = isComposing ? 15.8 : 13.0
+                    case .emoji, .pageSwitch, .space, .smartPeriod:
                         downAllowance = isComposing ? 16.5 : 13.0
                     default:
                         downAllowance = isComposing ? 13.5 : 10.5
@@ -2103,7 +2172,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
             return
         }
         var role = rowItems[hit.row][hit.col].role
-        if role == .returnKey && !isReturnKeyEnabled {
+        if role == .returnKey && !isReturnKeyEnabled && activeTouches.isEmpty {
             LokeyDiagnosticLogger.shared.recordKeyHitFast(
                 touchSeq: seq,
                 roleToken: .staticLabel("回车键"),
@@ -2227,6 +2296,20 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                     LokeyDiagnosticLogger.shared.recordMissedOrCancelledTouchFast(touchSeq: seq, point: pt, reason: .staticReason("切页后回车禁用"))
                     return
                 }
+            }
+            if role == .returnKey && !isReturnKeyEnabled {
+                LokeyDiagnosticLogger.shared.recordKeyHitFast(
+                    touchSeq: seq,
+                    roleToken: .staticLabel("回车键"),
+                    isLetter: false,
+                    isBackspace: false,
+                    row: hit.row,
+                    col: hit.col,
+                    gridPoint: pt,
+                    borderRemapFrom: hit.remappedFrom,
+                    actionStatic: "输入框为空(enablesReturnKeyAutomatically)禁用态忽略"
+                )
+                return
             }
         }
 
@@ -2865,7 +2948,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
 
     private func isCommitOnRolloverRole(_ role: KeyRole) -> Bool {
         switch role {
-        case .letter, .shift, .symbol, .smartPeriod, .space, .pageSwitch, .emoji:
+        case .letter, .shift, .symbol, .smartPeriod, .space, .pageSwitch, .emoji, .returnKey:
             return true
         default:
             return false
@@ -2899,6 +2982,7 @@ final class KeyGridView: UIView, UIInputViewAudioFeedback {
                 shiftState = .lower
             }
             lastShiftTapTime = now
+            onShiftTap?(shiftState)
 
         case .backspace:
             break
